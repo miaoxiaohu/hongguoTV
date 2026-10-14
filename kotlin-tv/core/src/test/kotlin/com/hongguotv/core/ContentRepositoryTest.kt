@@ -5,6 +5,7 @@ import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -12,34 +13,126 @@ import org.junit.Test
 import java.io.IOException
 
 class ContentRepositoryTest {
-    private fun streamRepository(vararg variants: Triple<Int,String,String>) = repository { request ->
-        if(request.url.host=="example.com") {
-            val rows=JSONObject()
-            variants.forEachIndexed { index,(height,codec,url) -> rows.put("video_$index",JSONObject().put("vheight",height).put("codec_type",codec).put("main_url",url)) }
-            JSONObject().put("video_info",JSONObject().put("data",JSONObject().put("video_list",rows))).toString()
-        } else """{"data":{"123":{"video_model":{"fallback_api":"https://example.com/stream"}}}}"""
+    /** What the retired multi_video_model endpoint answers today. */
+    private val REFUSED = """{"code":110001,"message":"未知异常"}"""
+
+    // Captured from a live video_model response; the ciphertext only decrypts with this seed.
+    private val KEY_SEED = "0CTOAF4mtdifakrNt5sx7ANxYgZhW1MmguzeJcs6D3E="
+    private val SPADE_A = "krwc9VC5HcNjvy31ZLgsxma9HPRNjAbxV74b8Ve7KvRguCihoQ=="
+    private val MAIN_URL = "qAABAPdNq0KM5TsIOWwt0Jv4s3l5HGqIhhtwB4AtzaAtPvdhR+ZSyjNbUuS61n6oqlcrcHe//qEIZ8P2tPlRsTuuaOgt1NTU/m9L+qJ2R7Bt5dbJ5Q9kRSJlwODf7Ri3QEGJx9B5JZirp+5HLWx+OkxNMSwoLrcSyBPGD6/GP7SgEtolefySfVfmhJMa7zOfXUOmmSctTz2QoESQLblos5WrvONT6JvxGyH+dlHDTrO3vgtGAHxxu/Y+F3tJpi3ihBhM0cd+XzRvk4YJAE4BzgObWi/jSnVQTlT9BQB3DW9kIujrbz9+x4VOUG2Syj0NTtbYP9obhRMavrzBNwY9IoZJrBHBUxQccYPGNc03D4nv4A4LNViNVKUd+T4XEK97XUhWG/HPTNHooboMfT2e1H5s0XNW6w24ZyLOgBzJQfPkusfmiqSIlqGVuXSP69lTiQ28SWoc0KSScZL86/RxqCWIbmpXdI/EB3YvBy+WdWO/pY76pto8Y/OzkB+CFevCZqP8pTBzqRR37AYDob/BLeYIpyZwc8OsxVObvOpuTXXr0zKioDstY84EPH9nU/j/+2qfpUrem5fq0xrtUv2p5zihPNYOKBk3JL/4u5VHUgXLzsIaH6iaFDbmcLghx3mfImOFJJOhQ6OuS90B/RXmgZstXhu1zOeZDROQj9mJ0RWJzYd5ugxqSWxgH4/wgTJh8Fe6aIKtOcvPQLZxfSND/KxHm9rRIVE0eczb9nT8qpCz06U6UGGPQiPFe1c4R+WsaqnbZF6yC4ri913PdcDOKfd/ZDH1Oe2NLNQHCFcIG0zc3UFi31vURjjH68VIa0q7YdFMRzh2yu+OnTPA52Yco/2B5hLxel6/bjQLhqpQ3YJAzT3CisTXx1IEb6gVBkmMAB8gwzY7bAaTQH6g7vEkkbwnGZJBlFSGEgUQwEF1q22rvIZLdM6iMwGXR1GgVas0a5Fi3g=="
+    private val PLAIN_HOST = "https://v26-reading-videocdn302.qznovelvod.com"
+    private val FALLBACK = "https://vas-lf-x.snssdk.com/video/fplay/1/x"
+    private val MODEL_PATH = "/novel/player/video_model/v1/"
+
+    private fun hex(s: String) = ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+
+    private fun rendition(definition: String, codec: String, mainUrl: String = MAIN_URL, spade: String = SPADE_A) =
+        """{"definition":"$definition","codec_type":"$codec","main_url":"$mainUrl","spade_a":"$spade"}"""
+
+    /** Serves the signed endpoint end to end; anything else is a routing bug. */
+    private fun signedPlayerRepository(videoList: String, seen: MutableList<String> = mutableListOf()) = repository { request ->
+        seen += request.url.encodedPath
+        when (request.url.encodedPath) {
+            MODEL_PATH -> """{"code":0,"data":{"video_model":"{\"fallback_api\":\"$FALLBACK\"}"}}"""
+            "/video/fplay/1/x" -> """{"video_info":{"data":{"key_seed":"$KEY_SEED","video_list":$videoList}}}"""
+            else -> throw AssertionError("unexpected request ${request.url}")
+        }
     }
 
-    @Test fun incompatibleByteVc2DoesNotBecomeAudioOnlyPlayback() {
-        val repo=streamRepository(Triple(720,"bytevc2","https://example.com/unsupported"),Triple(1080,"bytevc1","https://example.com/hevc"))
-        val result=repo.stream("123",720)
-        assertEquals("https://example.com/hevc",result.url)
-        assertEquals("1080P（兼容资源）",result.quality)
+    private fun playerRepository(page: String) = repository { request ->
+        when (request.url.encodedPath) {
+            MODEL_PATH -> REFUSED
+            "/player/456/123" -> page
+            else -> throw AssertionError("unexpected request ${request.url}")
+        }
     }
 
-    @Test fun compatibleLowerQualityWinsBeforeHigherResolutionFallback() {
-        val repo=streamRepository(Triple(720,"bytevc2","https://example.com/unsupported"),Triple(480,"h264","https://example.com/avc"),Triple(1080,"bytevc1","https://example.com/hevc"))
-        assertEquals("480P",repo.stream("123",720).quality)
+    @Test fun streamResolvesTheHevcRenditionFromTheSignedEndpoint() {
+        val repo=signedPlayerRepository("""{"video_1":${rendition("360p","bytevc2")},"video_5":${rendition("1080p","bytevc1")}}""")
+        val result=repo.stream("456","123")
+        // bytevc2 is skipped, so the only survivor is the 1080p ByteVC1/HEVC rendition.
+        assertEquals("1080P",result.quality)
+        // The spade ciphertext must come back as a real CDN URL, not as base64 noise.
+        assertTrue(result.url,result.url.startsWith(PLAIN_HOST))
+        assertTrue(result.url,result.url.contains("mime_type=video_mp4"))
+        assertArrayEquals(hex("33566cff73160f1ec29a3e884732d606"),result.key)
     }
 
-    @Test fun entirelyIncompatibleSourceFailsBeforeStartingAudio() {
-        val repo=streamRepository(Triple(720,"ByteVC2","https://example.com/unsupported"),Triple(480,"bvc2","https://example.com/unsupported2"))
-        assertThrows(IOException::class.java) { repo.stream("123",720) }
+    @Test fun streamAsksTheEndpointThatStillAnswersForATopLevelVideoId() {
+        val bodies=mutableListOf<String>()
+        val repo=repository { request ->
+            if(request.url.encodedPath==MODEL_PATH) {
+                bodies+=Buffer().also { request.body?.writeTo(it) }.readUtf8()
+                """{"code":0,"data":{"video_model":"{\"fallback_api\":\"$FALLBACK\"}"}}"""
+            } else """{"video_info":{"data":{"key_seed":"$KEY_SEED","video_list":{"video_5":${rendition("1080p","bytevc1")}}}}}}"""
+        }
+        repo.stream("456","123")
+        assertEquals(1,bodies.size)
+        assertTrue(bodies.single(),bodies.single().contains(""""video_id":"123""""))
+        // The retired shape is what 110001 came from; it must not creep back in.
+        assertFalse(bodies.single(),bodies.single().contains("mixed_video_id_map"))
     }
 
-    @Test fun legacyMissingCodecLabelKeepsQualityLimit() {
-        val repo=streamRepository(Triple(720,"","https://example.com/legacy"),Triple(1080,"bytevc1","https://example.com/hevc"))
-        assertEquals("720P",repo.stream("123",720).quality)
+    @Test fun streamRefusesRenditionsAndroidCannotExtractAVideoTrackFrom() {
+        val list="""{"video_4":${rendition("720p","bytevc2")},"video_1":${rendition("360p","bytevc2")}}"""
+        val model="""{"code":0,"data":{"video_model":"{\"fallback_api\":\"$FALLBACK\"}"}}"""
+        val info="""{"video_info":{"data":{"key_seed":"$KEY_SEED","video_list":$list}}}"""
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            val payload=if(path==MODEL_PATH) model else if(path=="/video/fplay/1/x") info else ""
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(if(payload.isEmpty()) 404 else 200).message("r").body(payload.toResponseBody()).build()
+        }.build())
+        val e=assertThrows(IOException::class.java) { repo.stream("456","123") }
+        // The signed attempt's own diagnosis is what must reject these, not the public page.
+        assertTrue(e.suppressed.orEmpty().joinToString { it.message.orEmpty() },
+            e.suppressed.orEmpty().any { it.message.orEmpty().contains("没有电视可播放的清晰度") })
+    }
+
+    @Test fun streamTriesTheSignedEndpointBeforeFallingBackToThePublicPage() {
+        val paths=mutableListOf<String>()
+        val repo=repository { request -> paths+=request.url.encodedPath; if(request.url.encodedPath==MODEL_PATH) REFUSED else """{"contentUrl":"https://hongguoduanju.com/video/public/123/360p.mp4"}""" }
+        repo.stream("456","123")
+        assertEquals(listOf(MODEL_PATH,"/player/456/123"),paths)
+    }
+
+    @Test fun streamFallsBackToThePublicPlayerPage() {
+        val repo=playerRepository("""{"contentUrl":"https://hongguoduanju.com/video/public/123/360p.mp4"}""")
+        val result=repo.stream("456","123",1080)
+        assertEquals("https://hongguoduanju.com/video/public/123/360p.mp4",result.url)
+        assertEquals("360P",result.quality)
+        assertNull("public source is not CENC encrypted",result.key)
+    }
+
+    @Test fun streamUnescapesJsonSlashEscapesInEmbeddedUrl() {
+        val repo=playerRepository("""{"contentUrl":"https:\u002F\u002Fhongguoduanju.com\u002Fvideo\u002Fpublic\u002F123\u002F360p.mp4"}""")
+        assertEquals("https://hongguoduanju.com/video/public/123/360p.mp4",repo.stream("456","123").url)
+    }
+
+    @Test fun streamDropsRangeParameterThatWouldTruncatePlayback() {
+        val repo=playerRepository("""{"contentUrl":"https://example.com/v.mp4?a=1&Range=bytes%3D0-1"}""")
+        assertEquals("https://example.com/v.mp4?a=1",repo.stream("456","123").url)
+    }
+
+    @Test fun streamFallsBackToMainUrlAndLabelsOverLimitResolution() {
+        val repo=playerRepository("""{"main_url":"https://hongguoduanju.com/video/public/123/720p.mp4"}""")
+        val result=repo.stream("456","123",480)
+        assertEquals("https://hongguoduanju.com/video/public/123/720p.mp4",result.url)
+        assertEquals("720P（兼容资源）",result.quality)
+    }
+
+    @Test fun playerPageWithoutAnyPlayableUrlIsAnErrorNotSilentAudio() {
+        assertThrows(IOException::class.java) { playerRepository("<html>没有资源</html>").stream("456","123") }
+    }
+
+    @Test fun missingEpisodeExplainsThatOnlyTheFirstThreeAreHosted() {
+        val e=assertThrows(IOException::class.java) { failingRepository(404).stream("456","123") }
+        assertEquals("该来源每部剧只提供前 3 集，本集暂无资源",e.message)
+    }
+
+    @Test fun otherStatusesKeepThePlainHttpError() {
+        val e=assertThrows(IOException::class.java) { failingRepository(503).stream("456","123") }
+        assertEquals("内容请求失败（HTTP 503）",e.message)
     }
 
     private fun repository(clock: () -> Long = System::currentTimeMillis, respond: (Request) -> String) = ContentRepository(
@@ -47,6 +140,13 @@ class ContentRepositoryTest {
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
                 .code(200).message("OK").body(respond(chain.request()).toResponseBody()).build()
         }.build(),clock
+    )
+
+    private fun failingRepository(code: Int) = ContentRepository(
+        OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                .code(code).message("error").body("".toResponseBody()).build()
+        }.build()
     )
 
     private fun rankPayload(page: Int = 1, totalPages: Int = 2) = JSONObject()
@@ -159,37 +259,47 @@ class ContentRepositoryTest {
         assertTrue(page.hasMore)
     }
 
-    @Test fun comicSearchCarriesCursorAndKeepsTypesAndQueriesSeparate() {
-        val requests=mutableListOf<Request>()
-        val repo=repository { request ->
-            requests+=request
-            JSONObject().put("code",0).put("search_tabs",JSONArray().put(searchTab(19,"999")
-                .put("search_id","comic-session").put("passback","comic-cursor").put("next_offset",25))).toString()
-        }
-        repo.search("修仙",1,ContentType.COMIC)
-        repo.search("修仙",2,ContentType.COMIC)
-        assertEquals("comic-session",requests[1].url.queryParameter("search_id"))
-        assertEquals("comic-cursor",requests[1].url.queryParameter("passback"))
-        assertEquals("25",requests[1].url.queryParameter("offset"))
-        assertThrows(SearchSessionExpiredException::class.java) { repo.search("重生",2,ContentType.COMIC) }
-        assertEquals(2,requests.size)
+    private fun searchPage(vararg rows: String) =
+        """<script>_ROUTER_DATA={"loaderData":{"search_(keyword)/page":{"searchList":[${rows.joinToString(",")}]}}};</script>"""
+
+    private fun searchRow(id: String, title: String, episodes: Int = 8) =
+        """{"video_data":{"series_id":"$id","series_title":"$title","episode_cnt":$episodes}}"""
+
+    @Test fun searchReadsSeriesIdFromNestedVideoData() {
+        val repo=repository { searchPage(searchRow("456","测试短剧",12)) }
+        val result=repo.search("测试",1,ContentType.SHORT)
+        assertEquals("456",result.items.single().id)
+        assertEquals("测试短剧",result.items.single().title)
+        assertEquals("全 12 集",result.items.single().badge)
     }
 
-    @Test fun expiredCursorRequestsFreshSearchInsteadOfDuplicateOffsetPage() {
-        var now=0L
-        var requests=0
-        val repo=repository(clock={ now }) {
-            requests++
-            JSONObject().put("code",0).put("search_tabs",JSONArray().put(searchTab(19,"999")
-                .put("search_id","session").put("passback","cursor"))).toString()
+    @Test fun searchNeverAdvertisesANextPageBecauseTheSiteRendersOnlyPageOne() {
+        val paths=mutableListOf<String>()
+        val repo=repository { request ->
+            paths+=request.url.encodedPath
+            assertEquals("1",request.url.queryParameter("page"))
+            searchPage(searchRow("456","测试短剧"))
         }
-        repo.search("修仙",1,ContentType.COMIC)
-        now=300001L
-        assertThrows(SearchSessionExpiredException::class.java) { repo.search("修仙",2,ContentType.COMIC) }
-        assertEquals(1,requests)
-        repo.search("修仙",1,ContentType.COMIC)
-        repo.search("修仙",2,ContentType.COMIC)
-        assertEquals(3,requests)
+        assertFalse(repo.search("测试",1).hasMore)
+        // The public page ignores ?page=, so a second request must never be made for one.
+        assertTrue(repo.search("测试",2).items.isEmpty())
+        assertEquals(1,paths.size)
+    }
+
+    @Test fun comicSearchUsesTheSameWorkingSourceAsShortDrama() {
+        val repo=repository { searchPage(searchRow("999","测试漫剧")) }
+        assertEquals(listOf("999"),repo.search("测试",1,ContentType.COMIC).items.map { it.id })
+    }
+
+    @Test fun searchNeverCallsTheRefusedAppEndpoint() {
+        val hosts=mutableSetOf<String>()
+        val repo=repository { request -> hosts+=request.url.host; searchPage() }
+        repo.search("测试")
+        assertEquals(setOf("hongguoduanju.com"),hosts)
+    }
+
+    @Test fun searchRejectsUnexpectedRouterShape() {
+        assertThrows(IOException::class.java) { repository { "<html>没有数据</html>" }.search("测试") }
     }
 
     @Test fun shortHomeStillUsesCategoryAndStopsOnLastPage() {
@@ -202,46 +312,8 @@ class ContentRepositoryTest {
         assertFalse(result.hasMore)
     }
 
-    private fun searchTab(type: Int,id: String) = JSONObject().put("tab_type",type).put("has_more",true)
-        .put("data",JSONArray().put(JSONObject().put("video_data",JSONArray().put(JSONObject()
-            .put("series_id",id).put("title","测试剧集").put("episode_cnt",8)))))
-
-    @Test fun comicSearchRequestsAndSelectsOnlyComicTab() {
-        var requests=0
-        val repo=repository { request ->
-            requests++
-            assertEquals("19",request.url.queryParameter("tab_type"))
-            assertEquals(if(requests==1) "0" else "20",request.url.queryParameter("offset"))
-            assertEquals("修仙",request.url.queryParameter("query"))
-            JSONObject().put("code",0).put("search_tabs",JSONArray()
-                .put(searchTab(11,"111")).put(searchTab(19,"999"))).toString()
-        }
-        repo.search("修仙",1,ContentType.COMIC)
-        assertEquals(listOf("999"),repo.search("修仙",2,ContentType.COMIC).items.map { it.id })
-    }
-
-    @Test fun emptyComicSearchDoesNotFallBackToShortResults() {
-        var requests=0
-        val repo=repository { requests++; """{"code":0,"search_tabs":[{"tab_type":19,"data":[],"has_more":false}]}""" }
-        assertTrue(repo.search("无结果",1,ContentType.COMIC).items.isEmpty())
-        assertEquals(1,requests)
-    }
-
-    @Test fun missingComicTabDoesNotFallBackToShortResults() {
-        var requests=0
-        val repo=repository { requests++; """{"code":0,"search_tabs":[{"tab_type":11,"data":[]}]}""" }
-        assertThrows(IOException::class.java) { repo.search("修仙",1,ContentType.COMIC) }
-        assertEquals(1,requests)
-    }
-
-    @Test fun shortSearchKeepsWebsiteFallback() {
-        val paths=mutableListOf<String>()
-        val repo=repository { request ->
-            paths+=request.url.encodedPath
-            if(paths.size==1) throw IOException("offline")
-            """<script>_ROUTER_DATA={"loaderData":{"search_page":{"searchList":[{"series_id":"456","series_name":"测试短剧"}]}}}};</script>"""
-        }
-        assertEquals("456",repo.search("短剧",1,ContentType.SHORT).items.single().id)
-        assertEquals(2,paths.size)
+    @Test fun searchSkipsRowsWithoutAUsableSeriesId() {
+        val repo=repository { searchPage("""{"video_data":{"series_title":"没有ID"}}""",searchRow("456","测试短剧"),"""{"name":"只有名字"}""") }
+        assertEquals(listOf("456"),repo.search("测试").items.map { it.id })
     }
 }
