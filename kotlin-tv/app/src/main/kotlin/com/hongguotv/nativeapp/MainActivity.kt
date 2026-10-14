@@ -127,6 +127,8 @@ class MainActivity: Activity() {
     private var catalogFocus=""
     /** 同系列剧查询结果，按 剧id+剧名 缓存，避免来回翻详情页时反复打搜索接口。 */
     private val cachedSeasons=mutableMapOf<String,List<SeasonEntry>>()
+    /** 当前详情页里承载「同系列剧」结果的容器；异步回调用它确认自己没画到别的剧上。 */
+    private var seasonsHolder: LinearLayout?=null
     private data class CatalogState(val page: Int,val items: List<Series>,val hasMore: Boolean,val ranking: ComicRanking?)
     private var ranking: ComicRanking?=null
     private var rankRefresh: View?=null
@@ -740,7 +742,7 @@ class MainActivity: Activity() {
     }
     private fun openDetail(series: Series,resume: Boolean=false,autoplay: Boolean=true) {
         pendingDetail=series; detailAutoplay=autoplay
-        invalidatePage(); releaseCatalogViews(); screen="detail"; directPlayback=resume; detail=null; synopsisExpanded=false
+        invalidatePage(); releaseCatalogViews(); screen="detail"; directPlayback=resume; detail=null; synopsisExpanded=false; seasonsHolder=null
         val body=base(series.title); message(body,"正在加载剧集…")
         work({ repository.detail(series.id) }, { result ->
             detail=result; library.observeFavorite(series.id,result.episodes.size,System.currentTimeMillis(),acknowledge=true)
@@ -782,7 +784,15 @@ class MainActivity: Activity() {
             synopsisButton.text=if(synopsisExpanded) "收起简介" else "完整简介"
             synopsisButton.post { synopsisButton.requestRectangleOnScreen(android.graphics.Rect(0,0,synopsisButton.width,synopsisButton.height),false) }
         }
+        // 放在这里而不是分集区下面：actions 行已经和 播放/收藏/完整简介 串成一条横向焦点链，
+        // 追加进去遥控器左右就能走到；另起一个区块则落在链外，方向键选不中。
+        val cacheKey="seasons:${data.series.id}:${data.series.title}"
+        addButton(actions,if(cachedSeasons.containsKey(cacheKey)) "同系列剧 · 已缓存" else "同系列剧") { loadSeasons(data) }
         content.addView(hero)
+        seasonsHolder=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
+        content.addView(seasonsHolder)
+        // 查过就直接铺开，省得再按一次按钮
+        cachedSeasons[cacheKey]?.let { renderSeasons(seasonsHolder!!,it,data.series.id) }
         val groupRow=row(); groupRow.setPadding(0,dp(3),0,dp(5))
         val maxGroup=data.episodes.lastIndex/20; group=group.coerceIn(0,maxGroup)
         val previous=addButton(groupRow,"‹ 上一组") { if(group>0) { group--; showDetail(true) } }.apply { isEnabled=group>0; isFocusable=group>0; alpha=if(group>0) 1f else .4f }
@@ -799,60 +809,59 @@ class MainActivity: Activity() {
             content.addView(line,lp(-1,dp(49)))
         }
         episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; v.nextFocusDownId=if(i+10<episodes.size) episodes[i+10].id else v.id }
-        addSeasonsSection(content,data)
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
     }
 
     /**
-     * 「同系列剧」区块，按需加载。
+     * 「同系列剧」结果区块，渲染到 hero 正下方的 [seasonsHolder]。
      *
      * 刻意不在 showDetail 里直接发请求：搜索走的也是官网降级路径，而详情页是每个观众必经的一屏，
-     * 不该为锦上添花的内容多担一次网络往返。所以先只渲染一个按钮，用户点了才去查。
+     * 不该为锦上添花的内容多担一次网络往返。按钮点了才查，查过就按剧缓存。
      */
-    private fun addSeasonsSection(content: LinearLayout, data: Detail) {
-        val head=row(); head.setPadding(0,dp(18),0,dp(8))
-        head.addView(text("同系列剧",17f).apply { setTypeface(null,Typeface.BOLD) },lp(-2,-2))
-        content.addView(head)
-        val holder=column(); content.addView(holder)
+    private fun loadSeasons(data: Detail) {
+        val holder=seasonsHolder ?: return
         val currentId=data.series.id
-        fun render(rows: List<SeasonEntry>) {
-            holder.removeAllViews()
-            val others=rows.filter { it.series.id!=currentId }
-            if(others.isEmpty()) {
-                holder.addView(text("暂未找到其它季度",14f,muted)); return
+        // key 里带上剧名，避免改名后串号。
+        val cacheKey="seasons:$currentId:${data.series.title}"
+        cachedSeasons[cacheKey]?.let { renderSeasons(holder,it,currentId); return }
+        holder.removeAllViews(); holder.addView(text("正在查找同系列剧…",14f,muted))
+        work({ repository.seasons(data.series) }, { rows ->
+            cachedSeasons[cacheKey]=rows
+            // 回调可能落在别的剧上，回来时别把结果画到当前页面。
+            if(screen=="detail" && detail?.series?.id==currentId && seasonsHolder===holder) renderSeasons(holder,rows,currentId)
+        }, {
+            if(screen=="detail" && detail?.series?.id==currentId && seasonsHolder===holder) {
+                holder.removeAllViews(); holder.addView(text("暂时查不到同系列剧",14f,muted))
             }
-            holder.addView(text("共 ${others.size} 部其它季度",13f,muted).apply { setPadding(0,0,0,dp(8)) })
-            others.chunked(4).forEach { batch ->
-                val line=row(); line.gravity=Gravity.TOP
-                batch.forEachIndexed { index,entry ->
-                    val card=column(); card.setPadding(dp(4),dp(4),dp(4),dp(6)); focusStyle(card)
-                    card.contentDescription="第 ${entry.season} 季，${entry.series.title}，${entry.series.badge}"
-                    val width=((resources.displayMetrics.widthPixels*.9f-dp(14)*3)/4).toInt()
-                    val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }
-                    card.addView(image,lp(width,((width-dp(8))/TvStyle.POSTER_ASPECT).toInt()))
-                    card.addView(text("第 ${entry.season} 季",13f,accent).apply { maxLines=1; setPadding(dp(3),dp(6),dp(3),0) },lp(-1,-2))
-                    card.addView(text(entry.series.title,13f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,dp(3),0) },lp(-1,-2).apply { weight=1f })
-                    card.addView(text(entry.series.badge,12f,muted).apply { maxLines=1; minLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) },lp(-1,-2))
-                    card.setOnClickListener { openDetail(entry.series) }
-                    card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) loadCover(image,entry.series.cover) }
-                    line.addView(card,lp(0,-1).apply { weight=1f; if(index<batch.size-1) rightMargin=dp(6) })
-                }
-                repeat(4-batch.size) { line.addView(Space(this),lp(0,-1).apply { weight=1f; rightMargin=dp(6) }) }
-                holder.addView(line,lp(-1,-2))
+        })
+    }
+    private fun renderSeasons(holder: LinearLayout, rows: List<SeasonEntry>, currentId: String) {
+        holder.removeAllViews()
+        val others=rows.filter { it.series.id!=currentId }
+        if(others.isEmpty()) { holder.addView(text("暂未找到其它季度",14f,muted)); return }
+        holder.addView(text("同系列剧 · 共 ${others.size} 部其它季度",15f).apply { setTypeface(null,Typeface.BOLD); setPadding(0,dp(14),0,dp(8)) })
+        val cards=mutableListOf<View>()
+        others.chunked(4).forEach { batch ->
+            val line=row(); line.gravity=Gravity.TOP
+            batch.forEachIndexed { index,entry ->
+                val card=column(); card.setPadding(dp(4),dp(4),dp(4),dp(6)); focusStyle(card)
+                card.contentDescription="第 ${entry.season} 季，${entry.series.title}，${entry.series.badge}"
+                val width=((resources.displayMetrics.widthPixels*.9f-dp(14)*3)/4).toInt()
+                val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+                card.addView(image,lp(width,((width-dp(8))/TvStyle.POSTER_ASPECT).toInt()))
+                card.addView(text("第 ${entry.season} 季",13f,accent).apply { maxLines=1; setPadding(dp(3),dp(6),dp(3),0) },lp(-1,-2))
+                card.addView(text(entry.series.title,13f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,dp(3),0) },lp(-1,-2).apply { weight=1f })
+                card.addView(text(entry.series.badge,12f,muted).apply { maxLines=1; minLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) },lp(-1,-2))
+                card.setOnClickListener { openDetail(entry.series) }
+                card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) loadCover(image,entry.series.cover) }
+                line.addView(card,lp(0,-1).apply { weight=1f; if(index<batch.size-1) rightMargin=dp(6) })
+                cards+=card
             }
+            repeat(4-batch.size) { line.addView(Space(this),lp(0,-1).apply { weight=1f; rightMargin=dp(6) }) }
+            holder.addView(line,lp(-1,-2))
         }
-        // 结果按季号缓存，回详情页不必重查；key 里带上剧名，避免改名后串号。
-        val cacheKey="seasons:${data.series.id}:${data.series.title}"
-        cachedSeasons[cacheKey]?.let { render(it); return }
-        val trigger=addButton(head,"查找其它季度") {
-            holder.removeAllViews()
-            holder.addView(text("正在查找同系列剧…",14f,muted))
-            work({ repository.seasons(data.series) }, { rows ->
-                cachedSeasons[cacheKey]=rows
-                if(screen=="detail" && detail?.series?.id==currentId) { holder.removeAllViews(); render(rows) }
-            }, { holder.removeAllViews(); holder.addView(text("暂时查不到同系列剧",14f,muted)) })
-        }
-        trigger.setPadding(dp(12),0,0,0)
+        // 横向焦点链：每行 4 张，和分集区同样的连法，否则遥控器会跳不到卡片上。
+        cards.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%4==0) v.id else cards[i-1].id; v.nextFocusRightId=if(i%4==3 || i==cards.lastIndex) v.id else cards[i+1].id }
     }
     private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
         updater.interrupt()
