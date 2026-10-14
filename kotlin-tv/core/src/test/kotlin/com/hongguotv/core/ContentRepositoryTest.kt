@@ -316,4 +316,54 @@ class ContentRepositoryTest {
         val repo=repository { searchPage("""{"video_data":{"series_title":"没有ID"}}""",searchRow("456","测试短剧"),"""{"name":"只有名字"}""") }
         assertEquals(listOf("456"),repo.search("测试").items.map { it.id })
     }
+
+    @Test fun seasonNumberReadsArabicChineseAndBracketedMarkers() {
+        assertEquals(7,seasonNumber("一梦青玄第七季"))
+        assertEquals(2,seasonNumber("错嫁藏拙天作之合（第二季）"))
+        assertEquals(3,seasonNumber("错嫁藏拙天作之合(第三季)"))
+        assertEquals(4,seasonNumber("某剧【第四季】"))
+        assertEquals(12,seasonNumber("某剧第十二季"))
+        assertEquals(102,seasonNumber("某剧第一百零二季"))
+        assertEquals(20,seasonNumber("某剧第二十季"))
+        assertEquals(null,seasonNumber("错嫁藏拙天作之合"))
+    }
+
+    @Test fun seriesBaseTitleStripsOnlyTheSeasonMarker() {
+        assertEquals("错嫁藏拙天作之合",seriesBaseTitle("错嫁藏拙天作之合（第二季）"))
+        assertEquals("一梦青玄，团宠小师妹一剑毁天灭地",seriesBaseTitle("一梦青玄，团宠小师妹一剑毁天灭地第七季"))
+        assertEquals("某剧",seriesBaseTitle("某剧"))
+    }
+
+    @Test fun seasonsFindsSiblingsAndSortsThemBySeasonNumber() {
+        val repo=repository { searchPage(
+            searchRow("1","错嫁藏拙天作之合（第三季）"),
+            searchRow("2","错嫁藏拙天作之合",99),
+            searchRow("3","错嫁藏拙天作之合（第二季）"),
+        ) }
+        val seasons=repo.seasons(Series("2","错嫁藏拙天作之合"))
+        assertEquals(listOf(1,2,3),seasons.map { it.season })
+        assertEquals(listOf("2","3","1"),seasons.map { it.series.id })
+    }
+
+    @Test fun seasonsTreatsAnUnmarkedTitleAsTheFirstSeason() {
+        val repo=repository { searchPage(searchRow("1","某剧第二季"),searchRow("2","某剧")) }
+        assertEquals(listOf(1,2),repo.seasons(Series("2","某剧")).map { it.season })
+    }
+
+    @Test fun seasonsKeepsSimilarlyNamedShowsApart() {
+        // 「变废为宝」和「捡废为宝」都有第二季，但它们是两部不同的剧，不能合并。
+        val repo=repository { searchPage(searchRow("1","变废为宝：大佬哥哥们抢着捡垃圾第二季"),searchRow("2","捡废为宝：四位大佬蹲我小店打杂第二季"),searchRow("3","变废为宝：大佬哥哥们抢着捡垃圾")) }
+        val seasons=repo.seasons(Series("3","变废为宝：大佬哥哥们抢着捡垃圾"))
+        assertEquals(listOf("3","1"),seasons.map { it.series.id })
+    }
+
+    @Test fun seasonsReturnsEmptyForASingleSeasonShow() {
+        val repo=repository { searchPage(searchRow("1","独播新剧")) }
+        assertTrue(repo.seasons(Series("1","独播新剧")).size==1)
+    }
+
+    @Test fun seasonsSwallowsSearchFailuresInsteadOfSurfacingThem() {
+        val repo=repository { "<html>没有数据</html>" }
+        assertTrue(repo.seasons(Series("1","某剧")).isEmpty())
+    }
 }

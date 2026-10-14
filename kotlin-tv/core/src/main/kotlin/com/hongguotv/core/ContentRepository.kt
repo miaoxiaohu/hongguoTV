@@ -18,6 +18,52 @@ data class Series(val id: String, val title: String, val cover: String = "", val
     companion object { fun fromJson(o: JSONObject) = Series(o.str("id"),o.str("title"),o.str("cover"),o.str("description"),o.str("badge"),o.str("tags")) }
 }
 data class Detail(val series: Series, val episodes: List<String>)
+
+/** One season of a multi-season series, plus the season number parsed out of its title. */
+data class SeasonEntry(val series: Series, val season: Int)
+
+private val SEASON_MARK = Regex("[（(【\\[]?\\s*第\\s*([0-9一二三四五六七八九十百零两]+)\\s*季\\s*[）)】\\]]?")
+private val CN_DIGITS = mapOf('零' to 0,'一' to 1,'二' to 2,'两' to 2,'三' to 3,'四' to 4,'五' to 5,'六' to 6,'七' to 7,'八' to 8,'九' to 9)
+private val EMPTY_BRACKETS = Regex("[（(【\\[]\\s*[）)】\\]]")
+
+/** "第七季" -> 7, "（第二季）" -> 2; null when the title carries no season marker. */
+internal fun seasonNumber(title: String): Int? {
+    val raw = SEASON_MARK.find(title)?.groupValues?.get(1) ?: return null
+    raw.toIntOrNull()?.let { return it.takeIf { n -> n > 0 } }
+    // 中文数字。写法只有「十二」「二十」「一百零二」这类，简繁通用的十/百进位即可。
+    var total = 0
+    var digit = -1          // 尚未遇到进位字前累积的数字
+    var seen = false
+    for (ch in raw) {
+        when {
+            ch == '百' -> {
+                val head = if (digit >= 0) digit else 1     // 「百」前无数字时按「一百」理解
+                total += head * 100
+                digit = -1; seen = true
+            }
+            ch == '十' -> {
+                val head = if (digit >= 0) digit else 1     // 「十二」=12，「二十」=20
+                total += head * 10
+                digit = -1; seen = true
+            }
+            ch in CN_DIGITS -> {
+                val d = CN_DIGITS[ch] ?: return null
+                // 「零」在「一百零二」里只是占位，不占数位；其它数字重复出现则非法。
+                if (d == 0) { seen = true; continue }
+                if (digit >= 0) return null                 // 「一二三」不是合法数字
+                digit = d; seen = true
+            }
+            else -> return null
+        }
+    }
+    if (!seen) return null
+    val n = total + if (digit >= 0) digit else 0
+    return n.takeIf { it > 0 }
+}
+
+/** Strip the season marker so all seasons of one show collapse onto the same base title. */
+internal fun seriesBaseTitle(title: String): String =
+    title.replace(SEASON_MARK, "").replace(EMPTY_BRACKETS, "").replace(Regex("\\s+"), " ").trim()
 data class RankPosition(val rank: Int?, val heat: String)
 data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
 data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null)
@@ -93,6 +139,37 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         if(episodes.isEmpty() || episodes.any { !it.matches(Regex("[0-9]{1,30}")) } || episodes.distinct().size!=episodes.size) throw IOException("分集数据异常")
         return Detail(card(o).copy(id=id),episodes)
     }
+    /**
+     * Find the other seasons of the same show.
+     *
+     * The App shows a 「系列剧」 tab, but no server-side endpoint exposes that relationship: every
+     * `/novel/series/` and `/novel/bookapi/series_*` path answers 404 (verified with a working
+     * control request against `video_model/v1/`), the public detail page carries no series field,
+     * and the reference APK's DEX has no `season`/`sub_series` string at all. Each season is simply
+     * its own `series_id` whose title carries a season marker.
+     *
+     * So this recovers the relationship the only way the remaining data allows: search the base
+     * title and keep whatever normalises onto the same base. That is deliberately conservative —
+     * 「变废为宝…」 and 「捡废为宝…」 are different shows that both have a 第二季, and fuzzy
+     * matching would wrongly merge them, so titles must be identical after the marker is removed.
+     *
+     * Returns the current series' siblings only; it is never empty-throwing, because a lone-season
+     * show is the normal case and must not surface an error.
+     */
+    fun seasons(series: Series): List<SeasonEntry> {
+        if(!series.id.matches(Regex("[0-9]{1,30}"))) return emptyList()
+        val base=seriesBaseTitle(series.title)
+        if(base.isBlank()) return emptyList()
+        val found=mutableListOf<SeasonEntry>()
+        val rows=runCatching { search(base,1).items }.getOrElse { return emptyList() }
+        for(row in rows) {
+            if(seriesBaseTitle(row.title)!=base) continue
+            val number=seasonNumber(row.title) ?: 1   // 无季号者即第一季
+            found+=SeasonEntry(row,number)
+        }
+        return found.distinctBy { it.series.id }.sortedBy { it.season }
+    }
+
     /**
      * Resolve a playable stream, preferring the signed App endpoint.
      *
