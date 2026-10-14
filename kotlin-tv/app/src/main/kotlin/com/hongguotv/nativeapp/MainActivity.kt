@@ -125,6 +125,8 @@ class MainActivity: Activity() {
     private var catalog=emptyList<Series>()
     private var hasMore=false
     private var catalogFocus=""
+    /** 同系列剧查询结果，按 剧id+剧名 缓存，避免来回翻详情页时反复打搜索接口。 */
+    private val cachedSeasons=mutableMapOf<String,List<SeasonEntry>>()
     private data class CatalogState(val page: Int,val items: List<Series>,val hasMore: Boolean,val ranking: ComicRanking?)
     private var ranking: ComicRanking?=null
     private var rankRefresh: View?=null
@@ -797,7 +799,60 @@ class MainActivity: Activity() {
             content.addView(line,lp(-1,dp(49)))
         }
         episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; v.nextFocusDownId=if(i+10<episodes.size) episodes[i+10].id else v.id }
+        addSeasonsSection(content,data)
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
+    }
+
+    /**
+     * 「同系列剧」区块，按需加载。
+     *
+     * 刻意不在 showDetail 里直接发请求：搜索走的也是官网降级路径，而详情页是每个观众必经的一屏，
+     * 不该为锦上添花的内容多担一次网络往返。所以先只渲染一个按钮，用户点了才去查。
+     */
+    private fun addSeasonsSection(content: LinearLayout, data: Detail) {
+        val head=row(); head.setPadding(0,dp(18),0,dp(8))
+        head.addView(text("同系列剧",17f).apply { setTypeface(null,Typeface.BOLD) },lp(-2,-2))
+        content.addView(head)
+        val holder=column(); content.addView(holder)
+        val currentId=data.series.id
+        fun render(rows: List<SeasonEntry>) {
+            holder.removeAllViews()
+            val others=rows.filter { it.series.id!=currentId }
+            if(others.isEmpty()) {
+                holder.addView(text("暂未找到其它季度",14f,muted)); return
+            }
+            holder.addView(text("共 ${others.size} 部其它季度",13f,muted).apply { setPadding(0,0,0,dp(8)) })
+            others.chunked(4).forEach { batch ->
+                val line=row(); line.gravity=Gravity.TOP
+                batch.forEachIndexed { index,entry ->
+                    val card=column(); card.setPadding(dp(4),dp(4),dp(4),dp(6)); focusStyle(card)
+                    card.contentDescription="第 ${entry.season} 季，${entry.series.title}，${entry.series.badge}"
+                    val width=((resources.displayMetrics.widthPixels*.9f-dp(14)*3)/4).toInt()
+                    val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+                    card.addView(image,lp(width,((width-dp(8))/TvStyle.POSTER_ASPECT).toInt()))
+                    card.addView(text("第 ${entry.season} 季",13f,accent).apply { maxLines=1; setPadding(dp(3),dp(6),dp(3),0) },lp(-1,-2))
+                    card.addView(text(entry.series.title,13f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,dp(3),0) },lp(-1,-2).apply { weight=1f })
+                    card.addView(text(entry.series.badge,12f,muted).apply { maxLines=1; minLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) },lp(-1,-2))
+                    card.setOnClickListener { openDetail(entry.series) }
+                    card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) loadCover(image,entry.series.cover) }
+                    line.addView(card,lp(0,-1).apply { weight=1f; if(index<batch.size-1) rightMargin=dp(6) })
+                }
+                repeat(4-batch.size) { line.addView(Space(this),lp(0,-1).apply { weight=1f; rightMargin=dp(6) }) }
+                holder.addView(line,lp(-1,-2))
+            }
+        }
+        // 结果按季号缓存，回详情页不必重查；key 里带上剧名，避免改名后串号。
+        val cacheKey="seasons:${data.series.id}:${data.series.title}"
+        cachedSeasons[cacheKey]?.let { render(it); return }
+        val trigger=addButton(head,"查找其它季度") {
+            holder.removeAllViews()
+            holder.addView(text("正在查找同系列剧…",14f,muted))
+            work({ repository.seasons(data.series) }, { rows ->
+                cachedSeasons[cacheKey]=rows
+                if(screen=="detail" && detail?.series?.id==currentId) { holder.removeAllViews(); render(rows) }
+            }, { holder.removeAllViews(); holder.addView(text("暂时查不到同系列剧",14f,muted)) })
+        }
+        trigger.setPadding(dp(12),0,0,0)
     }
     private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
         updater.interrupt()
