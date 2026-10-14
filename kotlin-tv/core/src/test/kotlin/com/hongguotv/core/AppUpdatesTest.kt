@@ -25,12 +25,34 @@ class AppUpdatesTest {
         assertTrue(update.newerThan(9, 26)); assertFalse(update.newerThan(10001, 36)); assertFalse(update.newerThan(10002, 36)); assertFalse(update.newerThan(9, 25))
     }
     @Test fun downloadUrlUsesOnlyFixedRepositoryAndValidatedNames() {
-        assertEquals("https://github.com/N3urda/hongguoTV-updates/releases/download/kotlin-v0.9.0-build.1/hongguotv-kotlin-0.9.0-build.1-android8.apk", update().downloadUrl)
+        assertEquals("https://github.com/miaoxiaohu/hongguoTV/releases/download/kotlin-v0.9.0-build.1/hongguotv-kotlin-0.9.0-build.1-android8.apk", update().downloadUrl)
         for (value in listOf("../../bad.apk", "evil.apk", "https://example.com/evil.apk", "hongguotv-kotlin-1/2-android8.apk")) {
             val o = json(); o.getJSONObject("apk").put("name", value)
             assertThrows(IllegalArgumentException::class.java) { AppUpdate.parse(o.toString()) }
         }
         assertThrows(IllegalArgumentException::class.java) { AppUpdate.parse(json().put("tag", "../../other").toString()) }
+    }
+    @Test fun shippedUpdateManifestPassesTheRealValidator() {
+        // 发布时 server/make-update-json.mjs 生成的文件必须能通过 AppUpdate.parse，
+        // 否则电视上点「检查更新」只会看到「更新信息格式不正确」。
+        // 测试的工作目录是 kotlin-tv/core/，所以 ../.. 回到仓库根再取 server/。
+        val file = File("../../server/update.json")
+        assertTrue("找不到 update.json（cwd=${File(".").absolutePath}，试了 ${file.absolutePath}）", file.isFile)
+        val update = AppUpdate.parse(file.readText())
+        assertTrue(update.newerThan(14L, 26))
+        assertEquals("kotlin-v0.9.6", update.tag)
+        assertTrue(update.downloadUrl.startsWith("${AppUpdate.RELEASES}/download/${update.tag}/"))
+        assertTrue(update.sha256.matches(Regex("[0-9a-f]{64}")))
+        // size 与 notes 必须有值：前者用于下载前校验长度，后者显示在确认弹窗里。
+        assertTrue("size 必须大于 0", update.size > 0)
+        assertTrue("notes 不能为空，否则更新弹窗没有说明", update.notes.isNotBlank())
+    }
+    @Test fun theRepositoryIsThisProjectNotTheUnusedUpstream() {
+        // 上游 N3urda/hongguoTV-updates 从未发布过任何 release，指向它会让检查更新永远 404。
+        assertEquals("miaoxiaohu/hongguoTV", AppUpdate.REPOSITORY)
+        assertTrue(AppUpdate.RELEASES.startsWith("https://github.com/miaoxiaohu/hongguoTV/"))
+        assertEquals("https://github.com/miaoxiaohu/hongguoTV/releases/latest/download/update.json",
+            "${AppUpdate.RELEASES}/latest/download/update.json")
     }
     @Test fun rejectOtherPackageAndInvalidSchema() {
         assertThrows(IllegalArgumentException::class.java) { AppUpdate.parse(json().put("packageName", "other.app").toString()) }

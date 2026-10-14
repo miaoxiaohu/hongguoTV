@@ -16,7 +16,9 @@ data class AppUpdate(val versionCode: Long, val versionName: String, val minSdk:
     fun newerThan(installed: Long, sdk: Int) = versionCode > installed && minSdk <= sdk
     val downloadUrl get() = "$RELEASES/download/$tag/$fileName"
     companion object {
-        const val REPOSITORY = "N3urda/hongguoTV-updates"
+        // 指向本仓库自己的 release。上游 N3urda/hongguoTV-updates 从未发布过任何版本，
+        // 留在这里会让「检查更新」永远 404，电视拿不到新版。
+        const val REPOSITORY = "miaoxiaohu/hongguoTV"
         const val RELEASES = "https://github.com/$REPOSITORY/releases"
         const val MAX_APK_BYTES = 80L * 1024 * 1024
         fun parse(json: String): AppUpdate {
