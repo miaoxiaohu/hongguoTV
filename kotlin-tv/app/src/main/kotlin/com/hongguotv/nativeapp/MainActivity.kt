@@ -841,27 +841,29 @@ class MainActivity: Activity() {
         if(others.isEmpty()) { holder.addView(text("暂未找到其它季度",14f,muted)); return }
         holder.addView(text("同系列剧 · 共 ${others.size} 部其它季度",15f).apply { setTypeface(null,Typeface.BOLD); setPadding(0,dp(14),0,dp(8)) })
         val cards=mutableListOf<View>()
-        others.chunked(4).forEach { batch ->
+        // 12 列而不是目录页那种 6 列：季度卡只是快捷入口，占一整屏大半太抢眼。
+        val perRow=12; val gap=dp(4)
+        others.chunked(perRow).forEach { batch ->
             val line=row(); line.gravity=Gravity.TOP
+            val width=((resources.displayMetrics.widthPixels*.9f-gap*(perRow-1))/perRow).toInt()
             batch.forEachIndexed { index,entry ->
-                val card=column(); card.setPadding(dp(4),dp(4),dp(4),dp(6)); focusStyle(card)
+                val card=column(); card.setPadding(dp(2),dp(2),dp(2),dp(4)); focusStyle(card)
                 card.contentDescription="第 ${entry.season} 季，${entry.series.title}，${entry.series.badge}"
-                val width=((resources.displayMetrics.widthPixels*.9f-dp(14)*3)/4).toInt()
                 val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }
-                card.addView(image,lp(width,((width-dp(8))/TvStyle.POSTER_ASPECT).toInt()))
-                card.addView(text("第 ${entry.season} 季",13f,accent).apply { maxLines=1; setPadding(dp(3),dp(6),dp(3),0) },lp(-1,-2))
-                card.addView(text(entry.series.title,13f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,dp(3),0) },lp(-1,-2).apply { weight=1f })
-                card.addView(text(entry.series.badge,12f,muted).apply { maxLines=1; minLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) },lp(-1,-2))
+                card.addView(image,lp(width,((width-dp(4))/TvStyle.POSTER_ASPECT).toInt()))
+                card.addView(text("第 ${entry.season} 季",11f,accent).apply { maxLines=1; setPadding(dp(2),dp(3),dp(2),0) },lp(-1,-2))
+                card.addView(text(entry.series.title,11f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(2),0,dp(2),0) },lp(-1,-2).apply { weight=1f })
+                card.addView(text(entry.series.badge,10f,muted).apply { maxLines=1; minLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(2),0,0,0) },lp(-1,-2))
                 card.setOnClickListener { openDetail(entry.series) }
                 card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) loadCover(image,entry.series.cover) }
-                line.addView(card,lp(0,-1).apply { weight=1f; if(index<batch.size-1) rightMargin=dp(6) })
+                line.addView(card,lp(width,-1).apply { if(index<batch.size-1) rightMargin=gap })
                 cards+=card
             }
-            repeat(4-batch.size) { line.addView(Space(this),lp(0,-1).apply { weight=1f; rightMargin=dp(6) }) }
+            repeat(perRow-batch.size) { line.addView(Space(this),lp(width,-1).apply { if(it<perRow-1) rightMargin=gap }) }
             holder.addView(line,lp(-1,-2))
         }
-        // 横向焦点链：每行 4 张，和分集区同样的连法，否则遥控器会跳不到卡片上。
-        cards.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%4==0) v.id else cards[i-1].id; v.nextFocusRightId=if(i%4==3 || i==cards.lastIndex) v.id else cards[i+1].id }
+        // 横向焦点链：每行 12 张，和分集区同样的连法，否则遥控器会跳不到卡片上。
+        cards.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%perRow==0) v.id else cards[i-1].id; v.nextFocusRightId=if(i%perRow==perRow-1 || i==cards.lastIndex) v.id else cards[i+1].id }
     }
     private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
         updater.interrupt()
