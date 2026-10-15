@@ -784,15 +784,12 @@ class MainActivity: Activity() {
             synopsisButton.text=if(synopsisExpanded) "收起简介" else "完整简介"
             synopsisButton.post { synopsisButton.requestRectangleOnScreen(android.graphics.Rect(0,0,synopsisButton.width,synopsisButton.height),false) }
         }
-        // 放在这里而不是分集区下面：actions 行已经和 播放/收藏/完整简介 串成一条横向焦点链，
-        // 追加进去遥控器左右就能走到；另起一个区块则落在链外，方向键选不中。
-        val cacheKey="seasons:${data.series.id}:${data.series.title}"
-        addButton(actions,if(cachedSeasons.containsKey(cacheKey)) "同系列剧 · 已缓存" else "同系列剧") { loadSeasons(data) }
         content.addView(hero)
         seasonsHolder=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
         content.addView(seasonsHolder)
-        // 查过就直接铺开，省得再按一次按钮
-        cachedSeasons[cacheKey]?.let { renderSeasons(seasonsHolder!!,it,data.series.id) }
+        // 直接查，不放按钮：区块就在详情页里摆着，让观众多点一次反而是倒退。
+        // 异步发出，不阻塞上面这些渲染。
+        loadSeasons(data)
         val groupRow=row(); groupRow.setPadding(0,dp(3),0,dp(5))
         val maxGroup=data.episodes.lastIndex/20; group=group.coerceIn(0,maxGroup)
         val previous=addButton(groupRow,"‹ 上一组") { if(group>0) { group--; showDetail(true) } }.apply { isEnabled=group>0; isFocusable=group>0; alpha=if(group>0) 1f else .4f }
@@ -812,21 +809,25 @@ class MainActivity: Activity() {
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
     }
 
-    /** 按需查询同系列其它季度并渲染，查过就按剧缓存，回详情页不必重发。 */
+    /**
+     * 查询同系列其它季度并渲染；查过就按剧缓存，进其它剧再回来不必重发。
+     *
+     * 缓存命中时静默返回：详情页每次重建都会调它，放一句「正在查找…」会让整块反复闪一下。
+     */
     private fun loadSeasons(data: Detail) {
         val holder=seasonsHolder ?: return
         val currentId=data.series.id
         // key 里带上剧名，避免改名后串号。
         val cacheKey="seasons:$currentId:${data.series.title}"
         cachedSeasons[cacheKey]?.let { renderSeasons(holder,it,currentId); return }
-        holder.removeAllViews(); holder.addView(text("正在查找同系列剧…",14f,muted))
+        holder.addView(text("正在查找同系列剧…",13f,muted).apply { setPadding(0,dp(14),0,dp(8)) })
         work({ repository.seasons(data.series) }, { rows ->
             cachedSeasons[cacheKey]=rows
             // 回调可能落在别的剧上，回来时别把结果画到当前页面。
             if(screen=="detail" && detail?.series?.id==currentId && seasonsHolder===holder) renderSeasons(holder,rows,currentId)
         }, {
             if(screen=="detail" && detail?.series?.id==currentId && seasonsHolder===holder) {
-                holder.removeAllViews(); holder.addView(text("暂时查不到同系列剧",14f,muted))
+                holder.removeAllViews(); holder.addView(text("暂未找到同系列剧",13f,muted).apply { setPadding(0,dp(14),0,dp(8)) })
             }
         })
     }
@@ -852,6 +853,8 @@ class MainActivity: Activity() {
             item.contentDescription="第 ${entry.season} 季，${entry.series.title}，${entry.series.badge}"
             val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }
             item.addView(image,lp(poster,(poster/TvStyle.POSTER_ASPECT).toInt()))
+            // 先按「可见」优先级加载一次，否则列表滚进来时是空图，只有聚焦后才出现 —— 和目录页同一套做法。
+            loadCover(image,entry.series.cover)
             val info=column(); info.gravity=Gravity.CENTER_VERTICAL
             item.addView(info,lp(0,-2).apply { weight=1f; leftMargin=dp(14) })
             info.addView(text(entry.series.title,16f).apply { maxLines=1; ellipsize=TextUtils.TruncateAt.END })
