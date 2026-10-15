@@ -194,7 +194,9 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     private fun signedStream(id: String, maxQuality: Int): StreamInfo {
         val payload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"video_id":"$id"}""".toByteArray()
-        val signed=signer.sign(VIDEO_MODEL_API,VendorConstants.device,payload)
+        // A fresh identity per signed request: the previously hardcoded pair is shared by every
+        // client built from the drpys sources and is now silently blocked (HTTP 200, empty body).
+        val signed=signer.sign(VIDEO_MODEL_API,VendorConstants.newDevice(),payload)
         val data=JSONObject(text(signed.url,signed))
         val code=if(data.has("code")) data.optInt("code",-1) else data.optInt("Code",-1)
         if(code!=0) throw IOException("播放接口暂不可用")

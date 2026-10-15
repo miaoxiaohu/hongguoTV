@@ -4,9 +4,33 @@ package com.hongguotv.core
 internal object VendorConstants {
     const val VIDEO_UA = "com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
     const val APP_UA = "com.phoenix.read/72232 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3)"
+
+    /**
+     * A fresh device identity for one request.
+     *
+     * The pair that used to be hardcoded here is published in the drpys sources this file was
+     * derived from, so every client built on it sends the same `iid`/`device_id`. The server now
+     * answers those with HTTP 200 and a zero-byte body instead of an error code - a silent block,
+     * which is why nothing ever surfaced as a failure. Verified 2026-10-15: that exact pair returns
+     * 0 bytes on `video_model/v1/`, while randomly generated ones return `code=0` with playable
+     * renditions.
+     *
+     * Reuse does not survive either - replaying one generated pair across five consecutive
+     * requests turns every later response back into an empty body - so [newDevice] must be called
+     * per signed request, and the same map has to reach both the query string and the signature
+     * ([Signer.medusa] embeds `device_id` into the `x-medusa` proto).
+     */
+    fun newDevice(random: () -> Double = Math::random): Map<String, String> {
+        val identity = { digits: Int -> (1..digits).joinToString("") { (random() * 10).toInt().toString() } }
+        return device.toMutableMap().apply {
+            this["iid"] = identity(16)
+            this["device_id"] = identity(16)
+        }
+    }
+
     val device = linkedMapOf(
-        "iid" to "1905892595382586",
-        "device_id" to "1905892595378490",
+        "iid" to "",
+        "device_id" to "",
         "ac" to "wifi",
         "channel" to "update_64",
         "aid" to "8662",
