@@ -104,6 +104,39 @@ class ContentRepositoryTest {
         assertNull("public source is not CENC encrypted",result.key)
     }
 
+    /**
+     * The signed endpoint now answers HTTP 200 with a *zero-byte* body rather than a parseable
+     * error. `JSONObject("")` throws org.json.JSONException, which is a RuntimeException - an
+     * `IOException`-only catch let it escape and the public-page fallback below never ran, so the
+     * TV showed nothing at all instead of the first three episodes.
+     */
+    @Test fun emptySignedBodyStillReachesThePublicPageFallback() {
+        val paths=mutableListOf<String>()
+        val repo=repository { request ->
+            paths+=request.url.encodedPath
+            when(request.url.encodedPath) {
+                MODEL_PATH -> ""      // exactly what the server sends today
+                "/player/456/123" -> """{"contentUrl":"https://hongguoduanju.com/video/public/123/360p.mp4"}"""
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+        }
+        val result=repo.stream("456","123",1080)
+        assertEquals(listOf(MODEL_PATH,"/player/456/123"),paths)
+        assertEquals("https://hongguoduanju.com/video/public/123/360p.mp4",result.url)
+        assertEquals("360P",result.quality)
+    }
+
+    /** Whatever the signed attempt died of, the failure the user sees must be the fallback's. */
+    @Test fun emptySignedBodyReportsTheFallbackFailureNotTheJsonError() {
+        val repo=repository { request ->
+            if(request.url.encodedPath==MODEL_PATH) "" else "<html>没有资源</html>"
+        }
+        val e=assertThrows(IOException::class.java) { repo.stream("456","123") }
+        assertEquals("播放地址暂不可用",e.message)
+        assertTrue(e.suppressed.orEmpty().joinToString { it.message.orEmpty() },
+            e.suppressed.orEmpty().any { it is org.json.JSONException })
+    }
+
     @Test fun streamUnescapesJsonSlashEscapesInEmbeddedUrl() {
         val repo=playerRepository("""{"contentUrl":"https:\u002F\u002Fhongguoduanju.com\u002Fvideo\u002Fpublic\u002F123\u002F360p.mp4"}""")
         assertEquals("https://hongguoduanju.com/video/public/123/360p.mp4",repo.stream("456","123").url)
