@@ -812,12 +812,7 @@ class MainActivity: Activity() {
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
     }
 
-    /**
-     * 「同系列剧」结果区块，渲染到 hero 正下方的 [seasonsHolder]。
-     *
-     * 刻意不在 showDetail 里直接发请求：搜索走的也是官网降级路径，而详情页是每个观众必经的一屏，
-     * 不该为锦上添花的内容多担一次网络往返。按钮点了才查，查过就按剧缓存。
-     */
+    /** 按需查询同系列其它季度并渲染，查过就按剧缓存，回详情页不必重发。 */
     private fun loadSeasons(data: Detail) {
         val holder=seasonsHolder ?: return
         val currentId=data.series.id
@@ -835,35 +830,42 @@ class MainActivity: Activity() {
             }
         })
     }
+    /**
+     * 「同系列剧」结果区块，渲染到 hero 正下方的 [seasonsHolder]。
+     *
+     * 纵向列表、左侧海报右侧文字，和详情页本身「一屏一部剧」的节奏一致；
+     * 之前用密集网格时，季度卡比封面还抢眼，看着像另一个页面的内容。
+     *
+     * 刻意不在 showDetail 里直接发请求：搜索走的也是官网降级路径，而详情页是每个观众
+     * 必经的一屏，不该为锦上添花的内容多担一次网络往返。按钮点了才查，查过就按剧缓存。
+     */
     private fun renderSeasons(holder: LinearLayout, rows: List<SeasonEntry>, currentId: String) {
         holder.removeAllViews()
         val others=rows.filter { it.series.id!=currentId }
         if(others.isEmpty()) { holder.addView(text("暂未找到其它季度",14f,muted)); return }
-        holder.addView(text("同系列剧 · 共 ${others.size} 部其它季度",15f).apply { setTypeface(null,Typeface.BOLD); setPadding(0,dp(14),0,dp(8)) })
+        holder.addView(text("同系列剧 · 共 ${others.size} 部其它季度",15f).apply { setTypeface(null,Typeface.BOLD); setPadding(0,dp(16),0,dp(8)) })
         val cards=mutableListOf<View>()
-        // 12 列而不是目录页那种 6 列：季度卡只是快捷入口，占一整屏大半太抢眼。
-        val perRow=12; val gap=dp(4)
-        others.chunked(perRow).forEach { batch ->
-            val line=row(); line.gravity=Gravity.TOP
-            val width=((resources.displayMetrics.widthPixels*.9f-gap*(perRow-1))/perRow).toInt()
-            batch.forEachIndexed { index,entry ->
-                val card=column(); card.setPadding(dp(2),dp(2),dp(2),dp(4)); focusStyle(card)
-                card.contentDescription="第 ${entry.season} 季，${entry.series.title}，${entry.series.badge}"
-                val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }
-                card.addView(image,lp(width,((width-dp(4))/TvStyle.POSTER_ASPECT).toInt()))
-                card.addView(text("第 ${entry.season} 季",11f,accent).apply { maxLines=1; setPadding(dp(2),dp(3),dp(2),0) },lp(-1,-2))
-                card.addView(text(entry.series.title,11f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(2),0,dp(2),0) },lp(-1,-2).apply { weight=1f })
-                card.addView(text(entry.series.badge,10f,muted).apply { maxLines=1; minLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(2),0,0,0) },lp(-1,-2))
-                card.setOnClickListener { openDetail(entry.series) }
-                card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) loadCover(image,entry.series.cover) }
-                line.addView(card,lp(width,-1).apply { if(index<batch.size-1) rightMargin=gap })
-                cards+=card
-            }
-            repeat(perRow-batch.size) { line.addView(Space(this),lp(width,-1).apply { if(it<perRow-1) rightMargin=gap }) }
-            holder.addView(line,lp(-1,-2))
+        val poster=dp(74)
+        others.forEach { entry ->
+            val item=row(); item.gravity=Gravity.CENTER_VERTICAL
+            item.setPadding(dp(8),dp(8),dp(8),dp(8)); focusStyle(item)
+            item.contentDescription="第 ${entry.season} 季，${entry.series.title}，${entry.series.badge}"
+            val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+            item.addView(image,lp(poster,(poster/TvStyle.POSTER_ASPECT).toInt()))
+            val info=column(); info.gravity=Gravity.CENTER_VERTICAL
+            item.addView(info,lp(0,-2).apply { weight=1f; leftMargin=dp(14) })
+            info.addView(text(entry.series.title,16f).apply { maxLines=1; ellipsize=TextUtils.TruncateAt.END })
+            // badge 是「全N集」这类现成文案，有就接在季号后面，没有就只显示季号。
+            val episodes=entry.series.badge
+            val meta=if(episodes.isBlank()) "第 ${entry.season} 季" else "第 ${entry.season} 季 · $episodes"
+            info.addView(text(meta,13f,muted).apply { maxLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(0,dp(5),0,0) })
+            item.setOnClickListener { openDetail(entry.series) }
+            item.setOnFocusChangeListener { _,focused -> item.background=TvStyle.card(this,focused); if(focused) loadCover(image,entry.series.cover) }
+            holder.addView(item,lp(-1,-2).apply { bottomMargin=dp(8) })
+            cards+=item
         }
-        // 横向焦点链：每行 12 张，和分集区同样的连法，否则遥控器会跳不到卡片上。
-        cards.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%perRow==0) v.id else cards[i-1].id; v.nextFocusRightId=if(i%perRow==perRow-1 || i==cards.lastIndex) v.id else cards[i+1].id }
+        // 纵向列表，焦点只连上下；连左右会让上下键在某些布局下被劫持。
+        cards.forEachIndexed { i,v -> v.nextFocusUpId=if(i==0) v.id else cards[i-1].id; v.nextFocusDownId=if(i==cards.lastIndex) v.id else cards[i+1].id }
     }
     private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
         updater.interrupt()
