@@ -40,7 +40,8 @@ class AppUpdatesTest {
         assertTrue("找不到 update.json（cwd=${File(".").absolutePath}，试了 ${file.absolutePath}）", file.isFile)
         val update = AppUpdate.parse(file.readText())
         assertTrue(update.newerThan(14L, 26))
-        assertEquals("kotlin-v0.9.6", update.tag)
+        // 不写死具体 tag：manifest 每次发版都会重新生成，写死会让上一版的值一直挂到下次发版。
+        assertTrue("tag 应指向 kotlin-v 前缀：${update.tag}", update.tag.matches(Regex("kotlin-v[0-9][0-9A-Za-z.+-]*")))
         assertTrue(update.downloadUrl.startsWith("${AppUpdate.RELEASES}/download/${update.tag}/"))
         assertTrue(update.sha256.matches(Regex("[0-9a-f]{64}")))
         // size 与 notes 必须有值：前者用于下载前校验长度，后者显示在确认弹窗里。
