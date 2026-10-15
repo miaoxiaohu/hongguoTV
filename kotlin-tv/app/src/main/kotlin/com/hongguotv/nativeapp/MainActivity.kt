@@ -125,6 +125,8 @@ class MainActivity: Activity() {
     private var catalog=emptyList<Series>()
     private var hasMore=false
     private var catalogFocus=""
+    /** 当前详情页剧集网格里的按钮，供 [renderSeasons] 接同系列区块的双向焦点。 */
+    private var episodeViews: List<View> = emptyList()
     /** 当前详情页里承载「同系列剧」结果的容器；异步回调用它确认自己没画到别的剧上。 */
     private var seasonsHolder: LinearLayout?=null
     private data class CatalogState(val page: Int,val items: List<Series>,val hasMore: Boolean,val ranking: ComicRanking?)
@@ -242,6 +244,7 @@ class MainActivity: Activity() {
     }
     private fun releaseCatalogViews() {
         homeScreen?.let { homePosition=it.capturePosition() }
+        episodeViews=emptyList()
         catalogScroll?.let { scrollPositions[catalogPageKey]=it.scrollY }
         catalogBody=null
         homeScreen=null; selectionPreview=null; catalogScroll=null
@@ -798,9 +801,13 @@ class MainActivity: Activity() {
             repeat(10-numbers.size) { line.addView(Space(this),lp(0,dp(42)).apply { weight=1f; rightMargin=dp(6) }) }
             content.addView(line,lp(-1,dp(49)))
         }
-        episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; v.nextFocusDownId=if(i+10<episodes.size) episodes[i+10].id else v.id }
-        // 「同系列剧」放在剧集网格之后，不是之前。放在前面时这些季度卡是可聚焦的，会插进
-        // 「播放」按钮到剧集之间的下键路径中间，观众按到底都停在季度列表上、够不着剧集。
+        // 最后一行不设 nextFocusDownId：写成指向自己会把下键困在网格里，「同系列剧」区块就在
+        // 网格下方，那样就永远按不到季度卡了。留空让系统的默认向下搜索落过去。
+        episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; if(i+10<episodes.size) v.nextFocusDownId=episodes[i+10].id }
+        // 「同系列剧」排在网格之后。两个方向的连线都在 renderSeasons 里接：网格最后一行向下
+        // 落到第一张季度卡、最后一张季度卡向上回到网格。只靠系统的默认几何搜索，两个方向都
+        // 不可靠 —— 之前「下」被 v.id 自锁、「上」直接落空，都是这么来的。
+        episodeViews=episodes.toList()
         seasonsHolder=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
         content.addView(seasonsHolder)
         loadSeasons(data)
@@ -827,13 +834,13 @@ class MainActivity: Activity() {
         })
     }
     /**
-     * 「同系列剧」结果区块，渲染到 hero 正下方的 [seasonsHolder]。
+     * 「同系列剧」结果区块，渲染到剧集网格下方的 [seasonsHolder]。
      *
      * 纵向列表、左侧海报右侧文字，和详情页本身「一屏一部剧」的节奏一致；
      * 之前用密集网格时，季度卡比封面还抢眼，看着像另一个页面的内容。
      *
-     * 刻意不在 showDetail 里直接发请求：搜索走的也是官网降级路径，而详情页是每个观众
-     * 必经的一屏，不该为锦上添花的内容多担一次网络往返。按钮点了才查，查过就按剧缓存。
+     * 不设入口按钮，详情页每次渲染都直接查，结果不缓存 —— 页面本身在一个 ScrollView 里，
+     * 季度卡排在网格下方，需要时往下滚即可。
      */
     private fun renderSeasons(holder: LinearLayout, rows: List<SeasonEntry>, currentId: String) {
         holder.removeAllViews()
@@ -863,7 +870,18 @@ class MainActivity: Activity() {
             cards+=item
         }
         // 纵向列表，焦点只连上下；连左右会让上下键在某些布局下被劫持。
-        cards.forEachIndexed { i,v -> v.nextFocusUpId=if(i==0) v.id else cards[i-1].id; v.nextFocusDownId=if(i==cards.lastIndex) v.id else cards[i+1].id }
+        // 两端都接回剧集网格：写成指向自己会把方向键自锁在区块里（第一张卡按「上」回不去
+        // 选集、最后一张按「下」掉不下来）。网格为空时退回自锁，避免连到已销毁的视图。
+        val grid=episodeViews
+        cards.forEachIndexed { i,v ->
+            val upTarget=if(i==0) grid.lastOrNull()?.id else cards[i-1].id
+            val downTarget=if(i==cards.lastIndex) grid.firstOrNull()?.id else cards[i+1].id
+            v.nextFocusUpId=upTarget ?: v.id
+            v.nextFocusDownId=downTarget ?: v.id
+        }
+        // 网格最后一行向下 → 第一张卡。网格每行只连了行内和同列的上一行，末行没有下行目标，
+        // 不显式接的话系统的默认几何搜索会跳过头（之前就是直接落空）。
+        grid.lastOrNull()?.let { last -> cards.firstOrNull()?.let { first -> last.nextFocusDownId=first.id } }
     }
     private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
         updater.interrupt()
