@@ -184,9 +184,12 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     fun stream(seriesId: String, id: String, maxQuality: Int = 1080): StreamInfo {
         require(seriesId.matches(Regex("[0-9]{1,30}")) && id.matches(Regex("[0-9]{1,30}")))
         try { return signedStream(id,maxQuality) }
-        catch(signed: IOException) {
+        catch(signed: Exception) {
+            // Must be Exception, not IOException: the signed endpoint now answers HTTP 200 with a
+            // zero-byte body, so `JSONObject(text(...))` throws org.json.JSONException - a
+            // RuntimeException - which an IOException-only catch lets escape past the fallback.
             try { return webStream(seriesId,id,maxQuality) }
-            catch(web: IOException) { web.addSuppressed(signed); throw web }
+            catch(web: Exception) { web.addSuppressed(signed); throw web }
         }
     }
     private fun signedStream(id: String, maxQuality: Int): StreamInfo {
