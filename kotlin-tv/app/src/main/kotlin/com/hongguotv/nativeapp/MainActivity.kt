@@ -125,8 +125,6 @@ class MainActivity: Activity() {
     private var catalog=emptyList<Series>()
     private var hasMore=false
     private var catalogFocus=""
-    /** 同系列剧查询结果，按 剧id+剧名 缓存，避免来回翻详情页时反复打搜索接口。 */
-    private val cachedSeasons=mutableMapOf<String,List<SeasonEntry>>()
     /** 当前详情页里承载「同系列剧」结果的容器；异步回调用它确认自己没画到别的剧上。 */
     private var seasonsHolder: LinearLayout?=null
     private data class CatalogState(val page: Int,val items: List<Series>,val hasMore: Boolean,val ranking: ComicRanking?)
@@ -785,11 +783,6 @@ class MainActivity: Activity() {
             synopsisButton.post { synopsisButton.requestRectangleOnScreen(android.graphics.Rect(0,0,synopsisButton.width,synopsisButton.height),false) }
         }
         content.addView(hero)
-        seasonsHolder=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
-        content.addView(seasonsHolder)
-        // 直接查，不放按钮：区块就在详情页里摆着，让观众多点一次反而是倒退。
-        // 异步发出，不阻塞上面这些渲染。
-        loadSeasons(data)
         val groupRow=row(); groupRow.setPadding(0,dp(3),0,dp(5))
         val maxGroup=data.episodes.lastIndex/20; group=group.coerceIn(0,maxGroup)
         val previous=addButton(groupRow,"‹ 上一组") { if(group>0) { group--; showDetail(true) } }.apply { isEnabled=group>0; isFocusable=group>0; alpha=if(group>0) 1f else .4f }
@@ -806,6 +799,11 @@ class MainActivity: Activity() {
             content.addView(line,lp(-1,dp(49)))
         }
         episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; v.nextFocusDownId=if(i+10<episodes.size) episodes[i+10].id else v.id }
+        // 「同系列剧」放在剧集网格之后，不是之前。放在前面时这些季度卡是可聚焦的，会插进
+        // 「播放」按钮到剧集之间的下键路径中间，观众按到底都停在季度列表上、够不着剧集。
+        seasonsHolder=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
+        content.addView(seasonsHolder)
+        loadSeasons(data)
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
     }
 
@@ -817,12 +815,9 @@ class MainActivity: Activity() {
     private fun loadSeasons(data: Detail) {
         val holder=seasonsHolder ?: return
         val currentId=data.series.id
-        // key 里带上剧名，避免改名后串号。
-        val cacheKey="seasons:$currentId:${data.series.title}"
-        cachedSeasons[cacheKey]?.let { renderSeasons(holder,it,currentId); return }
+        // 不缓存：同系列结果每次都重新查，避免进别的剧再回来时看到的是上次那份快照。
         holder.addView(text("正在查找同系列剧…",13f,muted).apply { setPadding(0,dp(14),0,dp(8)) })
         work({ repository.seasons(data.series) }, { rows ->
-            cachedSeasons[cacheKey]=rows
             // 回调可能落在别的剧上，回来时别把结果画到当前页面。
             if(screen=="detail" && detail?.series?.id==currentId && seasonsHolder===holder) renderSeasons(holder,rows,currentId)
         }, {
