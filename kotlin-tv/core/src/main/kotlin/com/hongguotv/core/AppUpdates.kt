@@ -63,7 +63,10 @@ object UpdateFiles {
                 output.fd.sync()
             }
             if (!verify(partial, update)) throw IOException("安装包校验未通过，请重新下载")
-            if (!partial.renameTo(destination)) throw IOException("无法保存安装包")
+            // Not File.renameTo: on Windows that refuses to overwrite an existing file, so a
+            // previously downloaded update could never be replaced. The data is already fsynced
+            // above, and a move within one filesystem is still atomic.
+            java.nio.file.Files.move(partial.toPath(), destination.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
         } finally { partial.delete() }
     }
 }
