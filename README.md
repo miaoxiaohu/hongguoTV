@@ -6,25 +6,35 @@
 
 ---
 
-## ⚠️ 上游 `kotlin-v0.8.0` 不可用
+## ⚠️ 0.8.0 及更早版本的播放故障（已在 0.9.3 修复）
 
-红果服务端改了接口，0.8.0 及更早版本**无法播放第 4 集及以后的任何一集**（前三集来自另一个已降级的网页来源，只到 360p）。
+红果服务端改了接口，0.8.0 及更早版本**无法播放第 4 集及以后的任何一集**（前三集来自另一个已降级的网页来源，只到 360p）。从 0.9.3 起恢复全集 1080p HEVC，当前版本不受影响。
 
 真正的原因不是签名接口整体被封，而是**调用方用错了端点名**：代码打的是
 `novel/player/multi_video_model/v1/`，该路径服务端已停止服务（对所有 host 和 payload 一律返回
 `Code 110001` 或 0 字节空包）。仍然可用的是**没有 `multi_` 前缀**的
 `novel/player/video_model/v1/`，且参数必须是顶层的 `video_id` 字符串。
 
+另有一个易被误判的坑：同一时期写死的设备指纹（`iid` / `device_id`）被服务端静默拉黑，
+表现为 **HTTP 200 + 0 字节空包**，不报任何错误码，从外面看与「接口整体挂了」完全一样。
+0.9.3 起每次签名生成新的随机设备身份。
+
 ## 当前可用版本
 
 | 版本 | 内容 |
 |---|---|
-| **kotlin-v0.9.5** | 最新。详情页「同系列剧」按钮移到「完整简介」右边，遥控器可选中 |
+| **kotlin-v0.9.9** | 最新。修海报缩略图空白，去掉「同系列剧」需要点一下才展开 |
+| kotlin-v0.9.8 | 「同系列剧」由卡片网格改为左图右文字列表 |
+| kotlin-v0.9.7 | 「同系列剧」卡片缩小到原尺寸约三分之一 |
+| kotlin-v0.9.6 | 修正更新检查指向的仓库地址 |
+| kotlin-v0.9.5 | 详情页「同系列剧」按钮移到「完整简介」右边，遥控器可选中 |
 | kotlin-v0.9.3 | 播放接口修复，恢复全集 1080p HEVC |
 
-下载：**[kotlin-v0.9.5](https://github.com/miaoxiaohu/hongguoTV/releases/tag/kotlin-v0.9.5)**
+下载：**[kotlin-v0.9.9](https://github.com/miaoxiaohu/hongguoTV/releases/tag/kotlin-v0.9.9)**
 
 （`kotlin-v0.9.4` 已删除：那一版的「同系列剧」按钮放在独立区块里，不在任何焦点链上，遥控器走不到。）
+
+以上 release 附带的 `update.json` 里 `versionCode` 为 0.9.6→15、0.9.7→16、0.9.8→17、0.9.9→18；0.9.3 和 0.9.5 没有该附件。
 
 ### 安装注意
 
@@ -43,11 +53,31 @@
 季号支持阿拉伯数字、中文数字和全角/半角/方头括号，覆盖「第七季」「（第二季）」「第一百零二季」等写法；
 无季号者视为第一季。查询按需触发并按剧缓存，详情页不会为此多担网络往返。
 
-## 上游说明（历史内容）
+## 应用内更新的状态
 
-0.9.0 曾增加应用内更新，目标是自动同步至公开发布仓库 `N3urda/hongguoTV-updates`。
-**该仓库目前没有任何 release，通道未启用**，且 `AppUpdates.REPOSITORY` 仍硬编码为上游地址。
-所以本仓库的更新需要手动下载 APK 安装。见 [自动更新说明](kotlin-tv/AUTO_UPDATES.md)。
+0.9.0 起应用内就带了「检查更新」功能，`AppUpdates.REPOSITORY` 从 0.9.6 起指向本仓库
+`miaoxiaohu/hongguoTV`。**这条通道此前一直是不通的**，2026-10-16 起本仓库已从私有改为公开，
+电视端才能匿名拉到更新元数据：
+
+- 根因不是地址写错，而是**仓库私有**。GitHub 对私有仓库的 release 附件对未登录请求一律返回
+  **404**，而电视上的应用不带任何 GitHub 凭据，所以 `releases/latest/download/update.json`
+  永远拿不到。0.9.6 的「修自动更新通道」只改了地址，没解决可见性。
+- 转公开后实测：`update.json` 与 APK 附件匿名访问均返回 200，且线上 manifest 逐条通过
+  `AppUpdates.parse()` 的格式断言。**从 GitHub 下载安装的用户，现在可以正常收到更新提示。**
+- `scripts/sync-kotlin-public.py` 仍把从未发布过任何 release 的 `N3urda/hongguoTV-updates`
+  当作唯一同步目标，CI 发布链路本身也还没启用；现有 release 都是手工上传的。
+
+⚠️ **版本号已于 2026-10-17 统一**：tag `kotlin-vX.Y.Z` 里的版本号就是 `versionName`，
+`versionCode` 由它派生（`major×1000000 + minor×1000 + patch`，例：`0.9.10` → `9010`），
+任何环节都不手填数字。本地默认构建为 `0.0.0-dev` / versionCode 1，**故意压到低于任何已发布版本**——
+`AppUpdates.kt:16` 按 versionCode 严格递增比较，如果本地默认值填成看似合理的数字，
+电视装了本地包后会判定「已是最新」，从此再也不提示更新。
+
+发版方式见 [自动更新与发布链路](kotlin-tv/AUTO_UPDATES.md)：
+`git tag kotlin-v0.9.10 && git push origin main kotlin-v0.9.10`，由 `.github/workflows/release.yml`
+完成测试、签名构建与发布。
+
+另需注意：如果把仓库改回私有，通道会立刻重新失效。
 
 以下为保留的 React Native 版说明。
 
