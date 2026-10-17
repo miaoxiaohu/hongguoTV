@@ -1,8 +1,9 @@
 name: Verify Kotlin standalone APK
+# Verification only. Publishing lives in release.yml and is driven by a kotlin-vX.Y.Z tag, which
+# already runs :core:test and :app:lintRelease as build gates, so tags no longer trigger this job.
 on:
   push:
-    branches: ['codex/kotlin-standalone']
-    tags: ['kotlin-v*']
+    branches: ['main']
   pull_request:
     paths: ['kotlin-tv/**', 'scripts/build-kotlin.sh', '.github/workflows/kotlin-native.yml']
   workflow_dispatch:

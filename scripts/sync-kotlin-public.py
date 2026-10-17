@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Export only tracked native-client source at HEAD, without private Git history or local files."""
+"""Export only tracked native-client source at HEAD, without private Git history or local files.
+
+Retired 2026-10-17. The source repository is now public, so .github/workflows/release.yml builds
+and publishes straight from it and this mirror step is no longer part of the release path. The
+script is kept intact so the old two-repository flow stays reversible, but note that its
+allow-list below still names N3urda/hongguoTV-updates, which has never had a release. The live
+publishing path is a kotlin-vX.Y.Z tag, not this script.
+"""
 import subprocess
 import sys
 from pathlib import Path
