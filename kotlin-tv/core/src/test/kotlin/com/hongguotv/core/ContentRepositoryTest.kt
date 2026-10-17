@@ -352,16 +352,18 @@ class ContentRepositoryTest {
      * which is exactly the bug that hid 1600 shows.
      */
     /**
-     * `/category/comic` (漫画, 74 shows) is intentionally not a browse tab: it does list a
-     * `vid_list`, but those ids are comic chapters rather than video — the signed player endpoint
-     * answers HTTP 500 for every show tried. Adding it back would ship 74 unplayable rows, so the
-     * exact catalogue list is pinned here on purpose.
+     * `/category/comic` (漫画, 74 shows) is intentionally not browsable: it does list a `vid_list`,
+     * but those ids are comic chapters rather than video — the signed player endpoint answers
+     * HTTP 500 for every show tried. `ai-drama` is browsable and was offered in 0.9.14, but browsing
+     * it did not pay for itself, so 0.9.15 offers two. Both decisions are pinned here on purpose so
+     * nobody re-adds a tab without re-measuring first.
      */
-    @Test fun browseableCataloguesAreExactlyTheThreeThatActuallyStream() {
-        assertEquals(listOf("real-drama","ai-drama","comic-drama"),ContentType.entries.map { it.categorySlug })
+    @Test fun browseableCataloguesAreExactlyTheTwoWeOffer() {
+        assertEquals(listOf("real-drama","comic-drama"),ContentType.entries.map { it.categorySlug })
         assertEquals(ContentType.entries.size,ContentType.entries.map { it.categorySlug }.distinct().size)
         assertEquals(ContentType.entries.size,ContentType.entries.map { it.label }.distinct().size)
         assertEquals(ContentType.entries.size,ContentType.entries.map { it.storedValue }.distinct().size)
+        assertFalse("漫画 的分集不是视频 id，放进来是死路", ContentType.entries.any { it.categorySlug=="comic" })
     }
 
     @Test fun everyCatalogueBrowsesItsOwnNamedRoute() {
@@ -396,7 +398,7 @@ class ContentRepositoryTest {
             queries += request.url.queryParameter("page")
             """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"456","series_name":"测试"}],"pagination":{"totalPages":34}}}};</script>"""
         }
-        repo.home(1,ContentType.AI); repo.home(2,ContentType.AI); repo.home(12,ContentType.AI)
+        repo.home(1,ContentType.COMIC); repo.home(2,ContentType.COMIC); repo.home(12,ContentType.COMIC)
         assertEquals(listOf(null,"2","12"),queries)
     }
 
