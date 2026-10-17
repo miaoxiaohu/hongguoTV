@@ -1219,6 +1219,10 @@ class MainActivity: Activity() {
                     if(requestedAutoplay && !sleepStopped && !pausedForLifecycle) player?.play()
                     if(anchor.isAttachedToWindow) anchor.requestFocus()
                     if(overlayWasVisible) showHud() else hidePlaybackOverlay()
+                } else if(foreground && generation==ticket && screen=="player") {
+                    // 换了集数：showPanel 留下的控制条是上一集的快照，必须丢掉再重建，否则
+                    // 「上一集/下一集」的可用状态和播放/暂停文字都停在旧集数上。
+                    hidePanel(); showPanel()
                 }
             })
         episodePanel=next; next.show()

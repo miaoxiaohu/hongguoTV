@@ -66,11 +66,18 @@ class EpisodePanel(
             repeat(5-indexes.size) { row.addView(Space(activity),LinearLayout.LayoutParams(0,1,1f)) }
             grid.addView(row)
         }
+        // 本组最后一行满格时不能把「下」指回自己，否则焦点被困在末行；改为落到分页按钮。
+        val lastRowStart=((cells.size-1)/5)*5
         cells.forEachIndexed { i,cell ->
             cell.nextFocusLeftId=cells[if(i%5==0) i else i-1].id
             cell.nextFocusRightId=cells[if(i%5==4 || i==cells.lastIndex) i else i+1].id
             cell.nextFocusUpId=if(i>=5) cells[i-5].id else if(i<3 && previous.isFocusable) previous.id else if(next.isFocusable) next.id else jump.id
-            cell.nextFocusDownId=cells[if(i+5<cells.size) i+5 else if(i/5<cells.lastIndex/5) cells.lastIndex else i].id
+            cell.nextFocusDownId=when {
+                i+5<cells.size -> cells[i+5].id
+                i>=lastRowStart && next.isFocusable -> next.id
+                i>=lastRowStart -> jump.id
+                else -> cells[cells.lastIndex].id
+            }
         }
         previous.nextFocusUpId=close.id; next.nextFocusUpId=jump.id
         previous.nextFocusDownId=cells.first().id; next.nextFocusDownId=cells[minOf(4,cells.lastIndex)].id
