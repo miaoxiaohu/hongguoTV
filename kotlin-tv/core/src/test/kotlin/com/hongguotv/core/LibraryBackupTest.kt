@@ -34,6 +34,24 @@ class LibraryBackupTest {
         val history=LibraryBackup.merge(local.copy(history=records),data().copy(history=listOf(progress("201",201))),false).history
         assertEquals(200,history.size); assertEquals("201",history.first().series.id); assertFalse(history.any { it.series.id=="1" })
     }
+    @Test fun `a library saved on a build that offered more catalogues still restores`() {
+        // 0.9.14 offered 真人剧/AI剧/漫剧. A backup written while AI剧 was selected carries "ai",
+        // which 0.9.15 no longer knows. Rejecting it would refuse the user's own favorites and
+        // history over a stale UI preference, so the type degrades and the records come back.
+        val fromOldBuild=JSONObject(LibraryBackup.encode(data())).apply {
+            getJSONObject("settings").put("type", ContentType.RETIRED_STORED_VALUES.first())
+            put("searches", JSONArray().put(JSONObject().put("query","你好").put("type",ContentType.RETIRED_STORED_VALUES.first())))
+        }
+        val restored=LibraryBackup.decode(fromOldBuild.toString())
+        assertEquals(ContentType.COMIC, restored.settings.type)
+        assertEquals(ContentType.COMIC, restored.searches.single().type)
+        assertEquals("测试 1", restored.favorites.single().title)
+        assertEquals(100L, restored.history.single().updatedAt)
+        // A type we never wrote is still not a reason to lose a library, but it must not be
+        // mistaken for one of ours either.
+        assertEquals(ContentType.COMIC, ContentType.fromStored("not-a-real-type"))
+        assertEquals(ContentType.SHORT, ContentType.fromStored("not-a-real-type", ContentType.SHORT))
+    }
     @Test fun `invalid format ranges settings duplicates and oversized nesting are rejected`() {
         fun reject(change: (JSONObject)->Unit) { val o=JSONObject(LibraryBackup.encode(data())); change(o); assertTrue(o.toString(),runCatching { LibraryBackup.decode(o.toString()) }.isFailure) }
         reject { it.put("version",2) }; reject { it.put("format","other") }

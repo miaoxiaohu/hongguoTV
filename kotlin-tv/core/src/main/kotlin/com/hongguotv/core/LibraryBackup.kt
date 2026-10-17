@@ -69,12 +69,12 @@ object LibraryBackup {
         require(favorites.distinctBy { it.id }.size==favorites.size && history.distinctBy { it.series.id }.size==history.size) { "备份包含重复剧集" }
         val watched=o.getJSONArray("watched"); require(watched.length()<=500)
         val watchedIds=(0 until watched.length()).map { id(watched.getString(it)) }.toSet()
-        val searches=o.rows("searches",20).map { row -> RecentSearch(row.string("query",80).also { require(it.isNotBlank()) },ContentType.entries.firstOrNull { it.storedValue==row.getString("type") } ?: error("搜索类型无效")) }
+        val searches=o.rows("searches",20).map { row -> RecentSearch(row.string("query",80).also { require(it.isNotBlank()) },ContentType.fromStored(row.getString("type"))) }
         val settings=o.getJSONObject("settings")
         val quality=settings.number("quality",1080).toInt(); require(quality in PlaybackQuality.options)
         val speed=settings.get("speed"); require(speed is Number && speed.toFloat() in PlaybackSpeed.options)
         val autoNext=settings.get("autoNext"); require(autoNext is Boolean)
-        val type=ContentType.entries.firstOrNull { it.storedValue==settings.getString("type") } ?: error("内容类型无效")
+        val type=ContentType.fromStored(settings.getString("type"))
         val frame=VideoFrameMode.entries.firstOrNull { it.name==settings.getString("frame") } ?: error("画面模式无效")
         return BackupData(favorites,history,watchedIds,searches,BackupSettings(quality,speed.toFloat(),autoNext,type,frame),later,hiddenIds)
     }
