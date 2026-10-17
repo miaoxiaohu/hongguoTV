@@ -102,10 +102,20 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         require(page in 1..100)
         return ComicRank.parse(text("$site/rank/hot-comic-drama?page=$page"),page)
     }
+    /**
+     * Browse one of the catalogues named by [ContentType.categorySlug].
+     *
+     * The retired `?tab=1&sort_type=1` browse path only ever reached 874 shows, and `sort_type` is
+     * inert there anyway — 0/1/2/3/4 all answer with byte-identical first pages, so there was no
+     * "newest first" ordering to ask for. The named routes are the site's real navigation.
+     *
+     * The comic hot board deliberately no longer hangs off this function: it is reached through
+     * [comicRanking] alone, so browsing a category and reading a ranking stay separate views
+     * instead of one silently replacing the other.
+     */
     fun home(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(page in 1..100)
-        if(type==ContentType.COMIC) return comicRanking(page)
-        val data=router("$site/category?tab=1&sort_type=1"+if(page>1) "&page=$page" else "")
+        val data=router("$site/category/${type.categorySlug}"+if(page>1) "?page=$page" else "")
         val section=data.optJSONObject("category_page") ?: data.optJSONObject("category_$") ?: throw IOException("首页数据结构已变化")
         val rows=section.optJSONArray("recommendList") ?: section.optJSONObject("categoryData")?.optJSONArray("recommendList") ?: throw IOException("首页数据暂不可用")
         val items=valid(rows.objects().map(::card))
