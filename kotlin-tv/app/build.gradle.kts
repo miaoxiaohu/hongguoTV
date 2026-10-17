@@ -11,8 +11,13 @@ android {
         applicationId = "com.hongguotv.nativeapp"
         minSdk = 26
         targetSdk = 36
-        versionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 22
-        versionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "1.1.2"
+        // Release builds must set HONGGUOTV_VERSION_CODE and HONGGUOTV_VERSION_NAME; release.yml
+        // derives both from the kotlin-vX.Y.Z tag. The fallback is deliberately far below every
+        // published release because AppUpdates compares versionCode strictly: a local build that
+        // carried a plausible-looking number would leave the TV thinking it was already current
+        // and it would never offer an update again. To cut a release by hand, pass both variables.
+        versionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 1
+        versionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "0.0.0-dev"
     }
     buildFeatures { buildConfig = true }
     signingConfigs {
