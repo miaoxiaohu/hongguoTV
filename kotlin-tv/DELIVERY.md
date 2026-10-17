@@ -4,7 +4,7 @@
 
 ## 交付
 
-- 分支：`codex/kotlin-standalone`
+- 分支：`codex/kotlin-standalone`（历史分支名；当前仓库主线为 `main`）
 - 发布：`kotlin-v0.2.1`
 - APK：`hongguotv-kotlin-0.2.1-android8.apk`
 - 包名：`com.hongguotv.nativeapp`；最低 API 26，目标 API 36。
@@ -12,6 +12,14 @@
 - 使用独立发布签名，可与旧版并存；两者本机收藏/历史不互通。
 - APK SHA-256：`b83aebc10a3e1e790c5b729d835ffa9ac7490d2bce4d07fd56605952853b0e74`
 - 发布证书 SHA-256：`3579f7a8a91bbbc44688db60fb16a5561921784af23fa92f39b849086d76ca98`
+
+> **注：以上是 0.2.1 当时的发布证书，现已不再使用。**
+> 实测 kotlin-v0.9.9 的签名证书为
+> `4f4cf502b9ea2b2cccada54ab62031de1ef4dc9aecdf3addbcf4099dd853cf08`
+> （自签，CN=HongguoTV Local Build）。
+> 因此本文件记录的旧证书**不能用于覆盖安装当前版本**，而
+> `distribution/publish-tv-update.py:13` 的签名断言仍指向这个已停用的旧值，
+> 恢复自动发布前必须先改过来。
 
 ## 0.2.1 修复
 

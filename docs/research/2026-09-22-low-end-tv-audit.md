@@ -2,6 +2,10 @@
 
 审查日期：2026-09-22。基于 Kotlin TV 0.6.0，提交 `1ec7bd2327b9574e4bdf956569efd21bcf9a83c7`。
 
+> **关于文中的链接**：证据行指向的是当时的代码位置，行号会随后续改动漂移，链接指向文件本身。
+> 原文档使用作者本机的 macOS 绝对路径，对任何阅读者都不可点击，已统一改为仓库相对路径。
+> 唯一例外是标注「已有截图」的那一条——`outputs/` 目录不在版本库中，该图片链接无法打开。
+
 本轮检查了当前源代码、0.6.0 已保存的截图与验证记录，并对照 Android 官方性能建议。没有修改应用代码、重跑构建或启动模拟器。下面明确区分代码中确定存在的工作量、算术示例与尚待设备测量的收益。
 
 结论：下一版应围绕“少占内存、焦点立即响应、播放请求优先、少按几次键”收敛。已有原生 View、独立 APK、封面缓存、分组选集和预加载可以继续使用。
@@ -18,7 +22,7 @@
 
 **建议**：统一处理页面离场，解除 View 引用与请求订阅，只保留轻量数据、滚动位置和焦点 key；低内存通知时收缩非必要图片缓存。避免对仍在显示的 Bitmap 手动 recycle。
 
-证据：[MainActivity.kt:170](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:170)、[MainActivity.kt:231](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:231)、[MainActivity.kt:532](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:532)、[MainActivity.kt:609](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:609)、[HomeScreen.kt:53](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/HomeScreen.kt:53)。
+证据：[MainActivity.kt:170](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:231](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:532](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:609](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[HomeScreen.kt:53](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/HomeScreen.kt)。
 
 ## 2. 列表按可见区域创建，轻操作局部更新
 
@@ -30,7 +34,7 @@
 
 复用列表需要一起调整当前依赖所有 View ID 均已存在的焦点逻辑：按数据 key 保存焦点，离屏目标先滚动到位，再恢复焦点。不能只换容器而忽略遥控器行为。
 
-证据：[MainActivity.kt:348](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:348)、[MainActivity.kt:415](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:415)、[MainActivity.kt:448](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:448)、[HomeScreen.kt:68](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/HomeScreen.kt:68)、[HomeScreen.kt:111](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/HomeScreen.kt:111)。
+证据：[MainActivity.kt:348](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:415](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:448](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[HomeScreen.kt:68](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/HomeScreen.kt)、[HomeScreen.kt:111](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/HomeScreen.kt)。
 
 ## 3. 本地数据保留内存索引，消除主线程重复整表解析
 
@@ -45,7 +49,7 @@
 
 `SharedPreferences.apply()` 是异步写盘；这里确定处于主线程的是 JSON 解析、排序和序列化。官方另说明，未完成的 apply 写入可能在组件生命周期转换时阻塞主线程，不能把异步调用等同于完全没有退出阶段成本。[SharedPreferences 官方说明](https://developer.android.com/reference/android/content/SharedPreferences)
 
-证据：[Library.kt:25](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/Library.kt:25)、[Library.kt:48](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/Library.kt:48)、[Library.kt:65](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/Library.kt:65)、[MainActivity.kt:139](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:139)、[MainActivity.kt:403](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:403)、[MainActivity.kt:455](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:455)。
+证据：[Library.kt:25](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/Library.kt)、[Library.kt:48](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/Library.kt)、[Library.kt:65](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/Library.kt)、[MainActivity.kt:139](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:403](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:455](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)。
 
 ## 4. 取消已经过时的网络工作，让当前播放优先
 
@@ -55,7 +59,7 @@
 
 **建议**：按页面、播放意图保存 Future 和对应 HTTP Call；离场时取消相应任务、清理未执行队列。焦点附近图片优先、重复 URL 合并；播放请求拥有独立优先级。不要取消共享 HTTP 客户端的所有请求，以免误伤当前视频。
 
-证据：[MainActivity.kt:37](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:37)、[MainActivity.kt:177](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:177)、[MainActivity.kt:202](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:202)、[ContentRepository.kt:27](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/core/src/main/kotlin/com/hongguotv/core/ContentRepository.kt:27)、[ContentRepository.kt:126](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/core/src/main/kotlin/com/hongguotv/core/ContentRepository.kt:126)。
+证据：[MainActivity.kt:37](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:177](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:202](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[ContentRepository.kt:27](../../kotlin-tv/core/src/main/kotlin/com/hongguotv/core/ContentRepository.kt)、[ContentRepository.kt:126](../../kotlin-tv/core/src/main/kotlin/com/hongguotv/core/ContentRepository.kt)。
 
 ## 5. 播放期间减少无关后台工作
 
@@ -65,7 +69,7 @@ HUD 隐藏时，tick 仍每秒格式化播放文本和更新进度；MediaSessio
 
 **建议**：播放时暂停收藏扫描，回目录后恢复；只更新可见角标。HUD 可见时才按秒刷新，MediaSession 在播放状态、seek、倍速、集数变化时更新。后台停止无用 tick，但保留前台定时停止所需的计时，不破坏现有睡眠功能。
 
-证据：[FavoriteMonitor.kt:19](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/FavoriteMonitor.kt:19)、[MainActivity.kt:715](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:715)、[MainActivity.kt:937](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:937)、[TvMediaSession.kt:36](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/TvMediaSession.kt:36)。
+证据：[FavoriteMonitor.kt:19](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/FavoriteMonitor.kt)、[MainActivity.kt:715](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:937](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[TvMediaSession.kt:36](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/TvMediaSession.kt)。
 
 ## 6. 预加载时机与两分钟有效期需要协调
 
@@ -75,7 +79,7 @@ HUD 隐藏时，tick 仍每秒格式化播放文本和更新进度；MediaSessio
 
 **建议**：依据剩余播放时长与倍速，把自动连播预加载安排在预计片尾前 20～30 秒附近；可用短时手动切集路径补充。网络、缓冲条件继续生效；过期允许重新准备，但应有次数或时间限制。不要只扩大 TTL 或预加载更多集。
 
-证据：[MainActivity.kt:660](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:660)、[PreparedSlot.kt:7](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/core/src/main/kotlin/com/hongguotv/core/PreparedSlot.kt:7)。
+证据：[MainActivity.kt:660](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[PreparedSlot.kt:7](../../kotlin-tv/core/src/main/kotlin/com/hongguotv/core/PreparedSlot.kt)。
 
 ## 7. 换集复用播放器，需要先补真正首帧测量
 
@@ -85,7 +89,7 @@ HUD 隐藏时，tick 仍每秒格式化播放文本和更新进度；MediaSessio
 
 **建议**：先记录换集意图到首次渲染帧的完整时间，再尝试同一观看会话复用 PlayerView、Surface 和 ExoPlayer，仅替换 MediaSource。真正退出播放时仍释放资源。旧芯片解码器、异常恢复、清晰度切换和音频焦点需回归；不作为未经实机验证的“无缝切换”承诺。
 
-证据：[MainActivity.kt:594](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:594)、[MainActivity.kt:623](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:623)、[MainActivity.kt:634](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:634)、[MainActivity.kt:877](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:877)。
+证据：[MainActivity.kt:594](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:623](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:634](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:877](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)。
 
 ## 8. 首页减占位，焦点变化不牵动卡片尺寸
 
@@ -93,7 +97,7 @@ HUD 隐藏时，tick 仍每秒格式化播放文本和更新进度；MediaSessio
 
 **建议**：常驻预览收敛为“剧名＋集数／观看进度”，预留稳定高度；完整简介放详情。操作提示首次展示或按菜单查看。焦点边框立即响应，必要的较长文本待停留后刷新。同一行左右移动时避免反复提交纵向滚动。保留远距离可读字号，不靠缩小文字腾空间。
 
-证据：[HomeScreen.kt:18](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/HomeScreen.kt:18)、[HomeScreen.kt:85](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/HomeScreen.kt:85)、[HomeScreen.kt:119](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/HomeScreen.kt:119)、[已有 720p 大字体截图](/Users/lu.ziyong/Github/hongguoTV/outputs/kotlin-0.6.0/final-tv/60-final-large-home.png)。
+证据：[HomeScreen.kt:18](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/HomeScreen.kt)、[HomeScreen.kt:85](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/HomeScreen.kt)、[HomeScreen.kt:119](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/HomeScreen.kt)、[已有 720p 大字体截图](../../outputs/kotlin-0.6.0/final-tv/60-final-large-home.png)（⚠️ `outputs/` 未纳入版本库，此链接无法打开）。
 
 ## 9. 统一续播与返回，缩短选集路径
 
@@ -108,7 +112,7 @@ HUD 隐藏时，tick 仍每秒格式化播放文本和更新进度；MediaSessio
 
 遥控器不能假定都有菜单键，低频设置应仍有可见入口。已有确认暂停、左右快进退、20 集分组和跳转集数可以保留，不需要再造一套复杂导航。
 
-证据：[MainActivity.kt:365](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:365)、[MainActivity.kt:523](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:523)、[MainActivity.kt:794](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:794)、[MainActivity.kt:887](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:887)。
+证据：[MainActivity.kt:365](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:523](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:794](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:887](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)。
 
 ## 10. 图片按实际显示尺寸处理，设备档位自动调整
 
@@ -118,13 +122,13 @@ HUD 隐藏时，tick 仍每秒格式化播放文本和更新进度；MediaSessio
 
 Android 官方建议使用 `ActivityManager.isLowRamDevice()` 识别受限设备、按资源条件调整图片和媒体占用，并在转场后解除不再需要的对象引用；这些方向与本轮发现一致。[Android TV 内存优化指南](https://developer.android.com/training/tv/playback/memory)
 
-证据：[MainActivity.kt:138](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:138)、[MainActivity.kt:192](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt:192)。
+证据：[MainActivity.kt:138](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)、[MainActivity.kt:192](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/MainActivity.kt)。
 
 ## 后续测量后再决定的项目
 
 解密路径每个块和样本存在数组复制、BigInteger 和 Cipher 对象创建；顺序视频读取采用多次 Range 请求。这些都是可定位的分配或网络开销，但没有低配设备 CPU／分配采样，不能判定其为当前主瓶颈。应先完成上面的确定性减负，再决定是否改动解密、顺序读取或缓冲策略；改动必须覆盖随机 seek、跨块和加密子样本。现有播放缓冲目标是 12 MiB，不能把它当整个播放器内存上限，也不宜直接继续缩短缓冲而增加卡顿。
 
-证据：[VideoDataSource.kt:27](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/VideoDataSource.kt:27)、[RemoteVideo.kt:55](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/core/src/main/kotlin/com/hongguotv/core/RemoteVideo.kt:55)、[MediaCrypto.kt:134](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/core/src/main/kotlin/com/hongguotv/core/MediaCrypto.kt:134)。
+证据：[VideoDataSource.kt:27](../../kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/VideoDataSource.kt)、[RemoteVideo.kt:55](../../kotlin-tv/core/src/main/kotlin/com/hongguotv/core/RemoteVideo.kt)、[MediaCrypto.kt:134](../../kotlin-tv/core/src/main/kotlin/com/hongguotv/core/MediaCrypto.kt)。
 
 ## 建议实施与验收顺序
 
@@ -138,6 +142,6 @@ Android 官方建议使用 `ActivityManager.isLowRamDevice()` 识别受限设备
 
 必须补的设备指标：冷启动到可操作首屏；连续遥控移动的帧耗时与输入响应；按键到首帧；连续浏览、播放、返回至少 20 次后的内存趋势；播放掉帧与 GC；弱网下快速切换请求的取消情况。报告分清 Java／Native／Graphics 内存，不以 APK 大小或单一缓存数字代替运行占用。
 
-已有 0.6.0 数据来自 Android TV API 36 模拟器：缓存启动 298～406 ms（Activity 到内容布局回调）；预加载换集 149～175 ms（部分换集路径到 READY）。这些可作旧版参考，不是 Android 8 低配实体电视的验收结果，也不能据此承诺改进百分比。建议用同一台实体电视、同一组节目完成前后对照。[现有发布验证说明](/Users/lu.ziyong/Github/hongguoTV/kotlin-tv/RELEASE_0.6.0.md)
+已有 0.6.0 数据来自 Android TV API 36 模拟器：缓存启动 298～406 ms（Activity 到内容布局回调）；预加载换集 149～175 ms（部分换集路径到 READY）。这些可作旧版参考，不是 Android 8 低配实体电视的验收结果，也不能据此承诺改进百分比。建议用同一台实体电视、同一组节目完成前后对照。[现有发布验证说明](../../kotlin-tv/RELEASE_0.6.0.md)
 
 列表复用、减少不必要布局和图片上传也符合 Android 官方渲染性能建议。[Slow rendering](https://developer.android.com/topic/performance/issues/render)
