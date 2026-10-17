@@ -374,6 +374,62 @@ class ContentRepositoryTest {
         assertNull(repo.home(1,ContentType.SHORT).matchedCount)
     }
 
+    /**
+     * The ten-row ceiling belongs to the server, not to the client: with an index the same search
+     * pages through everything the index holds, which is the whole point of building it.
+     */
+    @Test fun theLocalIndexPagesResultsTheServerRefusesToGive() {
+        val local=CatalogueIndex((1..70).map { Series((100+it).toString(),"总裁归来第${it}季") })
+        val repo=repository { searchPage(searchRow("999","站内没有的热门剧")) }
+        val first=repo.search("总裁归来",1,ContentType.SHORT,local)
+        assertEquals(ContentRepository.SEARCH_PAGE_SIZE,first.items.size)
+        assertTrue(first.hasMore)
+        val third=repo.search("总裁归来",3,ContentType.SHORT,local)
+        assertEquals(10,third.items.size)
+        assertFalse(third.hasMore)
+        // Every page is a local match, so the 「站内没有」 notice must stay off.
+        assertTrue(third.items.all { mentions(it.title,"总裁归来") })
+    }
+
+    @Test fun rowsTheIndexHasNeverSeenOnlyFillAnEmptyPage() {
+        val local=CatalogueIndex(listOf(Series("1","总裁归来"),Series("2","总裁归来第二季")))
+        val repo=repository { searchPage(searchRow("999","总裁归来后传"),searchRow("998","另一个新剧")) }
+        val first=repo.search("总裁归来",1,ContentType.SHORT,local)
+        // Two local hits first. Of the server's rows only the one that mentions the term earns a
+        // slot — the other is exactly the padding that made an exact hit look like a page of noise.
+        assertEquals(listOf("1","2","999"),first.items.map { it.id })
+        assertFalse(first.hasMore)
+    }
+
+    @Test fun withNoLocalHitEveryServerRowIsKeptBecauseItIsAllThereIs() {
+        val local=CatalogueIndex(listOf(Series("1","雾锁情迷")))
+        val repo=repository { searchPage(searchRow("999","剑神归来：我和驴子的十万年第一季"),searchRow("998","零下五十度我被困在公司")) }
+        val result=repo.search("庆余年",1,ContentType.SHORT,local)
+        // Nothing matched locally, so the two same-genre rows are shown in full behind the
+        // 「站内没有《庆余年》，以下是同类推荐」 notice rather than filtered away to nothing.
+        assertEquals(listOf("999","998"),result.items.map { it.id })
+        assertEquals(0,result.matchedCount)
+    }
+
+    @Test fun withoutALocalHitSearchFallsBackToTheServersTenRows() {
+        val local=CatalogueIndex(listOf(Series("1","雾锁情迷")))
+        val repo=repository { searchPage(searchRow("999","剑神归来：我和驴子的十万年第一季")) }
+        val result=repo.search("庆余年",1,ContentType.SHORT,local)
+        assertEquals(listOf("999"),result.items.map { it.id })
+        assertEquals(0,result.matchedCount)
+        assertFalse(result.hasMore)
+        // No index and no more pages: the second request must not be made.
+        assertTrue(repo.search("庆余年",2,ContentType.SHORT,local).items.isEmpty())
+    }
+
+    @Test fun aTagOnlyHitCountsAsFoundSoTheTabDoesNotClaimTheShowIsMissing() {
+        // 《雾锁情迷》 carries a 「总裁」 tag and no such word in its title; reporting zero matches
+        // would put 「站内没有《总裁》」 directly above the very shows that matched.
+        val local=CatalogueIndex(listOf(Series("1","雾锁情迷",tags="爱情 · 都市爱情 · 总裁")))
+        val repo=repository { searchPage(searchRow("999","初尝玫瑰！")) }
+        assertEquals(1,repo.search("总裁",1,ContentType.SHORT,local).matchedCount)
+    }
+
     @Test fun searchNeverCallsTheRefusedAppEndpoint() {
         val hosts=mutableSetOf<String>()
         val repo=repository { request -> hosts+=request.url.host; searchPage() }

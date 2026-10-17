@@ -125,11 +125,13 @@ class MainActivity: Activity() {
     private var catalog=emptyList<Series>()
     private var hasMore=false
     /**
-     * 搜索结果里真正含关键词的条数；null 表示还没搜、或当前不是搜索结果页。
+     * 搜索结果里真正被关键词命中的条数；null 表示还没搜、或当前不是搜索结果页。
      *
      * 服务端对任何关键词都回十条同类热门剧，从不回空，所以「站内没有这部剧」只能在这里判。
      */
     private var searchMatched:Int?=null
+    /** 上次重绘索引进度时已收录的部数，用于把 68 次回调压成每 400 部一次。 */
+    private var cataloguePaintMark=0
     private var catalogFocus=""
     /** 当前详情页剧集网格里的按钮，供 [renderSeasons] 接同系列区块的双向焦点。 */
     private var episodeViews: List<View> = emptyList()
@@ -221,6 +223,22 @@ class MainActivity: Activity() {
             if(!isDestroyed) { libraryLoadError=problem; if(foreground) showLibraryError(problem) }
         }) {
             if(!isDestroyed && foreground) { showCatalog(load=true); favoriteMonitor.check() }
+            startCatalogueBuild()
+        }
+    }
+    /**
+     * Kick off (or skip) the walk that turns the site's ten search rows into the whole library.
+     *
+     * Runs once per process: the index is cached for a week, and a build already in flight is
+     * refused by [Library.buildCatalogue]. It is deliberately not tied to the visible screen, since
+     * the first search usually happens long before the walk finishes and should still find it.
+     */
+    private fun startCatalogueBuild() {
+        if(library.isBuildingCatalogue()) return
+        library.buildCatalogue(repository) { total ->
+            // The walk reports ~68 times. Repainting the tab on every one of them would rebuild
+            // the whole grid on a low-end box, so the notice steps in every 400 shows instead.
+            if(tab==1 && !isDestroyed && total-cataloguePaintMark>=400) { cataloguePaintMark=total; showCatalog() }
         }
     }
     private fun base(title: String?=null): LinearLayout {
@@ -426,7 +444,7 @@ class MainActivity: Activity() {
             else { message(body,"正在加载…"); if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
             val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType
             work({
-                val result=when(requestTab) { 0 -> repository.home(requestPage,requestType); 2 -> repository.comicRanking(requestPage); else -> repository.search(requestQuery,requestPage,requestType) }
+                val result=when(requestTab) { 0 -> repository.home(requestPage,requestType); 2 -> repository.comicRanking(requestPage); else -> repository.search(requestQuery,requestPage,requestType,library.catalogue()) }
                 result
             }, { result ->
                 if(requestTab==0 && requestPage==1) library.cacheHome(requestType,result.items,result.hasMore)
@@ -493,8 +511,13 @@ class MainActivity: Activity() {
         // 《剑神归来》. Say so, then keep the rows: 搜「总裁」legitimately reaches shows that merely
         // contain the word, and those are worth showing. A TextView is not focusable, so the D-pad
         // chain below still starts on the first card.
-        if(tab==1 && searchMatched==0 && query.isNotBlank())
-            list.addView(text("站内没有《$query》，以下是同类推荐",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(12)) },lp(-1,-2))
+        if(tab==1 && query.isNotBlank()) {
+            if(searchMatched==0) list.addView(text("站内没有《$query》，以下是同类推荐",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(6)) },lp(-1,-2))
+            // Saying how much the index holds is the difference between "搜不出" and "还没建完".
+            val indexed=library.catalogueSize()
+            val status=if(library.isBuildingCatalogue()) "正在建立全库索引 · 已收录 $indexed 部" else if(indexed>0) "已搜索全库 $indexed 部" else null
+            status?.let { list.addView(text(it,13f,muted).apply { setPadding(dp(4),0,dp(4),dp(12)) },lp(-1,-2)) }
+        }
         val cards=mutableListOf<View>(); val count=6; val gap=dp(14); val width=((resources.displayMetrics.widthPixels*.9f-gap*(count-1))/count).toInt()
         displayed.chunked(count).forEach { items ->
             val line=row(); line.gravity=Gravity.TOP

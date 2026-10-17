@@ -69,6 +69,9 @@ internal fun seriesBaseTitle(title: String): String =
 /** Whitespace and punctuation carry no meaning when looking for a show by name. */
 private val SEARCH_NOISE = Regex("[\\s\\p{P}\\p{S}]+")
 
+/** Lowercase, with whitespace and punctuation removed. */
+internal fun normalizeForSearch(value: String) = SEARCH_NOISE.replace(value.lowercase(Locale.ROOT), "")
+
 /**
  * Does [title] actually mention [keyword]?
  *
@@ -82,14 +85,14 @@ private val SEARCH_NOISE = Regex("[\\s\\p{P}\\p{S}]+")
  * 全场唯一预言家第三季」from a phone lands on 「伪人降临！我是全场唯一预言家第三季」.
  */
 internal fun mentions(title: String, keyword: String): Boolean {
-    val needle=SEARCH_NOISE.replace(keyword.lowercase(Locale.ROOT),"")
-    return needle.isNotEmpty() && needle in SEARCH_NOISE.replace(title.lowercase(Locale.ROOT),"")
+    val needle = normalizeForSearch(keyword)
+    return needle.isNotEmpty() && needle in normalizeForSearch(title)
 }
 data class RankPosition(val rank: Int?, val heat: String)
 data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
 /**
- * [matchedCount] is how many of [items] actually mention the searched keyword, or null when the
- * page is not a search result and the question does not apply.
+ * [matchedCount] is how many of [items] the keyword actually found, or null when the page is not
+ * a search result and the question does not apply.
  */
 data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null, val matchedCount: Int? = null)
 data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
@@ -148,28 +151,61 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return CatalogPage(items,items.isNotEmpty() && page<minOf(lastPage,100))
     }
     /**
-     * Search through the public page, the only source that still answers.
+     * Search the whole catalogue locally when an index is available, otherwise through the public page.
      *
-     * The signed App endpoint (`reading/bookapi/search/tab/v`) now replies HTTP 200 with a
-     * zero-byte body, so the old `appSearch` path could only ever throw - it left comic search
-     * dead and cost a doomed request before every short-drama fallback. The public page serves
-     * both short dramas and comics, so [type] no longer selects a source.
+     * The public page is the only source that still answers, and it answers with ten rows and no
+     * way to ask for more: `?page=` and sixteen other paging names return byte-identical pages,
+     * the page's JavaScript bundle makes no API call of its own, and the signed App endpoint
+     * `reading/bookapi/search/tab/v/` returns HTTP 200 with a zero-byte body for every parameter
+     * shape tried while `video_model/v1/` returns 24 KB in the same process. So the public page
+     * alone is a ten-row ceiling no client change can lift - see [CatalogueIndex], which is built
+     * from the catalogue pages that *do* work and turns ten rows into the full 1600.
      *
-     * It renders only the first page server-side and ignores `?page=`, so it must never advertise
-     * a next page; claiming one made the list repeat itself forever.
+     * The server is still asked once per search, and whatever it returns that the index has never
+     * seen is appended when the page has room. That keeps newly listed shows reachable without
+     * letting ten unranked rows outrank a local exact match.
      *
      * [CatalogPage.matchedCount] records how many rows actually mention the keyword. It is not a
      * nicety: the site answers every query with ten rows and never an empty list, so 「站内没有这部
      * 剧」 can only be decided client-side — see [mentions].
      */
-    fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
+    fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT, local: CatalogueIndex? = null): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
-        if(page>1) return CatalogPage(emptyList(),false)
+        val localRows = local?.search(keyword,SEARCH_LOCAL_LIMIT) ?: emptyList()
+        // The server is asked on page one only. Its ten rows merely top up a page that the local
+        // index has not filled, so re-asking on page two would spend a request to return rows that
+        // are already merged in - and with no index at all it would spend one to answer nothing.
+        val serverRows = if(page==1) publicSearch(keyword) else emptyList()
+        val known = localRows.mapTo(HashSet()) { it.id }
+        val unseen = serverRows.filterNot { it.id in known }
+        // A local hit has to stay alone: 搜「雾锁情迷」finds exactly one show, and topping the page
+        // up with the server's fuzzy rows would bury nine unrelated dramas under it. When the index
+        // finds nothing at all those rows are the only thing left to show, and they are shown whole
+        // under the 「以下是同类推荐」 notice instead.
+        val filler = if(localRows.isEmpty()) unseen else unseen.filter { mentions(it.title,keyword) }
+        val window = when {
+            // No index, or the index matched nothing: the ten server rows are all there is.
+            localRows.isEmpty() -> if(page>1) emptyList() else serverRows
+            else -> {
+                val slice = localRows.drop((page-1)*SEARCH_PAGE_SIZE).take(SEARCH_PAGE_SIZE).toMutableList()
+                // Only the first page borrows room from the server, so paging never drifts between
+                // two different orderings.
+                if(page==1 && slice.size<SEARCH_PAGE_SIZE) slice += filler.take(SEARCH_PAGE_SIZE-slice.size)
+                slice
+            }
+        }
+        val hasMore = localRows.size > page*SEARCH_PAGE_SIZE
+        // A local hit counts even when the word is only in the tags — 《雾锁情迷》 carries a
+        // 「总裁」 tag — otherwise the tab would claim 「站内没有《总裁》」 while listing exactly
+        // the shows that matched it.
+        val matched = localRows.size + filler.count { mentions(it.title,keyword) }
+        return CatalogPage(window.distinctBy { it.id },hasMore,null,matched)
+    }
+    private fun publicSearch(keyword: String): List<Series> {
         val data=router("$site/search/${Signer.encode(keyword)}?page=1")
         val section=data.optJSONObject("search_(keyword)/page") ?: data.optJSONObject("search_page") ?: throw IOException("搜索数据暂不可用")
         val rows=section.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
-        val items=valid(rows.objects().map(::card))
-        return CatalogPage(items,false,null,items.count { mentions(it.title,keyword) })
+        return valid(rows.objects().map(::card))
     }
     fun detail(id: String): Detail {
         require(id.matches(Regex("[0-9]{1,30}")))
@@ -277,6 +313,10 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     companion object {
         /** The only signed player endpoint that still answers; see [stream]. */
         const val VIDEO_MODEL_API = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/video_model/v1/"
+        /** One screen of search results, matching the 30 rows the list renders. */
+        const val SEARCH_PAGE_SIZE = 30
+        /** Upper bound on local matches per search, so one keystroke cannot re-rank 1600 rows. */
+        private const val SEARCH_LOCAL_LIMIT = 400
         fun extractRouter(html: String): JSONObject {
             val marker=html.indexOf("_ROUTER_DATA"); if(marker<0) throw IOException("页面没有内容数据")
             val first=html.indexOf('{',marker); if(first<0) throw IOException("页面数据格式错误")

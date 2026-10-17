@@ -1,7 +1,90 @@
 package com.hongguotv.core
 
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
+
 fun main(args: Array<String>) {
     val repository=ContentRepository()
+
+    // Re-measures the signed App search endpoint, the one path that could have lifted the ten-row
+    // ceiling on the public page.
+    //
+    // Measured 2026-10-18: it answers HTTP 200 with a zero-byte body for every parameter shape
+    // tried - 8 GET and 5 POST variants across 3 hosts and 6 candidate paths, all of the others
+    // 404 outright - while video_model/v1/ returns ~24 KB of code=0 in the same process. An empty
+    // search body is therefore the endpoint refusing us, not a wrong parameter, a stale device
+    // identity or a broken signature. That is why [CatalogueIndex] exists.
+    //
+    // The control is not optional. Both endpoints answer 200, and a banned fingerprint is also a
+    // 200 with an empty body, so without a known-good request in the same run there is nothing to
+    // tell "refused" apart from "we got blocked".
+    if(args.contains("--appsearch")) {
+        val signer=Signer()
+        val keyword=args.firstOrNull { !it.startsWith("--") } ?: "总裁"
+        val http=repository.http
+
+        fun call(label: String,url: String,headers: Map<String,String>,body: ByteArray?) {
+            try {
+                val request=okhttp3.Request.Builder().url(url)
+                headers.forEach { (k,v) -> request.header(k,v) }
+                body?.let { request.post(it.toRequestBody("application/json; charset=utf-8".toMediaType())) }
+                val bytes=http.newCall(request.build()).execute().use { response -> response.body?.bytes() ?: ByteArray(0) }
+                println("[$label] bytes=${bytes.size} :: ${String(bytes,0,minOf(160,bytes.size)).replace(Regex("\\s+")," ")}")
+            } catch(e: Exception) {
+                println("[$label] FAILED ${e.javaClass.simpleName}: ${e.message?.take(110)}")
+            }
+        }
+
+        fun control(): String {
+            val sample=repository.home(1,ContentType.SHORT).items.firstOrNull() ?: return "no catalogue row"
+            val episode=repository.detail(sample.id).episodes.firstOrNull() ?: return "no episode id"
+            val payload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"video_id":"$episode"}""".toByteArray()
+            val signed=signer.sign(ContentRepository.VIDEO_MODEL_API,VendorConstants.newDevice(),payload)
+            call("control video_model",signed.url,signed.headers,payload)
+            return repository.stream(sample.id,episode).let { "stream OK ${it.quality}" }
+        }
+        println("control: ${control()}")
+
+        val base="https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/search/tab/v/"
+        // The url and the headers must come from one signing pass: x-medusa embeds the device_id
+        // that is also in the query, and a mismatch makes the server drop the response silently.
+        val getSigned=signer.sign(base,VendorConstants.newDevice().toMutableMap().apply { put("query",keyword) })
+        call("GET query",getSigned.url,getSigned.headers,null)
+        val body="""{"query":"$keyword","offset":0,"count":20}""".toByteArray()
+        val postSigned=signer.sign(base,VendorConstants.newDevice(),body)
+        call("POST body",postSigned.url,postSigned.headers,body)
+
+        println("control again: ${control()}")
+        http.connectionPool.evictAll(); http.dispatcher.executorService.shutdown()
+        return
+    }
+
+    // End-to-end proof for the local catalogue index: walk everything, then search it. Prints the
+    // size of the index on disk too, because the ceiling that matters on a low-end box is whether
+    // the JSON still fits the preference file and the 7-day cache.
+    if(args.contains("--index")) {
+        try {
+            val started=System.currentTimeMillis()
+            var last=0
+            val entries=CatalogueBuilder(repository).build(onPage={ _,total ->
+                if(total-last>=400) { last=total; println("  ... 已收录 $total 部，用时 ${(System.currentTimeMillis()-started)/1000}s") }
+            })
+            println("索引建完：${entries.size} 部，用时 ${(System.currentTimeMillis()-started)/1000}s")
+            val index=CatalogueIndex(entries)
+            for(q in listOf("庆余年","总裁","雾锁情迷","修仙","庆余年第二季")) {
+                val serverOnly=repository.search(q)
+                val merged=repository.search(q,1,ContentType.SHORT,index)
+                println("  「$q」 本地命中=${index.search(q,400).size} | 服务端=${serverOnly.items.size} 条 matched=${serverOnly.matchedCount} | 合并后第1页=${merged.items.size} hasMore=${merged.hasMore} matched=${merged.matchedCount}")
+            }
+            val json=CatalogueIndexDisk.encode(entries,System.currentTimeMillis())
+            val decoded=CatalogueIndexDisk.decode(json,System.currentTimeMillis())
+            println("磁盘：${json.length} 字符（上限 1500000），解码后 ${decoded?.size} 部，回搜雾锁情迷 -> ${decoded?.search("雾锁情迷")?.firstOrNull()?.title}")
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
+
     if(args.contains("--ranking")) {
         try {
             val first=repository.comicRanking()

@@ -18,19 +18,33 @@ class Library(context: Context) {
     private companion object {
         // A replacement Activity must not load before its predecessor's final checkpoint commits.
         val retiredWrites = mutableListOf<LatestWriteQueue<String, () -> Any?>>()
+        /** Below this, an index would look complete while quietly hiding most of the library. */
+        const val MIN_INDEXED = 200
     }
+    private data class Loaded(
+        val index: LibraryIndex,
+        val homes: Map<ContentType, CatalogPage>,
+        val stamps: Map<ContentType, Long>,
+        val catalogue: CatalogueIndex?
+    )
     private val app = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
     private val loader = Executors.newSingleThreadExecutor { task -> Thread(task, "hongguotv-library-load") }
     private val prefs by lazy { app.getSharedPreferences("native-library-v1", Context.MODE_PRIVATE) }
     private val homePrefs by lazy { app.getSharedPreferences("native-home-cache-v1", Context.MODE_PRIVATE) }
+    private val cataloguePrefs by lazy { app.getSharedPreferences("native-catalogue-index-v1", Context.MODE_PRIVATE) }
     private val writes = LatestWriteQueue<String, () -> Any?>("hongguotv-library-write", write = { batch -> commit(prefs, batch) },
         failed = { Log.w("HongguoTV", "Local library commit failed; pending changes retained for retry") })
     private val homeWrites = LatestWriteQueue<String, () -> Any?>("hongguotv-home-write", write = { batch -> commit(homePrefs, batch) },
         failed = { Log.w("HongguoTV", "Home cache commit failed") })
+    private val catalogueWrites = LatestWriteQueue<String, () -> Any?>("hongguotv-catalogue-write", write = { batch -> commit(cataloguePrefs, batch) },
+        failed = { Log.w("HongguoTV", "Catalogue index commit failed; the index is rebuilt next launch") })
+    private val catalogueLoader = Executors.newSingleThreadExecutor { task -> Thread(task, "hongguotv-catalogue-build") }
     private var index: LibraryIndex? = null
     private val homes = mutableMapOf<ContentType, CatalogPage>()
     private val homeSavedAt = mutableMapOf<ContentType, Long>()
+    private var catalogue: CatalogueIndex? = null
+    private var catalogueBuilding = false
     private var loading = false
     private var closed = false
     private val readyCallbacks = mutableListOf<() -> Unit>()
@@ -72,15 +86,20 @@ class Library(context: Context) {
                 if (oldKeys.isNotEmpty() && migration.commit()) {
                     prefs.edit().also { edit -> oldKeys.forEach(edit::remove) }.commit()
                 }
-                Triple(loaded, cached, stamps)
+                // The full-catalogue index is independent of the user's library: a corrupt or
+                // missing one costs search breadth, not favorites, so it is read separately and
+                // simply leaves null behind.
+                val builtCatalogue = cataloguePrefs.getString("index", null)?.let { CatalogueIndexDisk.decode(it, now) }
+                Loaded(loaded, cached, stamps, builtCatalogue)
             }
             main.post {
                 loading = false
                 if (closed) { readyCallbacks.clear(); errorCallbacks.clear(); return@post }
                 val ready = readyCallbacks.toList(); readyCallbacks.clear()
                 val errors = errorCallbacks.toList(); errorCallbacks.clear()
-                result.onSuccess { (loaded, cached, stamps) ->
-                    index = loaded; homes.putAll(cached); homeSavedAt.putAll(stamps)
+                result.onSuccess { loaded ->
+                    index = loaded.index; homes.putAll(loaded.homes); homeSavedAt.putAll(loaded.stamps)
+                    catalogue = loaded.catalogue
                     ready.forEach { it() }
                 }.onFailure { failure -> errors.forEach { it(failure) } }
             }
@@ -88,6 +107,54 @@ class Library(context: Context) {
     }
     private fun state(): LibraryIndex = checkNotNull(index) { "Load the local library before accessing it" }
     private fun put(key: String, value: Any?) { writes.submit(mapOf(key to { value })) }
+
+    /**
+     * The whole-catalogue search index, or null while there is none worth searching.
+     *
+     * Search on its own can only see the ten rows the site renders. This is what makes the other
+     * 1590 reachable - see [CatalogueIndex].
+     */
+    fun catalogue() = catalogue
+    /** How many shows the index currently holds; 0 until a build lands its first pages. */
+    fun catalogueSize() = catalogue?.size ?: 0
+    fun isBuildingCatalogue() = catalogueBuilding
+
+    /**
+     * Walks both catalogues in the background and publishes the result as it arrives.
+     *
+     * Returns false when a build is already running or the library is closed. [onProgress] runs on
+     * the main thread with the running total, so the search tab can show 「已收录 N 部」 while the
+     * walk is still going and be useful long before it finishes.
+     *
+     * A short build is discarded rather than stored: half a catalogue would silently hide shows
+     * while still looking like a working index.
+     */
+    fun buildCatalogue(repository: ContentRepository, onProgress: (Int) -> Unit = {}): Boolean {
+        if (catalogueBuilding || closed) return false
+        catalogueBuilding = true
+        // Touched only on the build thread; the main thread ever sees the immutable snapshots.
+        val collected = mutableListOf<Series>()
+        catalogueLoader.execute {
+            val entries = CatalogueBuilder(repository).build(
+                isCancelled = { closed },
+                onPage = { fresh, total ->
+                    collected += fresh
+                    val snapshot = collected.toList()
+                    main.post { if (!closed) { catalogue = CatalogueIndex(snapshot); onProgress(total) } }
+                }
+            )
+            main.post { if (!closed) catalogueBuilding = false }
+            if (entries.size >= MIN_INDEXED) {
+                val now = System.currentTimeMillis()
+                catalogueWrites.submit(mapOf("index" to { CatalogueIndexDisk.encode(entries, now) }))
+            } else {
+                Log.i("HongguoTV", "Catalogue walk collected ${entries.size} shows, below the floor; keeping the server's ten rows")
+            }
+        }
+        return true
+    }
+    /** Drops a stale index so the next build starts from a clean file rather than a merged one. */
+    fun clearCatalogue() { catalogue = null; catalogueWrites.submit(mapOf("index" to { null })) }
     private fun persist(vararg keys: String) {
         val state = state()
         val batch = linkedMapOf<String, () -> Any?>()
@@ -172,16 +239,16 @@ class Library(context: Context) {
         flush()
     }
     /** Requests prompt background commit, without lifecycle-thread disk waits. */
-    fun flush() { writes.flush(); homeWrites.flush() }
+    fun flush() { writes.flush(); homeWrites.flush(); catalogueWrites.flush() }
     /** Drain pending commits after Activity destruction; abrupt process death is still a boundary. */
     fun close() {
         if (closed) return
         closed = true
         readyCallbacks.clear(); errorCallbacks.clear()
-        loader.shutdown()
+        loader.shutdown(); catalogueLoader.shutdownNow()
         synchronized(retiredWrites) {
-            writes.close(); homeWrites.close()
-            retiredWrites += writes; retiredWrites += homeWrites
+            writes.close(); homeWrites.close(); catalogueWrites.close()
+            retiredWrites += writes; retiredWrites += homeWrites; retiredWrites += catalogueWrites
         }
     }
     private fun commit(target: SharedPreferences, values: Map<String, () -> Any?>): Boolean {
