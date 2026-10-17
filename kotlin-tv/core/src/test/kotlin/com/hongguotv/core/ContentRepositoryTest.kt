@@ -251,13 +251,13 @@ class ContentRepositoryTest {
         assertFalse(result.hasMore)
     }
 
-    @Test fun comicHomeUsesDedicatedRankAndRealPagination() {
+    @Test fun comicRankingIsReachedDirectlyRatherThanThroughBrowsing() {
         val repo=repository { request ->
             assertEquals("/rank/hot-comic-drama",request.url.encodedPath)
             assertEquals("2",request.url.queryParameter("page"))
             currentRank(rankPayload(2,2))
         }
-        val page=repo.home(2,ContentType.COMIC)
+        val page=repo.comicRanking(2)
         assertEquals("测试漫剧",page.items.single().title)
         assertEquals("https://example.com/cover.jpg",page.items.single().cover)
         assertEquals("全 12 集",page.items.single().badge)
@@ -266,17 +266,17 @@ class ContentRepositoryTest {
 
     @Test fun legacyRankIsStillSupported() {
         val repo=repository { script("r",JSONArray().put("rank_hot-comic-drama/page").put("content").put(rankPayload())) }
-        assertTrue(repo.home(1,ContentType.COMIC).hasMore)
+        assertTrue(repo.comicRanking(1).hasMore)
     }
 
     @Test fun comicHomeDoesNotUseUnrelatedRankData() {
         val repo=repository { script("r",JSONArray().put("rank_hot-real-drama/page").put("content").put(rankPayload())) }
-        assertThrows(IOException::class.java) { repo.home(1,ContentType.COMIC) }
+        assertThrows(IOException::class.java) { repo.comicRanking(1) }
     }
 
     @Test fun rejectedComicRankRemainsAnError() {
         val repo=repository { currentRank(rankPayload().put("isSuccess",false)) }
-        assertThrows(IOException::class.java) { repo.home(1,ContentType.COMIC) }
+        assertThrows(IOException::class.java) { repo.comicRanking(1) }
     }
 
     @Test fun renderedComicRankWorksWhenStreamedPayloadIsMissing() {
@@ -286,7 +286,7 @@ class ContentRepositoryTest {
                 <h2 id="rank-title-123">测试 &amp; 漫剧</h2><p class="pc-description-example">简介</p><p class="pc-metrics-example">123万热度</p></article>
                 <nav aria-label="榜单分页"><a href="/rank/hot-comic-drama?page=1">1</a><span aria-current="page">2</span><a href="/rank/hot-comic-drama?page=3">3</a></nav>"""
         }
-        val page=repo.home(2,ContentType.COMIC)
+        val page=repo.comicRanking(2)
         assertEquals("测试 & 漫剧",page.items.single().title)
         assertEquals("https://example.com/a.jpg",page.items.single().cover)
         assertTrue(page.hasMore)
@@ -335,14 +335,69 @@ class ContentRepositoryTest {
         assertThrows(IOException::class.java) { repository { "<html>没有数据</html>" }.search("测试") }
     }
 
-    @Test fun shortHomeStillUsesCategoryAndStopsOnLastPage() {
+    @Test fun homeStopsOnTheLastPageOfANamedCatalogue() {
         val repo=repository { request ->
-            assertEquals("1",request.url.queryParameter("tab"))
-            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"456","series_name":"测试短剧"}],"pagination":{"totalPages":1}}}};</script>"""
+            assertEquals("/category/real-drama",request.url.encodedPath)
+            assertNull(request.url.queryParameter("tab"))
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"456","series_name":"测试短剧"}],"pagination":{"total":800,"pageNum":1,"pageSize":24,"totalPages":1}}}};</script>"""
         }
         val result=repo.home(1,ContentType.SHORT)
         assertEquals("456",result.items.single().id)
         assertFalse(result.hasMore)
+    }
+
+    /**
+     * The four catalogues are disjoint on the site (measured pairwise overlap: zero), so each must
+     * ask for its own route. A shared path here would silently collapse them back into one list —
+     * which is exactly the bug that hid 1600 shows.
+     */
+    /**
+     * `/category/comic` (漫画, 74 shows) is intentionally not a browse tab: it does list a
+     * `vid_list`, but those ids are comic chapters rather than video — the signed player endpoint
+     * answers HTTP 500 for every show tried. Adding it back would ship 74 unplayable rows, so the
+     * exact catalogue list is pinned here on purpose.
+     */
+    @Test fun browseableCataloguesAreExactlyTheThreeThatActuallyStream() {
+        assertEquals(listOf("real-drama","ai-drama","comic-drama"),ContentType.entries.map { it.categorySlug })
+        assertEquals(ContentType.entries.size,ContentType.entries.map { it.categorySlug }.distinct().size)
+        assertEquals(ContentType.entries.size,ContentType.entries.map { it.label }.distinct().size)
+        assertEquals(ContentType.entries.size,ContentType.entries.map { it.storedValue }.distinct().size)
+    }
+
+    @Test fun everyCatalogueBrowsesItsOwnNamedRoute() {
+        val seen=mutableListOf<String>()
+        val repo=repository { request ->
+            seen += request.url.encodedPath
+            assertNull(request.url.queryParameter("tab"))
+            val type=ContentType.entries.single { request.url.encodedPath=="/category/${it.categorySlug}" }
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"1","series_name":"测试${type.label}"}],"pagination":{"total":800,"pageNum":1,"pageSize":24,"totalPages":34}}}};</script>"""
+        }
+        for(type in ContentType.entries) {
+            val page=repo.home(type=type)
+            assertEquals("测试${type.label}",page.items.single().title)
+            assertTrue(page.hasMore)
+        }
+        assertEquals(ContentType.entries.size,seen.distinct().size)
+    }
+
+    @Test fun browsingTheComicCatalogueNoLongerReturnsHotBoardMetadata() {
+        val repo=repository { request ->
+            assertEquals("/category/comic-drama",request.url.encodedPath)
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"456","series_name":"测试漫剧"}],"pagination":{"totalPages":2}}}};</script>"""
+        }
+        val result=repo.home(1,ContentType.COMIC)
+        assertNull(result.ranking)
+        assertTrue(result.hasMore)
+    }
+
+    @Test fun homeSendsThePageNumberOnlyAfterTheFirstOne() {
+        val queries=mutableListOf<String?>()
+        val repo=repository { request ->
+            queries += request.url.queryParameter("page")
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"456","series_name":"测试"}],"pagination":{"totalPages":34}}}};</script>"""
+        }
+        repo.home(1,ContentType.AI); repo.home(2,ContentType.AI); repo.home(12,ContentType.AI)
+        assertEquals(listOf(null,"2","12"),queries)
     }
 
     @Test fun searchSkipsRowsWithoutAUsableSeriesId() {
