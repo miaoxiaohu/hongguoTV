@@ -124,6 +124,12 @@ class MainActivity: Activity() {
     private var query=""
     private var catalog=emptyList<Series>()
     private var hasMore=false
+    /**
+     * 搜索结果里真正含关键词的条数；null 表示还没搜、或当前不是搜索结果页。
+     *
+     * 服务端对任何关键词都回十条同类热门剧，从不回空，所以「站内没有这部剧」只能在这里判。
+     */
+    private var searchMatched:Int?=null
     private var catalogFocus=""
     /** 当前详情页剧集网格里的按钮，供 [renderSeasons] 接同系列区块的双向焦点。 */
     private var episodeViews: List<View> = emptyList()
@@ -413,7 +419,7 @@ class MainActivity: Activity() {
         }
         val body=column(); catalogBody=body; container.addView(body,lp(-1,0).apply { weight=1f })
         if(localCatalog()) {
-            catalog=localItems(); ranking=null; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=page*pageSize<catalog.size
+            catalog=localItems(); ranking=null; searchMatched=null; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=page*pageSize<catalog.size
         }
         if(load) {
             if(tab==0) catalogGrid(body,focusNav,focusType,loading=true)
@@ -428,7 +434,7 @@ class MainActivity: Activity() {
                     homeScreen?.refresh?.text="热门已更新 · 按确认查看"
                     homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; showCatalog() }
                 } else {
-                    catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
+                    catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; searchMatched=result.matchedCount
                     val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }
                     rankSubtitle?.text=ranking?.updatedText?.ifBlank { "来源：红果漫剧热播榜" } ?: "来源：红果漫剧热播榜"
                     body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType)
@@ -439,7 +445,7 @@ class MainActivity: Activity() {
                     homeScreen?.refresh?.setOnClickListener { showCatalog(true) }
                     return@work
                 }
-                catalog=emptyList(); hasMore=false; ranking=null; rankSubtitle?.text="榜单加载失败"
+                catalog=emptyList(); hasMore=false; ranking=null; searchMatched=null; rankSubtitle?.text="榜单加载失败"
                 if(problem is SearchSessionExpiredException) {
                     page=1; catalogFocus=""
                     Toast.makeText(this,"搜索结果已过期，已回到第 1 页刷新",Toast.LENGTH_LONG).show()
@@ -482,6 +488,13 @@ class MainActivity: Activity() {
             if(focusType) typeButtons[library.contentType]?.requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else if(focusNav || resumeCards.isEmpty()) nav[tab].requestFocus() else resumeCards.first().requestFocus()
             return
         }
+        // The site answers every query with ten same-genre rows and never an empty list, so a search
+        // that matched nothing still looked like ten confident results — 搜「庆余年」came back as
+        // 《剑神归来》. Say so, then keep the rows: 搜「总裁」legitimately reaches shows that merely
+        // contain the word, and those are worth showing. A TextView is not focusable, so the D-pad
+        // chain below still starts on the first card.
+        if(tab==1 && searchMatched==0 && query.isNotBlank())
+            list.addView(text("站内没有《$query》，以下是同类推荐",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(12)) },lp(-1,-2))
         val cards=mutableListOf<View>(); val count=6; val gap=dp(14); val width=((resources.displayMetrics.widthPixels*.9f-gap*(count-1))/count).toInt()
         displayed.chunked(count).forEach { items ->
             val line=row(); line.gravity=Gravity.TOP
@@ -733,7 +746,7 @@ class MainActivity: Activity() {
         val clean=value.trim(); if(clean.isEmpty() || clean.length>80) return
         (searchInput as? EditText)?.let { (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(it.windowToken,0) }
         if(library.contentType!=type) { library.contentType=type; for(index in 0..1) { tabState.remove(index); tabFocus.remove(index) } }
-        library.rememberSearch(clean,type); query=clean; tab=1; page=1; catalogFocus=""; showCatalog(true)
+        library.rememberSearch(clean,type); query=clean; tab=1; page=1; catalogFocus=""; searchMatched=null; showCatalog(true)
     }
     private fun showSearchHistory(anchor: View) {
         val history=library.searches()

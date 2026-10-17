@@ -8,6 +8,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import org.json.JSONObject
 import org.json.JSONArray
 import java.io.IOException
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 internal fun JSONArray.objects() = (0 until length()).mapNotNull { optJSONObject(it) }
@@ -64,9 +65,33 @@ internal fun seasonNumber(title: String): Int? {
 /** Strip the season marker so all seasons of one show collapse onto the same base title. */
 internal fun seriesBaseTitle(title: String): String =
     title.replace(SEASON_MARK, "").replace(EMPTY_BRACKETS, "").replace(Regex("\\s+"), " ").trim()
+
+/** Whitespace and punctuation carry no meaning when looking for a show by name. */
+private val SEARCH_NOISE = Regex("[\\s\\p{P}\\p{S}]+")
+
+/**
+ * Does [title] actually mention [keyword]?
+ *
+ * The site's search never says no. Searching a show it does not carry still answers with ten
+ * popular rows of the same genre, and it reports a `totalCount` of 174-210 for such a term as if
+ * it had matched something - so 「庆余年」 comes back as 《剑神归来》《零下五十度我被困在公司》,
+ * with nothing in the ten rows containing the term. Search is fuzzy ranking over a fixed list of
+ * ten, never a filter, and the client has to draw that line itself.
+ *
+ * Punctuation is ignored because no one retypes a title's punctuation exactly: 搜「伪人降临 我是
+ * 全场唯一预言家第三季」from a phone lands on 「伪人降临！我是全场唯一预言家第三季」.
+ */
+internal fun mentions(title: String, keyword: String): Boolean {
+    val needle=SEARCH_NOISE.replace(keyword.lowercase(Locale.ROOT),"")
+    return needle.isNotEmpty() && needle in SEARCH_NOISE.replace(title.lowercase(Locale.ROOT),"")
+}
 data class RankPosition(val rank: Int?, val heat: String)
 data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
-data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null)
+/**
+ * [matchedCount] is how many of [items] actually mention the searched keyword, or null when the
+ * page is not a search result and the question does not apply.
+ */
+data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null, val matchedCount: Int? = null)
 data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
 
@@ -132,6 +157,10 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      *
      * It renders only the first page server-side and ignores `?page=`, so it must never advertise
      * a next page; claiming one made the list repeat itself forever.
+     *
+     * [CatalogPage.matchedCount] records how many rows actually mention the keyword. It is not a
+     * nicety: the site answers every query with ten rows and never an empty list, so 「站内没有这部
+     * 剧」 can only be decided client-side — see [mentions].
      */
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
@@ -139,7 +168,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val data=router("$site/search/${Signer.encode(keyword)}?page=1")
         val section=data.optJSONObject("search_(keyword)/page") ?: data.optJSONObject("search_page") ?: throw IOException("搜索数据暂不可用")
         val rows=section.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
-        return CatalogPage(valid(rows.objects().map(::card)),false)
+        val items=valid(rows.objects().map(::card))
+        return CatalogPage(items,false,null,items.count { mentions(it.title,keyword) })
     }
     fun detail(id: String): Detail {
         require(id.matches(Regex("[0-9]{1,30}")))

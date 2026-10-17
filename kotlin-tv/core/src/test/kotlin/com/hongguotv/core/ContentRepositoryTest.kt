@@ -324,6 +324,56 @@ class ContentRepositoryTest {
         assertEquals(listOf("999"),repo.search("测试",1,ContentType.COMIC).items.map { it.id })
     }
 
+    /**
+     * The site never answers a search with an empty list, so 「站内没有这部剧」 can only be
+     * decided client-side. These rows are what it really returns for 「庆余年」, which is a TV
+     * drama this short-drama site does not carry: ten confident same-genre rows, a totalCount of
+     * 182, and not one of them containing the term. The client used to show all ten as a hit.
+     */
+    @Test fun searchCountsOnlyRowsThatActuallyMentionTheKeyword() {
+        val repo=repository {
+            searchPage(
+                searchRow("7695318268868840510","人在北凉，以势压人"),
+                searchRow("7685713332619201561","剑神归来：我和驴子的十万年第一季"),
+                searchRow("7689421093307681854","零下五十度我被困在公司")
+            )
+        }
+        val result=repo.search("庆余年")
+        assertEquals(3,result.items.size)
+        assertEquals(0,result.matchedCount)
+    }
+
+    @Test fun fuzzySearchStillCountsEveryRowItDidReach() {
+        // 搜「总裁」 really does reach seven shows containing it — fuzzy search works, and must not
+        // be reported as 「站内没有」 just because the exact show is absent.
+        val repo=repository {
+            searchPage(
+                searchRow("7688352674999176254","总裁是我前女友"),
+                searchRow("7690406030894713881","总裁归来：从天桥开始"),
+                searchRow("7694313235289214014","我的老婆居然是总裁"),
+                searchRow("7695625941778697241","初尝玫瑰！")
+            )
+        }
+        assertEquals(3,repo.search("总裁").matchedCount)
+    }
+
+    @Test fun mentionsIgnoresThePunctuationNobodyRetypes() {
+        assertTrue(mentions("分手四年，傅机长失了控","分手四年，傅机长失了控"))
+        // A phone keyboard produces a space where the site writes an exclamation mark.
+        assertTrue(mentions("伪人降临！我是全场唯一预言家第三季","伪人降临 我是全场唯一预言家第三季"))
+        assertTrue(mentions("谁让这个文盲修仙的第五季","谁让这个文盲修仙的"))
+        assertFalse(mentions("剑神归来：我和驴子的十万年第一季","庆余年"))
+        // A blank keyword must not match everything, or 「站内没有」 could never be shown.
+        assertFalse(mentions("剑神归来","   "))
+    }
+
+    @Test fun browsePagesCarryNoMatchCountBecauseTheQuestionDoesNotApplyThere() {
+        val repo=repository {
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"456","series_name":"测试"}],"pagination":{"totalPages":1}}}};</script>"""
+        }
+        assertNull(repo.home(1,ContentType.SHORT).matchedCount)
+    }
+
     @Test fun searchNeverCallsTheRefusedAppEndpoint() {
         val hosts=mutableSetOf<String>()
         val repo=repository { request -> hosts+=request.url.host; searchPage() }
