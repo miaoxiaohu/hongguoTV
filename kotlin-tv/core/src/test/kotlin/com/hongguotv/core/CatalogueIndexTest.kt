@@ -56,10 +56,20 @@ class CatalogueIndexTest {
         assertTrue(index(show("1", "雾锁情迷"), show("2", "京夜诱温")).search("庆余年").isEmpty())
     }
 
-    @Test fun `newest hands back the front of the catalogue for an empty search box`() {
-        val library = index(show("1", "第一部"), show("2", "第二部"), show("3", "第三部"))
-        assertEquals(listOf("1", "2"), library.newest(2).map { it.id })
-        assertTrue(library.newest(0).isEmpty())
+    @Test fun `browse walks the catalogue in pages for an empty search box`() {
+        val library = index(show("1", "第一部"), show("2", "第二部"), show("3", "第三部"), show("4", "第四部"), show("5", "第五部"))
+        assertEquals(listOf("1", "2"), library.browse(0, 2).map { it.id })
+        // 翻页是连续的、不重不漏的：用户要能一路翻到全库最后一部，而不是只看得到头一屏。
+        assertEquals(listOf("3", "4"), library.browse(2, 2).map { it.id })
+        assertEquals(listOf("5"), library.browse(4, 2).map { it.id })
+        assertTrue("翻过头就该是空的", library.browse(5, 2).isEmpty())
+        assertTrue(library.browse(0, 0).isEmpty())
+        assertTrue("负数偏移不该倒着取", library.browse(-1, 2).isEmpty())
+        // 一路翻到底应当正好是全库：不重、不漏、不乱序。
+        // 偏移必须由 library.size 界定。generateSequence(0) { it + 2 } 在这里会永远翻下去
+        // ——它的 lambda 从不返回 null，序列就没有终点。
+        val paged = (0 until library.size step 2).flatMap { offset -> library.browse(offset, 2) }.map { it.id }
+        assertEquals(listOf("1", "2", "3", "4", "5"), paged)
     }
 
     @Test fun `a mistyped character still finds the show`() {
@@ -121,14 +131,14 @@ class CatalogueIndexTest {
 
     @Test fun `the walk bookmark survives disk so a slow box can carry on`() {
         val rows = listOf(show("1", "雾锁情迷"), show("2", "京夜诱温"))
-        val json = CatalogueIndexDisk.encode(rows, mapOf(ContentType.SHORT to 12), setOf(ContentType.COMIC), 1_000L)
+        val json = CatalogueIndexDisk.encode(rows, emptyList(), mapOf(ContentType.SHORT to 12), setOf(ContentType.COMIC), 1_000L)
         val decoded = CatalogueIndexDisk.decode(json, 2_000L)!!
         assertEquals(12, decoded.cursor[ContentType.SHORT])
         assertEquals(setOf(ContentType.COMIC), decoded.done)
         assertEquals(false, decoded.complete)
         // A finished walk must not be re-requested on the next launch.
         assertEquals(true, CatalogueIndexDisk.decode(
-            CatalogueIndexDisk.encode(rows, mapOf(ContentType.SHORT to 34), ContentType.entries.toSet(), 1_000L), 2_000L
+            CatalogueIndexDisk.encode(rows, emptyList(), mapOf(ContentType.SHORT to 34), ContentType.entries.toSet(), 1_000L), 2_000L
         )!!.complete)
     }
 
@@ -151,6 +161,48 @@ class CatalogueIndexTest {
         assertNull(CatalogueIndexDisk.decode(fresh, 999L))
     }
 
+    @Test fun `browse keeps the two catalogues apart so each filter starts at its own front page`() {
+        // 两套目录是两个站点、两种排序。混在一个列表里按类型过滤的话，漫剧那一档得翻过 800 行
+        // 真人剧才见得到第一行漫剧 —— 用户看到的「随便看看」就全是真人剧。
+        val real = (1..5).map { show("1$it", "真人剧 $it") }
+        val comic = (1..4).map { show("9$it", "漫剧 $it") }
+        val library = CatalogueIndex(real + comic, List(5) { ContentType.SHORT } + List(4) { ContentType.COMIC })
+
+        assertEquals(listOf("真人剧 1", "真人剧 2"), library.browse(0, 2, ContentType.SHORT).map { it.title })
+        assertEquals(listOf("真人剧 5"), library.browse(4, 2, ContentType.SHORT).map { it.title })
+        assertEquals(listOf("漫剧 1", "漫剧 2"), library.browse(0, 2, ContentType.COMIC).map { it.title })
+        assertEquals(listOf("漫剧 4"), library.browse(3, 2, ContentType.COMIC).map { it.title })
+        assertTrue("翻过头就该是空的", library.browse(5, 2, ContentType.SHORT).isEmpty())
+        assertEquals(5, library.sizeOf(ContentType.SHORT))
+        assertEquals(4, library.sizeOf(ContentType.COMIC))
+        // 不过滤就是全部，按入库顺序。
+        assertEquals((real + comic).map { it.id }, library.browse(0, 20).map { it.id })
+    }
+
+    @Test fun `an index with no catalogue labels still browses under every filter`() {
+        // 老索引没有逐条的分类字段。如果把它当成「一条都不属于任何分类」，用户升级后就一片空白。
+        val library = CatalogueIndex(listOf(show("1", "第一部"), show("2", "第二部")))
+        assertEquals(2, library.browse(0, 5, ContentType.SHORT).size)
+        assertEquals(2, library.browse(0, 5, ContentType.COMIC).size)
+    }
+
+    @Test fun `each entry keeps its catalogue across a disk round trip`() {
+        val entries = listOf(show("11", "真人剧甲"), show("99", "漫剧乙"))
+        val kinds = listOf(ContentType.SHORT, ContentType.COMIC)
+        val decoded = CatalogueIndexDisk.decode(CatalogueIndexDisk.encode(entries, kinds, mapOf(ContentType.SHORT to 3), setOf(ContentType.COMIC), 1_000L), 2_000L)!!
+        assertEquals(listOf("真人剧甲"), decoded.index.browse(0, 5, ContentType.SHORT).map { it.title })
+        assertEquals(listOf("漫剧乙"), decoded.index.browse(0, 5, ContentType.COMIC).map { it.title })
+    }
+
+    @Test fun `the builder labels every show with the catalogue it came from`() {
+        val walk = CatalogueBuilder(CountingCatalogue().repository()).build()
+        assertEquals(walk.shows.size, walk.types.size)
+        // 两套各 5 页 x 2 部，标签必须和走查时的归属一致。
+        assertEquals(walk.shows.indices.filter { walk.types[it] == ContentType.SHORT }.size, 10)
+        assertEquals(walk.shows.indices.filter { walk.types[it] == ContentType.COMIC }.size, 10)
+        assertEquals(walk.shows.map { it.title.substringBefore(' ').take(4) }, walk.types.map { it.categorySlug.take(4) })
+    }
+
     @Test fun `the builder walks every page, never repeats a show and can be stopped`() {
         val requested = mutableListOf<String>()
         val repo = repository { request ->
@@ -171,6 +223,8 @@ class CatalogueIndexTest {
         assertEquals(walk.shows.map { it.id }.distinct().size, walk.shows.size)
         assertTrue(walk.shows.all { it.id.length in 3..4 })
         assertTrue("两套目录都走到了最后一页", walk.complete)
+        // Page one is requested without a query string, later pages with it, and the two
+        // catalogues take turns rather than one running to the end before the other starts.
         // Page one is requested without a query string, later pages with it.
         assertEquals("/category/real-drama?null", requested[0])
         assertEquals("/category/real-drama?2", requested[1])
@@ -247,7 +301,7 @@ class CatalogueIndexTest {
         assertFalse("被中断的走查不算完成", first.complete)
         assertEquals(6, pages)
 
-        val json = CatalogueIndexDisk.encode(first.shows, first.cursor, first.done, 1_000L)
+        val json = CatalogueIndexDisk.encode(first.shows, first.types, first.cursor, first.done, 1_000L)
         val saved = CatalogueIndexDisk.decode(json, 2_000L)!!
         val beforeResume = site.requests
         val again = CatalogueBuilder(repo).build(resume = saved.cursor, done = saved.done)

@@ -11,6 +11,7 @@ package com.hongguotv.core
  */
 data class WalkStep(
     val fresh: List<Series>,
+    val type: ContentType,
     val total: Int,
     val cursor: Map<ContentType, Int>,
     val done: Set<ContentType>
@@ -25,11 +26,15 @@ data class WalkStep(
  * never complete: every launch begins at page one, dies in the same place, and a walk short enough
  * to be interrupted never gets far enough to be worth storing.
  *
+ * @property types which catalogue each show in [shows] came from, parallel list. The two catalogues
+ * are separate routes with separate ordering, and interleaving them would destroy each one's own
+ * order - which is why browsing filters by kind instead of walking them in lockstep.
  * @property gaps pages that survived their retries. A hole is recorded rather than hidden, because a
  * library that silently hides shows is worse than one that admits a page was missed.
  */
 data class CatalogueWalk(
     val shows: List<Series>,
+    val types: List<ContentType>,
     val cursor: Map<ContentType, Int>,
     val done: Set<ContentType>,
     val gaps: List<String>
@@ -71,6 +76,7 @@ class CatalogueBuilder(
     ): CatalogueWalk {
         val seen = mutableSetOf<String>()
         val collected = mutableListOf<Series>()
+        val collectedTypes = mutableListOf<ContentType>()
         val cursor = LinkedHashMap(resume)
         val finished = LinkedHashSet(done)
         val gaps = mutableListOf<String>()
@@ -91,7 +97,7 @@ class CatalogueBuilder(
                         // Three near-identical 「no network」 entries are noise; one line says it.
                         gaps.subList(streakStart, gaps.size).clear()
                         gaps += "连续 $failures 页抓取失败（$lastReason），本次走查提前结束，将从断点继续"
-                        return CatalogueWalk(collected, cursor, finished, gaps)
+                        return CatalogueWalk(collected, collectedTypes, cursor, finished, gaps)
                     }
                     // A page that survived its retries is a hole, not a reason to abandon the other
                     // sixty-odd requests. Skip it, remember it, and let the walk finish.
@@ -103,17 +109,17 @@ class CatalogueBuilder(
                 streakStart = gaps.size
                 cursor[type] = page
                 page++
-                if (result.items.isEmpty()) { finished += type; break }
                 val fresh = result.items.filter { seen.add(it.id) }
                 collected += fresh
-                onPage(WalkStep(fresh, collected.size, cursor.toMap(), finished.toSet()))
-                if (!result.hasMore) { finished += type; break }
+                repeat(fresh.size) { collectedTypes += type }
+                onPage(WalkStep(fresh, type, collectedTypes.size, cursor.toMap(), finished.toSet()))
+                // No rows, or the site saying this was the last page, ends that catalogue. Left
+                // unfinished on MAX_PAGES, which is a runaway hasMore rather than an end.
+                if (result.items.isEmpty() || !result.hasMore) { finished += type; break }
             }
-            // An exhausted while-loop means MAX_PAGES, which is a runaway hasMore rather than an
-            // end of catalogue; leave it unfinished so the next pass re-checks the tail.
             if (isCancelled()) break
         }
-        return CatalogueWalk(collected, cursor, finished, gaps)
+        return CatalogueWalk(collected, collectedTypes, cursor, finished, gaps)
     }
 
     /**

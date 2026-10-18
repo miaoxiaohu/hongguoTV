@@ -146,6 +146,7 @@ class Library(context: Context) {
         val carried = catalogue
         // Touched only on the build thread; the main thread ever sees the immutable snapshots.
         val collected = (carried?.entries ?: emptyList()).toMutableList()
+        val kinds = (carried?.types ?: emptyList()).toMutableList()
         // Forcing forgets the bookmark and rewalks from page one. The shows already held are kept
         // and deduped by id, so the second pass adds nothing and only repairs the pages that failed
         // the first time - which is what "retry the walk" has to mean once a pass has finished.
@@ -159,20 +160,22 @@ class Library(context: Context) {
                 isCancelled = { closed },
                 onPage = { step ->
                     collected += step.fresh
+                    repeat(step.fresh.size) { kinds += step.type }
                     val snapshot = collected.toList()
+                    val snapshotKinds = kinds.toList()
                     val total = snapshot.size
                     // WalkStep.total counts this pass only; a resumed build carries a thousand shows
                     // it never re-fetched, and the number the user reads has to include them.
-                    main.post { if (!closed) { catalogue = CatalogueSnapshot(snapshot, step.cursor, step.done); onProgress(total) } }
+                    main.post { if (!closed) { catalogue = CatalogueSnapshot(snapshot, snapshotKinds, step.cursor, step.done); onProgress(total) } }
                     // Checkpointing on every page would re-encode the whole library 68 times on a
                     // box that can barely parse one of them.
                     if (total - checkpointed >= CHECKPOINT_EVERY) {
                         checkpointed = total
-                        checkpoint(snapshot, step.cursor, step.done)
+                        checkpoint(snapshot, snapshotKinds, step.cursor, step.done)
                     }
                 }
             )
-            checkpoint(collected, walk.cursor, walk.done)
+            checkpoint(collected, kinds, walk.cursor, walk.done)
             main.post { if (!closed) catalogueBuilding = false }
             Log.i(
                 "HongguoTV",
@@ -183,10 +186,11 @@ class Library(context: Context) {
         return true
     }
     /** Hands an immutable snapshot to the write thread; encode() runs there, not here. */
-    private fun checkpoint(collected: List<Series>, cursor: Map<ContentType, Int>, done: Set<ContentType>) {
+    private fun checkpoint(collected: List<Series>, kinds: List<ContentType?>, cursor: Map<ContentType, Int>, done: Set<ContentType>) {
         val snapshot = collected.toList()
+        val snapshotKinds = kinds.toList()
         val now = System.currentTimeMillis()
-        catalogueWrites.submit(mapOf("index" to { CatalogueIndexDisk.encode(snapshot, cursor, done, now) }))
+        catalogueWrites.submit(mapOf("index" to { CatalogueIndexDisk.encode(snapshot, snapshotKinds, cursor, done, now) }))
     }
     /** Drops a stale index so the next build starts from a clean file rather than a merged one. */
     fun clearCatalogue() { catalogue = null; catalogueWrites.submit(mapOf("index" to { null })) }
