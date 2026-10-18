@@ -56,6 +56,58 @@ class CatalogueIndexTest {
         assertTrue(index(show("1", "雾锁情迷"), show("2", "京夜诱温")).search("庆余年").isEmpty())
     }
 
+    @Test fun `newest hands back the front of the catalogue for an empty search box`() {
+        val library = index(show("1", "第一部"), show("2", "第二部"), show("3", "第三部"))
+        assertEquals(listOf("1", "2"), library.newest(2).map { it.id })
+        assertTrue(library.newest(0).isEmpty())
+    }
+
+    @Test fun `a mistyped character still finds the show`() {
+        val (rows, relaxed) = index(show("1", "雾锁情迷"), show("2", "京夜诱温")).searchAllowingTypo("雾锁请迷")
+        assertEquals(listOf("1"), rows.map { it.id })
+        assertTrue(relaxed)
+    }
+
+    @Test fun `the typo fallback covers a dropped or an extra character too`() {
+        // 一个字被吞掉，或者多打了一个字，都是同一种手误。
+        val swallowed = index(show("1", "分手四年，傅机长失了控")).searchAllowingTypo("分手四年傅机长失控")
+        assertEquals(listOf("1"), swallowed.first.map { it.id })
+        val doubled = index(show("1", "分手四年，傅机长失了控")).searchAllowingTypo("分手四年傅机长失了了控")
+        assertEquals(listOf("1"), doubled.first.map { it.id })
+    }
+
+    @Test fun `a literal hit is never displaced by the typo fallback`() {
+        val (rows, relaxed) = index(show("1", "雾锁情迷"), show("2", "雾锁请迷真番")).searchAllowingTypo("雾锁情迷")
+        assertEquals(listOf("1"), rows.map { it.id })
+        assertFalse(relaxed)
+    }
+
+    @Test fun `short queries get no typo fallback at all`() {
+        // 两三个字错一个字就是另一个词。给一个自信的错误答案，比给一个空页面糟得多。
+        val (rows, relaxed) = index(show("1", "总裁归来"), show("2", "总裁回来")).searchAllowingTypo("总载")
+        assertTrue(rows.isEmpty())
+        assertFalse(relaxed)
+        // 但四字及以上就该兜底：把「总裁归来」打成「总裁回来」，仍然找得到。
+        val (rows4, relaxed4) = index(show("1", "总裁归来")).searchAllowingTypo("总裁回来")
+        assertEquals(listOf("1"), rows4.map { it.id })
+        assertTrue(relaxed4)
+    }
+
+    @Test fun `a season suffix is three edits away, not one`() {
+        // 反过来测：把季号也打进去，差的是「第五季」三个字，远超一次编辑，不该被当错字拉进来。
+        val (rows, relaxed) = index(show("1", "谁让这个文盲修仙的")).searchAllowingTypo("谁让这个文盲修仙的第五季")
+        assertTrue(rows.isEmpty())
+        assertFalse(relaxed)
+    }
+
+    @Test fun `two differing characters stay two edits apart`() {
+        // 「总裁归来」写成「总裁回未」：回≠归 且 未≠来，是两处，不是错一个字。
+        // 早期的手写距离在这里会给 1，于是把无关的剧报成了「相近剧名」。
+        val (rows, relaxed) = index(show("1", "总裁归来")).searchAllowingTypo("总裁回未")
+        assertTrue(rows.isEmpty())
+        assertFalse(relaxed)
+    }
+
     @Test fun `the index round-trips through disk without carrying descriptions`() {
         val rows = listOf(show("7694896136963755032", "雾锁情迷", "爱情 · 总裁"), show("7694896136963755033", "京夜诱温"))
         val decoded = CatalogueIndexDisk.decode(CatalogueIndexDisk.encode(rows, 1_000L), 2_000L)

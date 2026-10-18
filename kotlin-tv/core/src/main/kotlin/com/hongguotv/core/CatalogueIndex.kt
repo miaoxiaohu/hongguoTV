@@ -63,6 +63,75 @@ class CatalogueIndex(entries: List<Series>) {
     /** The number of shows this index holds, for the settings line and the build progress. */
     val size get() = ordered.size
 
+    /**
+     * The first [limit] shows in catalogue order — the site's own front page order.
+     *
+     * Used for the search tab's empty state, so a first-run user with no history and no query
+     * lands on browsable rows instead of a bare input box.
+     */
+    fun newest(limit: Int): List<Series> = ordered.take(limit.coerceAtLeast(0)).map { it.series }
+
+    /**
+     * [search], then a one-character fallback when nothing matched literally.
+     *
+     * Typing a long Chinese title on a TV keyboard gets a character wrong often enough to be worth
+     * absorbing: 搜「雾锁请迷」should still find 《雾锁情迷》. The fallback only runs on an empty
+     * result, so it can never displace a real match, and only for queries of four characters or
+     * more — on a two-character term a single slip lands on an unrelated word, and a confident
+     * wrong answer is worse than an empty page.
+     *
+     * The boolean says whether the results came from the fallback, so the tab can say so.
+     */
+    fun searchAllowingTypo(keyword: String, limit: Int = DEFAULT_LIMIT): Pair<List<Series>, Boolean> {
+        val literal = search(keyword, limit)
+        if (literal.isNotEmpty()) return literal to false
+        val needle = normalizeForSearch(keyword)
+        if (needle.length < TYPO_FLOOR) return emptyList<Series>() to false
+        val relaxed = ordered.asSequence()
+            .mapNotNull { entry -> editDistanceWithinOne(needle, entry.title).let { it to entry } }
+            .filter { it.first <= 1 }
+            .sortedWith(compareBy({ it.first }, { it.second.series.title.length }))
+            .take(limit)
+            .map { it.second.series }
+            .toList()
+        return relaxed to relaxed.isNotEmpty()
+    }
+
+    /**
+     * Levenshtein distance, capped at [budget].
+     *
+     * Plain two-row DP. Two wrong shortcuts were tried and both are worth recording:
+     *
+     * - A hand-rolled "advance only the longer side" walk scored a substitution at the last
+     *   character wrong while getting the same substitution mid-string right by luck.
+     * - Bailing out when a row's minimum exceeds the budget is worse: the DP row minimum is *not*
+     *   monotone. For 「总裁回未」 against 「总裁归来」 row 2 bottoms out at 2, yet row 3 realigns on
+     *   the shared 回 and drops back to 1. The total really is a single substitution.
+     *
+     * Only the length-gap early exit survives, because it is a property of the inputs rather than
+     * of the matrix. A 1600-show sweep is a couple of milliseconds, and it runs only when the
+     * literal search came back empty.
+     *
+     * @return the distance, or `budget + 1` if it is at least that.
+     */
+    internal fun editDistanceWithinOne(a: String, b: String, budget: Int = 1): Int {
+        if (a == b) return 0
+        // A length gap larger than the budget can never be closed by the edits left.
+        if (kotlin.math.abs(a.length - b.length) > budget) return budget + 1
+        var previous = IntArray(b.length + 1) { it }
+        for (i in 1..a.length) {
+            val current = IntArray(b.length + 1)
+            current[0] = i
+            for (j in 1..b.length) {
+                val substitution = if (a[i - 1] == b[j - 1]) 0 else 1
+                current[j] = minOf(current[j - 1] + 1, previous[j] + 1, previous[j - 1] + substitution)
+            }
+            previous = current
+        }
+        val distance = previous[b.length]
+        return if (distance > budget) budget + 1 else distance
+    }
+
     private data class Ranked(val series: Series, val rank: Int, val order: Int)
 
     private fun rank(entry: Entry, needle: String): Int? {
@@ -80,6 +149,8 @@ class CatalogueIndex(entries: List<Series>) {
     companion object {
         /** A page shows 30 rows; this leaves room for a few pages of scroll without unbounded work. */
         const val DEFAULT_LIMIT = 200
+        /** Below this length a one-character slip is a different word, not a typo. */
+        const val TYPO_FLOOR = 4
     }
 }
 

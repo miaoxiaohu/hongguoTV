@@ -430,6 +430,27 @@ class ContentRepositoryTest {
         assertEquals(1,repo.search("总裁",1,ContentType.SHORT,local).matchedCount)
     }
 
+    @Test fun `totalHits counts everything the paging will walk`() {
+        val local=CatalogueIndex((1..70).map { Series((100+it).toString(),"总裁归来第${it}季") })
+        val repo=repository { searchPage(searchRow("999","总裁归来新番")) }
+        val first=repo.search("总裁归来",1,ContentType.SHORT,local)
+        // 70 local hits plus the one server row that earned a slot because it mentions the term.
+        assertEquals(71,first.totalHits)
+        assertEquals(ContentRepository.SEARCH_PAGE_SIZE,first.items.size)
+        assertTrue(first.hasMore)
+        assertEquals(3,maxOf(1,((first.totalHits ?: 0)+ContentRepository.SEARCH_PAGE_SIZE-1)/ContentRepository.SEARCH_PAGE_SIZE))
+    }
+
+    @Test fun `a typo result announces itself so the tab does not claim an exact match`() {
+        val local=CatalogueIndex(listOf(Series("1","分手四年，傅机长失了控")))
+        val repo=repository { searchPage() }
+        val result=repo.search("分手四年傅机长失控",1,ContentType.SHORT,local)
+        assertEquals(listOf("1"),result.items.map { it.id })
+        assertTrue(result.fuzzy)
+        assertEquals(1,result.matchedCount)
+        assertFalse("容错结果不该再说「站内没有」",result.matchedCount==0)
+    }
+
     @Test fun searchNeverCallsTheRefusedAppEndpoint() {
         val hosts=mutableSetOf<String>()
         val repo=repository { request -> hosts+=request.url.host; searchPage() }

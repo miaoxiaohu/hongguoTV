@@ -74,7 +74,12 @@ fun main(args: Array<String>) {
             for(q in listOf("庆余年","总裁","雾锁情迷","修仙","庆余年第二季")) {
                 val serverOnly=repository.search(q)
                 val merged=repository.search(q,1,ContentType.SHORT,index)
-                println("  「$q」 本地命中=${index.search(q,400).size} | 服务端=${serverOnly.items.size} 条 matched=${serverOnly.matchedCount} | 合并后第1页=${merged.items.size} hasMore=${merged.hasMore} matched=${merged.matchedCount}")
+                println("  「$q」 本地命中=${index.search(q,400).size} | 服务端=${serverOnly.items.size} 条 matched=${serverOnly.matchedCount} | 合并后第1页=${merged.items.size} hasMore=${merged.hasMore} matched=${merged.matchedCount} total=${merged.totalHits}")
+            }
+            // 错字：站内剧名打错一个字仍要能找到，且要标记成容错。
+            for(q in listOf("雾锁请迷","首夫娇娘","谁让这个文盲修仙的")) {
+                val (hits,fuzzy)=index.searchAllowingTypo(q)
+                println("  错字「$q」 fuzzy=$fuzzy 命中=${hits.size} top=${hits.take(3).map { it.title }}")
             }
             val json=CatalogueIndexDisk.encode(entries,System.currentTimeMillis())
             val decoded=CatalogueIndexDisk.decode(json,System.currentTimeMillis())

@@ -130,6 +130,10 @@ class MainActivity: Activity() {
      * 服务端对任何关键词都回十条同类热门剧，从不回空，所以「站内没有这部剧」只能在这里判。
      */
     private var searchMatched:Int?=null
+    /** 本次搜索一共命中多少条，用来显示「第 X/Y 页 · 共 N 部」；null 表示还没搜。 */
+    private var searchTotal:Int?=null
+    /** 结果来自错字容错而非字面匹配，搜索页据此说明「按相近剧名找到」。 */
+    private var searchFuzzy=false
     /** 上次重绘索引进度时已收录的部数，用于把 68 次回调压成每 400 部一次。 */
     private var cataloguePaintMark=0
     private var catalogFocus=""
@@ -236,10 +240,32 @@ class MainActivity: Activity() {
     private fun startCatalogueBuild() {
         if(library.isBuildingCatalogue()) return
         library.buildCatalogue(repository) { total ->
-            // The walk reports ~68 times. Repainting the tab on every one of them would rebuild
-            // the whole grid on a low-end box, so the notice steps in every 400 shows instead.
-            if(tab==1 && !isDestroyed && total-cataloguePaintMark>=400) { cataloguePaintMark=total; showCatalog() }
+            // The walk reports ~68 times. Repainting on every one would rebuild the whole grid on
+            // a low-end box, so the notice steps in every 400 shows instead.
+            if(total-cataloguePaintMark<400 || isDestroyed) return@buildCatalogue
+            cataloguePaintMark=total
+            // 索引在长大，搜索结果本来就该跟着变——重新查一次，但不闪「正在加载」。
+            if(tab==1 && query.isNotBlank()) refreshSearchQuietly() else if(tab==1) showCatalog()
         }
+    }
+    /**
+     * 索引构建期间静默重搜当前查询。
+     *
+     * 用户在索引只有几百部时就搜了，看到的「已收录 N 部」会一路涨到全库；结果却停在半路上，
+     * 除非他自己再搜一次。这里后台重查并直接换掉列表 —— 不走 showCatalog(true)，那会先把整页
+     * 换成「正在加载…」再跳回来，比不刷新还糟。
+     */
+    private fun refreshSearchQuietly() {
+        val at=tab; val q=query; val p=page; val type=library.contentType
+        work({ repository.search(q,p,type,library.catalogue()) }, { result ->
+            // 回调可能落在别的页或别的查询上，回来时先确认自己没被顶掉。
+            if(isDestroyed || at!=tab || q!=query || p!=page) return@work
+            catalog=result.items; hasMore=result.hasMore
+            searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy
+            val body=catalogBody ?: return@work
+            body.removeAllViews(); catalogGrid(body,nav.any { it.hasFocus() },typeButtons.values.any { it.hasFocus() })
+            // 失败就留着上一批结果：用户正在看的东西不该被一次网络抖动清空。
+        }, { })
     }
     private fun base(title: String?=null): LinearLayout {
         root.removeAllViews(); root.setBackgroundColor(bg)
@@ -437,7 +463,7 @@ class MainActivity: Activity() {
         }
         val body=column(); catalogBody=body; container.addView(body,lp(-1,0).apply { weight=1f })
         if(localCatalog()) {
-            catalog=localItems(); ranking=null; searchMatched=null; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=page*pageSize<catalog.size
+            catalog=localItems(); ranking=null; searchMatched=null; searchTotal=null; searchFuzzy=false; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=page*pageSize<catalog.size
         }
         if(load) {
             if(tab==0) catalogGrid(body,focusNav,focusType,loading=true)
@@ -452,7 +478,8 @@ class MainActivity: Activity() {
                     homeScreen?.refresh?.text="热门已更新 · 按确认查看"
                     homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; showCatalog() }
                 } else {
-                    catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; searchMatched=result.matchedCount
+                    catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
+                    searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy
                     val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }
                     rankSubtitle?.text=ranking?.updatedText?.ifBlank { "来源：红果漫剧热播榜" } ?: "来源：红果漫剧热播榜"
                     body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType)
@@ -490,6 +517,9 @@ class MainActivity: Activity() {
             typeButtons.values.forEach { it.nextFocusDownId=collectionBack!!.id }
         }
         catalogPageKey="$tab:${collection.orEmpty()}:$page:$query"
+        // 空查询不发请求（switchTab 已经保证），所以这里用本地索引铺一批可直接点的剧。
+        // 一个刚装好、还没搜过任何词的用户，不该只看到一个输入框和一行提示。
+        if(tab==1 && query.isBlank() && catalog.isEmpty()) library.catalogue()?.newest(pageSize)?.let { catalog=it; hasMore=false }
         val preview=SeriesPreview(this); selectionPreview=preview; body.addView(preview)
         val scroll=ScrollView(this).apply { isFillViewport=false; isVerticalScrollBarEnabled=false; clipToPadding=false }; catalogScroll=scroll
         val list=column(); scroll.addView(list); body.addView(scroll,lp(-1,0).apply { weight=1f })
@@ -512,11 +542,14 @@ class MainActivity: Activity() {
         // contain the word, and those are worth showing. A TextView is not focusable, so the D-pad
         // chain below still starts on the first card.
         if(tab==1 && query.isNotBlank()) {
-            if(searchMatched==0) list.addView(text("站内没有《$query》，以下是同类推荐",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(6)) },lp(-1,-2))
+            if(searchFuzzy) list.addView(text("没有完全匹配《$query》的剧，以下是相近剧名",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(6)) },lp(-1,-2))
+            else if(searchMatched==0) list.addView(text("站内没有《$query》，以下是同类推荐",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(6)) },lp(-1,-2))
             // Saying how much the index holds is the difference between "搜不出" and "还没建完".
             val indexed=library.catalogueSize()
             val status=if(library.isBuildingCatalogue()) "正在建立全库索引 · 已收录 $indexed 部" else if(indexed>0) "已搜索全库 $indexed 部" else null
             status?.let { list.addView(text(it,13f,muted).apply { setPadding(dp(4),0,dp(4),dp(12)) },lp(-1,-2)) }
+        } else if(tab==1 && query.isBlank() && !displayed.isEmpty()) {
+            list.addView(text("输入剧名或关键词搜索全库，或直接从下方开始看",13f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(12)) },lp(-1,-2))
         }
         val cards=mutableListOf<View>(); val count=6; val gap=dp(14); val width=((resources.displayMetrics.widthPixels*.9f-gap*(count-1))/count).toInt()
         displayed.chunked(count).forEach { items ->
@@ -547,9 +580,9 @@ class MainActivity: Activity() {
         val paging=row(); paging.gravity=Gravity.CENTER
         var prev: View?=null; var next: View?=null
         if(tab<=2 || localCatalog()) {
-            prev=addButton(paging,"上一页") { if(page>1) { page--; catalogFocus=""; showCatalog(!localCatalog()) } }.apply { isEnabled=page>1; isFocusable=page>1; alpha=if(page>1) 1f else .4f }
-            paging.addView(text(if(localCatalog()) "第 $page / ${maxOf(1,(catalog.size+pageSize-1)/pageSize)} 页" else if(tab==2 && ranking!=null) "第 $page / ${ranking!!.totalPages} 页" else "第 $page 页",14f,muted).apply { gravity=Gravity.CENTER },lp(dp(if(tab==2) 135 else 95),dp(44)))
-            next=addButton(paging,"下一页") { if(hasMore) { page++; catalogFocus=""; showCatalog(!localCatalog()) } }.apply { isEnabled=hasMore; isFocusable=hasMore; alpha=if(hasMore) 1f else .4f }
+            prev=addButton(paging,"上一页") { if(page>1) turnPage(page-1) }.apply { isEnabled=page>1; isFocusable=page>1; alpha=if(page>1) 1f else .4f }
+            paging.addView(text(pagingLabel(),14f,muted).apply { gravity=Gravity.CENTER },lp(dp(if(tab==2) 135 else if(tab==1 && searchTotal!=null) 210 else 95),dp(44)))
+            next=addButton(paging,"下一页") { if(hasMore) turnPage(page+1) }.apply { isEnabled=hasMore; isFocusable=hasMore; alpha=if(hasMore) 1f else .4f }
             if(collection=="hot" && !hasMore && collectionReturn?.hasMore==true) {
                 next=addButton(paging,"下一批热门") { collection=null; collectionReturn=null; page=2; catalogFocus=""; showCatalog(true) }
             }
@@ -765,11 +798,38 @@ class MainActivity: Activity() {
         parent.addView(text("红果TV+  /  ${BuildConfig.VERSION_NAME}    ·    收藏与进度保存在本机",12f,muted).apply { setPadding(dp(2),dp(18),0,dp(10)) })
         nav[tab].requestFocus()
     }
+    /**
+     * 翻到 [target] 页。
+     *
+     * 搜索页在有本地索引时走同步路径：翻页只查内存里的索引（毫秒级），走异步会先闪一次
+     * 「正在加载…」再立刻跳走，那一下闪烁比等待本身更让人以为卡住了。回到第 1 页仍然要发请求，
+     * 因为只有那一页会用服务端那十行补位，所以那一次仍旧走异步。
+     */
+    private fun turnPage(target: Int) {
+        page=target; catalogFocus=""
+        val local=library.catalogue()
+        if(tab!=1 || local==null || page==1) { showCatalog(!localCatalog()); return }
+        val result=repository.search(query,page,library.contentType,local)
+        catalog=result.items; hasMore=result.hasMore
+        searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy
+        showCatalog()
+    }
+    /** 「第 X / Y 页 · 共 N 部」；只有搜索知道命中总数，其它页维持原来的写法。 */
+    private fun pagingLabel(): String = when {
+        localCatalog() -> "第 $page / ${maxOf(1,(catalog.size+pageSize-1)/pageSize)} 页"
+        tab==2 && ranking!=null -> "第 $page / ${ranking!!.totalPages} 页"
+        tab==1 && (searchTotal ?: 0)>0 -> {
+            val pages=maxOf(1,((searchTotal ?: 0)+pageSize-1)/pageSize)
+            "第 $page / $pages 页 · 共 $searchTotal 部"
+        }
+        else -> "第 $page 页"
+    }
     private fun runSearch(value: String,type: ContentType=library.contentType) {
         val clean=value.trim(); if(clean.isEmpty() || clean.length>80) return
         (searchInput as? EditText)?.let { (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(it.windowToken,0) }
         if(library.contentType!=type) { library.contentType=type; for(index in 0..1) { tabState.remove(index); tabFocus.remove(index) } }
-        library.rememberSearch(clean,type); query=clean; tab=1; page=1; catalogFocus=""; searchMatched=null; showCatalog(true)
+        library.rememberSearch(clean,type); query=clean; tab=1; page=1; catalogFocus=""
+        searchMatched=null; searchTotal=null; searchFuzzy=false; showCatalog(true)
     }
     private fun showSearchHistory(anchor: View) {
         val history=library.searches()

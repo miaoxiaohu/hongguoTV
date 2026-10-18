@@ -91,10 +91,18 @@ internal fun mentions(title: String, keyword: String): Boolean {
 data class RankPosition(val rank: Int?, val heat: String)
 data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
 /**
- * [matchedCount] is how many of [items] the keyword actually found, or null when the page is not
- * a search result and the question does not apply.
+ * [matchedCount] is how many of [items] the keyword actually found, [totalHits] how many exist in
+ * total across pages, and [fuzzy] whether that came from the one-character typo fallback. All three
+ * are null / false where the page is not a search result and the questions do not apply.
  */
-data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null, val matchedCount: Int? = null)
+data class CatalogPage(
+    val items: List<Series>,
+    val hasMore: Boolean,
+    val ranking: ComicRanking? = null,
+    val matchedCount: Int? = null,
+    val totalHits: Int? = null,
+    val fuzzy: Boolean = false
+)
 data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
 
@@ -171,7 +179,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      */
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT, local: CatalogueIndex? = null): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
-        val localRows = local?.search(keyword,SEARCH_LOCAL_LIMIT) ?: emptyList()
+        var fuzzy=false
+        val localRows = if(local==null) emptyList() else local.searchAllowingTypo(keyword,SEARCH_LOCAL_LIMIT).let { (rows,relaxed) -> fuzzy=relaxed; rows }
         // The server is asked on page one only. Its ten rows merely top up a page that the local
         // index has not filled, so re-asking on page two would spend a request to return rows that
         // are already merged in - and with no index at all it would spend one to answer nothing.
@@ -199,7 +208,10 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         // 「总裁」 tag — otherwise the tab would claim 「站内没有《总裁》」 while listing exactly
         // the shows that matched it.
         val matched = localRows.size + filler.count { mentions(it.title,keyword) }
-        return CatalogPage(window.distinctBy { it.id },hasMore,null,matched)
+        // What paging will walk in total. Server filler is counted only on page one, where it is
+        // actually merged in, so the number does not change as the user turns pages.
+        val total = localRows.size + if(page==1) filler.size else 0
+        return CatalogPage(window.distinctBy { it.id },hasMore,null,matched,total,fuzzy)
     }
     private fun publicSearch(keyword: String): List<Series> {
         val data=router("$site/search/${Signer.encode(keyword)}?page=1")
