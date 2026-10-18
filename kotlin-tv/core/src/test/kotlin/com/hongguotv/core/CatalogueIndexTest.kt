@@ -113,10 +113,31 @@ class CatalogueIndexTest {
         val decoded = CatalogueIndexDisk.decode(CatalogueIndexDisk.encode(rows, 1_000L), 2_000L)
         assertNotNull(decoded)
         assertEquals(2, decoded!!.size)
-        assertEquals("雾锁情迷", decoded.search("雾锁情迷").single().title)
-        assertEquals("全 80 集", decoded.search("雾锁情迷").single().badge)
+        assertEquals("雾锁情迷", decoded.index.search("雾锁情迷").single().title)
+        assertEquals("全 80 集", decoded.index.search("雾锁情迷").single().badge)
         // The detail page fetches the blurb on open; keeping 1600 of them would bloat the file.
-        assertEquals("", decoded.search("雾锁情迷").single().description)
+        assertEquals("", decoded.index.search("雾锁情迷").single().description)
+    }
+
+    @Test fun `the walk bookmark survives disk so a slow box can carry on`() {
+        val rows = listOf(show("1", "雾锁情迷"), show("2", "京夜诱温"))
+        val json = CatalogueIndexDisk.encode(rows, mapOf(ContentType.SHORT to 12), setOf(ContentType.COMIC), 1_000L)
+        val decoded = CatalogueIndexDisk.decode(json, 2_000L)!!
+        assertEquals(12, decoded.cursor[ContentType.SHORT])
+        assertEquals(setOf(ContentType.COMIC), decoded.done)
+        assertEquals(false, decoded.complete)
+        // A finished walk must not be re-requested on the next launch.
+        assertEquals(true, CatalogueIndexDisk.decode(
+            CatalogueIndexDisk.encode(rows, mapOf(ContentType.SHORT to 34), ContentType.entries.toSet(), 1_000L), 2_000L
+        )!!.complete)
+    }
+
+    @Test fun `an index written before bookmarks existed still reads, and costs one extra walk`() {
+        val legacy = """{"savedAt":1000,"count":1,"items":[{"i":"1","t":"雾锁情迷"}]}"""
+        val decoded = CatalogueIndexDisk.decode(legacy, 2_000L)
+        assertNotNull(decoded)
+        assertEquals("没写断点的老索引应当从头再走", emptyMap<ContentType, Int>(), decoded!!.cursor)
+        assertEquals(emptySet<ContentType>(), decoded.done)
     }
 
     @Test fun `a stale, corrupt or oversized index is dropped rather than surfaced`() {
@@ -143,12 +164,13 @@ class CatalogueIndexTest {
             """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[${rows.joinToString(",")}],"pagination":{"totalPages":$pages}}}};</script>"""
         }
         val seen = mutableListOf<Int>()
-        val all = CatalogueBuilder(repo).build(onPage = { fresh, collected -> seen += collected })
+        val walk = CatalogueBuilder(repo).build(onPage = { step -> seen += step.total })
         // Pages 1-3 per catalogue, 3 shows each; hasMore stops the walk after page three.
-        assertEquals(18, all.size)
+        assertEquals(18, walk.shows.size)
         assertEquals(listOf(3, 6, 9, 12, 15, 18), seen)
-        assertEquals(all.map { it.id }.distinct().size, all.size)
-        assertTrue(all.all { it.id.length in 3..4 })
+        assertEquals(walk.shows.map { it.id }.distinct().size, walk.shows.size)
+        assertTrue(walk.shows.all { it.id.length in 3..4 })
+        assertTrue("两套目录都走到了最后一页", walk.complete)
         // Page one is requested without a query string, later pages with it.
         assertEquals("/category/real-drama?null", requested[0])
         assertEquals("/category/real-drama?2", requested[1])
@@ -161,20 +183,109 @@ class CatalogueIndexTest {
             val page = request.url.queryParameter("page")?.toInt() ?: 1
             """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"$page","series_name":"第${page}页"}],"pagination":{"totalPages":9}}}};</script>"""
         }
-        val all = CatalogueBuilder(repo).build(isCancelled = { true })
-        assertTrue("取消后不应再发请求", all.isEmpty() || all.size <= 1)
+        val walk = CatalogueBuilder(repo).build(isCancelled = { true })
+        assertTrue("取消后不应再发请求", walk.shows.isEmpty() || walk.shows.size <= 1)
+        assertFalse("被取消的走查不算完成", walk.complete)
     }
 
-    @Test fun `one failing page does not throw away the pages that worked`() {
+    @Test fun `a page that times out once is retried instead of lost`() {
+        // The old walk gave up on the whole catalogue here. On the projector that capped the index
+        // at whatever landed before the first WiFi hiccup - the same place, on every launch, forever.
+        var calls = mutableMapOf<String, Int>()
+        val repo = repository { request ->
+            val slug = request.url.encodedPath.substringAfterLast('/')
+            val page = request.url.queryParameter("page")?.toInt() ?: 1
+            calls.merge("$slug?$page", 1, Int::plus)
+            if (slug.startsWith("real") && page == 2 && calls["$slug?$page"]!! < 3) throw IOException("timeout")
+            val prefix = if (slug.startsWith("comic")) "9" else "1"
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"${prefix}${page}","series_name":"$slug p$page"}],"pagination":{"totalPages":3}}}};</script>"""
+        }
+        val walk = CatalogueBuilder(repo, retryPauseMillis = 0).build()
+        assertTrue("重试成功就不该留下缺口", walk.gaps.isEmpty())
+        assertEquals(6, walk.shows.size)
+        assertEquals(3, calls["real-drama?2"])
+        assertTrue(walk.complete)
+    }
+
+    @Test fun `a page that never answers is one gap, not the end of the catalogue`() {
         val repo = repository { request ->
             val slug = request.url.encodedPath.substringAfterLast('/')
             val page = request.url.queryParameter("page")?.toInt() ?: 1
             if (slug.startsWith("real") && page == 2) throw IOException("boom")
             val prefix = if (slug.startsWith("comic")) "9" else "1"
-            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"${prefix}${page}","series_name":"$slug"}],"pagination":{"totalPages":1}}}};</script>"""
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"${prefix}${page}","series_name":"$slug p$page"}],"pagination":{"totalPages":3}}}};</script>"""
         }
-        val all = CatalogueBuilder(repo).build()
-        assertEquals("real-drama 首页 + comic-drama 首页", 2, all.size)
+        val walk = CatalogueBuilder(repo, retryPauseMillis = 0).build()
+        // real-drama keeps pages 1 and 3, comic-drama keeps all three: the gap costs one page.
+        assertEquals(listOf("comic-drama p1", "comic-drama p2", "comic-drama p3", "real-drama p1", "real-drama p3"), walk.shows.map { it.title }.sorted())
+        assertEquals(1, walk.gaps.size)
+        assertTrue("缺口要指名道姓", walk.gaps.single().contains("real-drama 第 2 页"))
+        assertFalse(walk.complete)
+        // 断点越过坏页，下一趟不会在同一页上死循环。
+        assertEquals(3, walk.cursor[ContentType.SHORT])
+    }
+
+    @Test fun `an offline box gives up on the pass instead of hammering 68 pages three times over`() {
+        var requests = 0
+        val repo = repository { _ -> requests++; throw IOException("no network") }
+        val walk = CatalogueBuilder(repo, retryPauseMillis = 0).build()
+        // Three tries on the first page, three on the second, and the pass is abandoned rather
+        // than worked through all 68 pages x 3.
+        assertEquals(CatalogueBuilder.MAX_CONSECUTIVE_FAILURES * 3, requests)
+        assertEquals("断网只该留一条说明，不是三条一模一样的", 1, walk.gaps.size)
+        assertTrue(walk.gaps.single().contains("提前结束"))
+        assertFalse(walk.complete)
+    }
+
+    @Test fun `a resumed walk requests only the pages it has not seen`() {
+        // The whole point of the bookmark: on a slow box the 68 requests outlast one session, so a
+        // walk that restarts at page one can never finish and is never worth storing.
+        val site = CountingCatalogue()
+        val repo = site.repository()
+        var pages = 0
+        val first = CatalogueBuilder(repo).build(onPage = { pages++ }, isCancelled = { pages >= 6 })
+        assertFalse("被中断的走查不算完成", first.complete)
+        assertEquals(6, pages)
+
+        val json = CatalogueIndexDisk.encode(first.shows, first.cursor, first.done, 1_000L)
+        val saved = CatalogueIndexDisk.decode(json, 2_000L)!!
+        val beforeResume = site.requests
+        val again = CatalogueBuilder(repo).build(resume = saved.cursor, done = saved.done)
+
+        assertTrue("续建之后应该走到头", again.complete)
+        assertTrue("续建不该重复抓已经拿到的页", again.shows.all { it.id !in first.shows.map { show -> show.id } })
+        // 第一趟走到 real-drama 第 5 页（收尾）+ comic-drama 第 1 页；续建只补 comic 剩下 4 页，
+        // 也就是 4 个请求、8 部。5 页 x 2 部 x 2 套目录 = 20 部全齐。
+        assertEquals(4, site.requests - beforeResume)
+        assertEquals(8, again.shows.size)
+        assertEquals(20, (first.shows + again.shows).map { it.id }.distinct().size)
+    }
+
+    @Test fun `a completed catalogue is never requested again`() {
+        val site = CountingCatalogue()
+        val repo = site.repository()
+        val first = CatalogueBuilder(repo).build()
+        assertTrue(first.complete)
+        val requestsAfterFirst = site.requests
+        val again = CatalogueBuilder(repo).build(resume = first.cursor, done = first.done)
+        assertEquals("两套目录都完成了，第二趟不该发一个请求", requestsAfterFirst, site.requests)
+        assertEquals(0, again.shows.size)
+    }
+
+    /** A five-page-per-catalogue site whose ids identify the catalogue and page they came from. */
+    private class CountingCatalogue {
+        var requests = 0
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            requests++
+            val request = chain.request()
+            val slug = request.url.encodedPath.substringAfterLast('/')
+            val page = request.url.queryParameter("page")?.toInt() ?: 1
+            val prefix = if (slug.startsWith("comic")) "9" else "1"
+            val rows = (1..2).map { i -> """{"series_id":"${prefix}${page}$i","series_name":"$slug p$page n$i"}""" }
+            val body = """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[${rows.joinToString(",")}],"pagination":{"totalPages":5}}}};</script>"""
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK").body(body.toResponseBody()).build()
+        }.build()
+        fun repository() = ContentRepository(http)
     }
 
     private fun repository(respond: (Request) -> String) = ContentRepository(

@@ -237,9 +237,11 @@ class MainActivity: Activity() {
      * refused by [Library.buildCatalogue]. It is deliberately not tied to the visible screen, since
      * the first search usually happens long before the walk finishes and should still find it.
      */
-    private fun startCatalogueBuild() {
-        if(library.isBuildingCatalogue()) return
-        library.buildCatalogue(repository) { total ->
+    private fun startCatalogueBuild(force: Boolean=false) {
+        // A finished index is already on disk. Re-walking 68 serial pages on every launch would buy
+        // nothing and keep hammering an endpoint that is already sensitive to call rate.
+        if(library.isBuildingCatalogue() || (!force && library.isCatalogueComplete())) return
+        library.buildCatalogue(repository,force) { total ->
             // The walk reports ~68 times. Repainting on every one would rebuild the whole grid on
             // a low-end box, so the notice steps in every 400 shows instead.
             if(total-cataloguePaintMark<400 || isDestroyed) return@buildCatalogue
@@ -432,6 +434,17 @@ class MainActivity: Activity() {
             lateinit var phone: TextView
             phone=addButton(searchRow,"手机输入") { (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(input.windowToken,0); tvTools.phoneInput(phone) { runSearch(it) } }; phone.nextFocusUpId=input.nextFocusUpId
             searchActions.addAll(listOf(recent,phone))
+            // The walk is normally invisible and automatic, so this only appears once it has fallen
+            // behind. Without a lever here the only thing a user can do is restart the app, which is
+            // exactly what they did, repeatedly, with no way to tell anything from it.
+            if(!library.isBuildingCatalogue() && !library.isCatalogueComplete()) {
+                lateinit var rebuild: TextView
+                rebuild=addButton(searchRow,"续建索引") {
+                    tvTools.info("续建全库索引","将从上次中断的页面继续抓取，途中可以照常使用应用。",rebuild)
+                    startCatalogueBuild(true)
+                }; rebuild.nextFocusUpId=input.nextFocusUpId
+                searchActions.add(rebuild)
+            }
             input.setOnEditorActionListener { _,_,_-> search(); true }; container.addView(searchRow)
         } else if(tab==2) {
             val heading=row().apply { setPadding(0,dp(8),0,dp(6)) }
@@ -545,9 +558,18 @@ class MainActivity: Activity() {
             if(searchFuzzy) list.addView(text("没有完全匹配《$query》的剧，以下是相近剧名",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(6)) },lp(-1,-2))
             else if(searchMatched==0) list.addView(text("站内没有《$query》，以下是同类推荐",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(6)) },lp(-1,-2))
             // Saying how much the index holds is the difference between "搜不出" and "还没建完".
+            // Every state gets a line, including the one that used to say nothing at all - a silent
+            // status is what left a user restarting the app with no idea whether it was working.
             val indexed=library.catalogueSize()
-            val status=if(library.isBuildingCatalogue()) "正在建立全库索引 · 已收录 $indexed 部" else if(indexed>0) "已搜索全库 $indexed 部" else null
-            status?.let { list.addView(text(it,13f,muted).apply { setPadding(dp(4),0,dp(4),dp(12)) },lp(-1,-2)) }
+            val building=library.isBuildingCatalogue()
+            val complete=library.isCatalogueComplete()
+            val status=when {
+                building -> "正在建立全库索引 · 已收录 $indexed 部"
+                complete -> "已搜索全库 $indexed 部"
+                indexed>0 -> "全库索引还没建完 · 已收录 $indexed 部，下次打开自动继续"
+                else -> "全库索引还没建起来 · 现在只能搜到站内的十条结果"
+            }
+            list.addView(text(status,13f,muted).apply { setPadding(dp(4),0,dp(4),dp(12)) },lp(-1,-2))
         } else if(tab==1 && query.isBlank() && !displayed.isEmpty()) {
             list.addView(text("输入剧名或关键词搜索全库，或直接从下方开始看",13f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(12)) },lp(-1,-2))
         }

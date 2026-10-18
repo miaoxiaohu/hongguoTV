@@ -155,19 +155,47 @@ class CatalogueIndex(entries: List<Series>) {
 }
 
 /**
+ * A decoded index plus the walk state needed to carry on from where it stopped.
+ *
+ * @property entries the shows themselves, so a build can append to them without refetching.
+ * @property cursor catalogue -> last page already folded in.
+ * @property done catalogues that reached their final page.
+ */
+data class CatalogueSnapshot(
+    val entries: List<Series>,
+    val cursor: Map<ContentType, Int>,
+    val done: Set<ContentType>
+) {
+    val index: CatalogueIndex by lazy { CatalogueIndex(entries) }
+    val size get() = entries.size
+    /** True when the walk reached the end of every catalogue. */
+    val complete get() = done.size == ContentType.entries.size
+}
+
+/**
  * On-disk form of a [CatalogueIndex].
  *
  * Only the five fields a search result needs are written. The catalogue rows also carry a full
  * `series_intro`, and keeping it would push 1600 shows past 800 KB of JSON for text the detail
  * page fetches anyway on open.
+ *
+ * The walk cursor is written alongside the rows, which is the whole point: an index that cannot say
+ * where its walk stopped has to be thrown away and rebuilt, and on a slow box it never survives long
+ * enough to be worth keeping. An index written before this field existed simply decodes with no
+ * cursor, which costs one extra full walk and then writes the new shape.
  */
 object CatalogueIndexDisk {
     private const val MAX_AGE = 7 * 24 * 60 * 60 * 1000L
     private const val MAX_CHARS = 1_500_000
 
-    fun encode(entries: List<Series>, now: Long): String = JSONObject()
+    fun encode(entries: List<Series>, now: Long): String =
+        encode(entries, emptyMap(), emptySet(), now)
+
+    fun encode(entries: List<Series>, cursor: Map<ContentType, Int>, done: Set<ContentType>, now: Long): String = JSONObject()
         .put("savedAt", now)
         .put("count", entries.size)
+        .put("cursor", JSONObject().apply { cursor.forEach { (type, page) -> put(type.storedValue, page) } })
+        .put("done", JSONArray(done.map { it.storedValue }))
         .put("items", JSONArray(entries.map {
             JSONObject().put("i", it.id).put("t", it.title).put("c", it.cover)
                 .put("b", it.badge).put("g", it.tags)
@@ -175,7 +203,7 @@ object CatalogueIndexDisk {
         .toString()
 
     /** Returns null for anything unreadable, oversized, expired or empty - a stale index is not worth failing over. */
-    fun decode(value: String, now: Long): CatalogueIndex? = runCatching {
+    fun decode(value: String, now: Long): CatalogueSnapshot? = runCatching {
         require(value.length <= MAX_CHARS)
         val o = JSONObject(value)
         require(now - o.getLong("savedAt") in 0..MAX_AGE)
@@ -196,6 +224,16 @@ object CatalogueIndexDisk {
             }.getOrNull()
         }
         require(entries.isNotEmpty())
-        CatalogueIndex(entries)
+        val cursor = o.optJSONObject("cursor")?.let { stored ->
+            ContentType.entries.mapNotNull { type -> stored.optInt(type.storedValue, 0).takeIf { it > 0 }?.let { type to it } }
+        }.orEmpty().toMap()
+        // An unknown stored value is dropped rather than rejected: a build that retired a category
+        // must not make the whole index unreadable.
+        val done = o.optJSONArray("done")?.let { stored ->
+            (0 until stored.length()).mapNotNull { position ->
+                ContentType.entries.firstOrNull { type -> type.storedValue == stored.optString(position) }
+            }
+        }.orEmpty().toSet()
+        CatalogueSnapshot(entries, cursor, done)
     }.getOrNull()
 }

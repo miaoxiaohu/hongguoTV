@@ -62,14 +62,45 @@ fun main(args: Array<String>) {
     // End-to-end proof for the local catalogue index: walk everything, then search it. Prints the
     // size of the index on disk too, because the ceiling that matters on a low-end box is whether
     // the JSON still fits the preference file and the 7-day cache.
+    if(args.contains("--indexresume")) {
+        // Stops the walk partway, stores the bookmark, and walks again from it. This is the
+        // failure the whole resumable branch exists for: on a projector the 68 serial requests
+        // outlast one session, so an index that cannot resume never finishes and is never worth
+        // storing. --indexresume <pages> says how many pages the first pass is allowed.
+        val stopAfter=args.getOrNull(args.indexOf("--indexresume")+1)?.toIntOrNull() ?: 6
+        try {
+            val started=System.currentTimeMillis()
+            var pages=0
+            val first=CatalogueBuilder(repository).build(onPage={ pages++ },isCancelled={ pages>=stopAfter })
+            val firstElapsed=(System.currentTimeMillis()-started)/1000
+            println("第一趟：${first.shows.size} 部，用时 ${firstElapsed}s，断点 ${first.cursor}，已完成 ${first.done.map { it.storedValue }}${if(first.gaps.isEmpty()) "" else "，未取到 ${first.gaps.joinToString("；")}"}")
+
+            val json=CatalogueIndexDisk.encode(first.shows,first.cursor,first.done,System.currentTimeMillis())
+            val saved=checkNotNull(CatalogueIndexDisk.decode(json,System.currentTimeMillis())) { "断点没能落盘" }
+
+            val resumedAt=System.currentTimeMillis()
+            val again=CatalogueBuilder(repository).build(resume=saved.cursor,done=saved.done)
+            println("第二趟：只新增 ${again.shows.size} 部，用时 ${(System.currentTimeMillis()-resumedAt)/1000}s -> 合计 ${(first.shows+again.shows).size} 部，断点 ${again.cursor}，complete=${again.complete}")
+
+            val together=CatalogueIndex(first.shows+again.shows)
+            val q="总裁"
+            val full=repository.search(q,1,ContentType.SHORT,together)
+            println("续建后搜「$q」：本地命中 ${together.search(q,400).size}，第1页 ${full.items.size} 条，hasMore=${full.hasMore}，total=${full.totalHits}")
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
+
     if(args.contains("--index")) {
         try {
             val started=System.currentTimeMillis()
             var last=0
-            val entries=CatalogueBuilder(repository).build(onPage={ _,total ->
-                if(total-last>=400) { last=total; println("  ... 已收录 $total 部，用时 ${(System.currentTimeMillis()-started)/1000}s") }
+            val walk=CatalogueBuilder(repository).build(onPage={ step ->
+                if(step.total-last>=400) { last=step.total; println("  ... 已收录 ${step.total} 部，用时 ${(System.currentTimeMillis()-started)/1000}s") }
             })
-            println("索引建完：${entries.size} 部，用时 ${(System.currentTimeMillis()-started)/1000}s")
+            val entries=walk.shows
+            println("索引建完：本轮 ${entries.size} 部，用时 ${(System.currentTimeMillis()-started)/1000}s，断点 ${walk.cursor}，已完成 ${walk.done.map { it.storedValue }}${if(walk.gaps.isEmpty()) "" else "，未取到 ${walk.gaps.joinToString("；")}"}")
             val index=CatalogueIndex(entries)
             for(q in listOf("庆余年","总裁","雾锁情迷","修仙","庆余年第二季")) {
                 val serverOnly=repository.search(q)
@@ -81,9 +112,9 @@ fun main(args: Array<String>) {
                 val (hits,fuzzy)=index.searchAllowingTypo(q)
                 println("  错字「$q」 fuzzy=$fuzzy 命中=${hits.size} top=${hits.take(3).map { it.title }}")
             }
-            val json=CatalogueIndexDisk.encode(entries,System.currentTimeMillis())
+            val json=CatalogueIndexDisk.encode(entries,walk.cursor,walk.done,System.currentTimeMillis())
             val decoded=CatalogueIndexDisk.decode(json,System.currentTimeMillis())
-            println("磁盘：${json.length} 字符（上限 1500000），解码后 ${decoded?.size} 部，回搜雾锁情迷 -> ${decoded?.search("雾锁情迷")?.firstOrNull()?.title}")
+            println("磁盘：${json.length} 字符（上限 1500000），解码后 ${decoded?.size} 部，断点 ${decoded?.cursor}，回搜雾锁情迷 -> ${decoded?.index?.search("雾锁情迷")?.firstOrNull()?.title}")
         } finally {
             repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
         }

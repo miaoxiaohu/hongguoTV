@@ -18,14 +18,14 @@ class Library(context: Context) {
     private companion object {
         // A replacement Activity must not load before its predecessor's final checkpoint commits.
         val retiredWrites = mutableListOf<LatestWriteQueue<String, () -> Any?>>()
-        /** Below this, an index would look complete while quietly hiding most of the library. */
-        const val MIN_INDEXED = 200
+        /** Shows between disk checkpoints. Re-encoding 1600 rows costs a J1900 real time. */
+        const val CHECKPOINT_EVERY = 200
     }
     private data class Loaded(
         val index: LibraryIndex,
         val homes: Map<ContentType, CatalogPage>,
         val stamps: Map<ContentType, Long>,
-        val catalogue: CatalogueIndex?
+        val catalogue: CatalogueSnapshot?
     )
     private val app = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
@@ -43,7 +43,7 @@ class Library(context: Context) {
     private var index: LibraryIndex? = null
     private val homes = mutableMapOf<ContentType, CatalogPage>()
     private val homeSavedAt = mutableMapOf<ContentType, Long>()
-    private var catalogue: CatalogueIndex? = null
+    private var catalogue: CatalogueSnapshot? = null
     private var catalogueBuilding = false
     private var loading = false
     private var closed = false
@@ -114,10 +114,17 @@ class Library(context: Context) {
      * Search on its own can only see the ten rows the site renders. This is what makes the other
      * 1590 reachable - see [CatalogueIndex].
      */
-    fun catalogue() = catalogue
+    fun catalogue() = catalogue?.index
     /** How many shows the index currently holds; 0 until a build lands its first pages. */
     fun catalogueSize() = catalogue?.size ?: 0
     fun isBuildingCatalogue() = catalogueBuilding
+    /**
+     * True when the walk reached the end of every catalogue and skipped no page.
+     *
+     * This is what stops a completed index from being rebuilt on every launch: without it, each
+     * start would spend another 68 serial requests re-collecting shows it already has on disk.
+     */
+    fun isCatalogueComplete() = catalogue?.complete == true
 
     /**
      * Walks both catalogues in the background and publishes the result as it arrives.
@@ -126,32 +133,60 @@ class Library(context: Context) {
      * the main thread with the running total, so the search tab can show 「已收录 N 部」 while the
      * walk is still going and be useful long before it finishes.
      *
-     * A short build is discarded rather than stored: half a catalogue would silently hide shows
-     * while still looking like a working index.
+     * The walk resumes: it starts after the page the last one stopped at and appends to what is
+     * already on disk. A partial index is therefore kept rather than discarded. The earlier rule -
+     * store nothing below 200 shows - looked cautious and was the reason this never worked at all:
+     * on a slow box the walk cannot finish inside one session, so every launch restarted at page
+     * one, died at the same place, and fell short of the floor again. An index that is half built
+     * and says so, and that continues where it stopped, beats a complete absence of one.
      */
-    fun buildCatalogue(repository: ContentRepository, onProgress: (Int) -> Unit = {}): Boolean {
+    fun buildCatalogue(repository: ContentRepository, force: Boolean = false, onProgress: (Int) -> Unit = {}): Boolean {
         if (catalogueBuilding || closed) return false
         catalogueBuilding = true
+        val carried = catalogue
         // Touched only on the build thread; the main thread ever sees the immutable snapshots.
-        val collected = mutableListOf<Series>()
+        val collected = (carried?.entries ?: emptyList()).toMutableList()
+        // Forcing forgets the bookmark and rewalks from page one. The shows already held are kept
+        // and deduped by id, so the second pass adds nothing and only repairs the pages that failed
+        // the first time - which is what "retry the walk" has to mean once a pass has finished.
+        val resume = if (force) emptyMap() else carried?.cursor ?: emptyMap()
+        val done = if (force) emptySet() else carried?.done ?: emptySet()
+        var checkpointed = collected.size
         catalogueLoader.execute {
-            val entries = CatalogueBuilder(repository).build(
+            val walk = CatalogueBuilder(repository).build(
+                resume = resume,
+                done = done,
                 isCancelled = { closed },
-                onPage = { fresh, total ->
-                    collected += fresh
+                onPage = { step ->
+                    collected += step.fresh
                     val snapshot = collected.toList()
-                    main.post { if (!closed) { catalogue = CatalogueIndex(snapshot); onProgress(total) } }
+                    val total = snapshot.size
+                    // WalkStep.total counts this pass only; a resumed build carries a thousand shows
+                    // it never re-fetched, and the number the user reads has to include them.
+                    main.post { if (!closed) { catalogue = CatalogueSnapshot(snapshot, step.cursor, step.done); onProgress(total) } }
+                    // Checkpointing on every page would re-encode the whole library 68 times on a
+                    // box that can barely parse one of them.
+                    if (total - checkpointed >= CHECKPOINT_EVERY) {
+                        checkpointed = total
+                        checkpoint(snapshot, step.cursor, step.done)
+                    }
                 }
             )
+            checkpoint(collected, walk.cursor, walk.done)
             main.post { if (!closed) catalogueBuilding = false }
-            if (entries.size >= MIN_INDEXED) {
-                val now = System.currentTimeMillis()
-                catalogueWrites.submit(mapOf("index" to { CatalogueIndexDisk.encode(entries, now) }))
-            } else {
-                Log.i("HongguoTV", "Catalogue walk collected ${entries.size} shows, below the floor; keeping the server's ten rows")
-            }
+            Log.i(
+                "HongguoTV",
+                "全库走查：本轮 +${walk.shows.size} 部，合计 ${collected.size} 部，断点 ${walk.cursor}，已完成 ${walk.done.map { it.storedValue }}" +
+                    if (walk.gaps.isEmpty()) "" else "，未取到 ${walk.gaps.joinToString("；")}"
+            )
         }
         return true
+    }
+    /** Hands an immutable snapshot to the write thread; encode() runs there, not here. */
+    private fun checkpoint(collected: List<Series>, cursor: Map<ContentType, Int>, done: Set<ContentType>) {
+        val snapshot = collected.toList()
+        val now = System.currentTimeMillis()
+        catalogueWrites.submit(mapOf("index" to { CatalogueIndexDisk.encode(snapshot, cursor, done, now) }))
     }
     /** Drops a stale index so the next build starts from a clean file rather than a merged one. */
     fun clearCatalogue() { catalogue = null; catalogueWrites.submit(mapOf("index" to { null })) }
