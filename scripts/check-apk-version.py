@@ -7,7 +7,20 @@ compileReleaseKotlin UP-TO-DATE, so the manifest ends up correct while classes.d
 still holds the previous version. aapt dump badging only reads the manifest and
 cannot see the split, so this script checks the dex directly.
 
-Usage: python check-apk-version.py <apk> <versionName> <versionCode>
+The trap this guards against is real, but the first version of this check was
+wrong in a way that made it useless: it looked for the versionCode as a 4-byte
+little-endian int, which is only the encoding dex uses for a full `const`
+instruction. Any code that fits a signed 16-bit int is emitted as the narrower
+`const/16` instead, so every versionCode below 32768 - which is all of them,
+since this project's codes are major*1000000 + minor*1000 + patch - was reported
+as missing even when the build was perfect. It now accepts every width dex uses.
+
+Searching raw bytes is a heuristic: a 2-byte sequence can occur by chance in a
+multi-megabyte dex. So the check also takes the *previous* version name and
+asserts it is gone, which is the actual failure signature - a stale build
+carries the old string even when the manifest is right.
+
+Usage: python check-apk-version.py <apk> <versionName> <versionCode> [previousVersionName]
 Exit 0 when the dex carries the version, 1 when it does not.
 """
 import struct
@@ -15,41 +28,55 @@ import sys
 import zipfile
 
 
-def dex_carries_string(apk: str, needle: str) -> bool:
+def _dex_blobs(apk: str):
+    with zipfile.ZipFile(apk) as archive:
+        return {name: archive.read(name) for name in archive.namelist() if name.endswith(".dex")}
+
+
+def dex_carries_string(blobs, needle: str) -> bool:
     """VERSION_NAME is a String constant, so it appears verbatim in the dex."""
-    with zipfile.ZipFile(apk) as archive:
-        for name in archive.namelist():
-            if name.endswith(".dex") and needle.encode() in archive.read(name):
-                return True
-    return False
+    return any(needle.encode() in blob for blob in blobs.values())
 
 
-def dex_carries_int(apk: str, value: int) -> bool:
-    """VERSION_CODE is an int constant: it is compiled into bytecode as raw
-    little-endian bytes, not as text. Searching for the decimal string always
-    misses, which would look exactly like the stale-constant failure we are
-    trying to detect. Decode it the way dex does instead."""
-    packed = struct.pack("<i", value)
-    with zipfile.ZipFile(apk) as archive:
-        for name in archive.namelist():
-            if name.endswith(".dex") and packed in archive.read(name):
-                return True
-    return False
+def dex_carries_int(blobs, value: int) -> bool:
+    """VERSION_CODE is an int constant compiled into bytecode, never as text.
+
+    dex picks the narrowest instruction that holds the value - `const/4` for a
+    nibble, `const/16` up to a signed 16-bit int, `const` above that - all
+    little-endian. A versionCode of 9018 is 0x233A, so it is stored as the two
+    bytes 3a 23; checking only the four-byte form misses every code this project
+    will ever produce.
+    """
+    widths = []
+    if -8 <= value <= 7:
+        widths.append(struct.pack("<b", value))
+    if -32768 <= value <= 32767:
+        widths.append(struct.pack("<h", value))
+    if -2 ** 31 <= value <= 2 ** 31 - 1:
+        widths.append(struct.pack("<i", value))
+    return any(packed in blob for packed in widths for blob in blobs.values())
 
 
 def main() -> int:
-    if len(sys.argv) != 4:
+    if len(sys.argv) not in (4, 5):
         print(__doc__)
         return 2
     apk, version_name, version_code = sys.argv[1], sys.argv[2], int(sys.argv[3])
+    previous = sys.argv[4] if len(sys.argv) == 5 else None
+    blobs = _dex_blobs(apk)
+    if not blobs:
+        print("FAIL no classes.dex in the APK")
+        return 1
 
-    if dex_carries_string(apk, version_name):
+    if dex_carries_string(blobs, version_name):
         print(f"OK   dex carries versionName={version_name}")
     else:
         print(f"FAIL dex does NOT carry versionName={version_name}")
+        print("\nThe dex was not rebuilt after the version changed.")
+        print("Run `gradlew :app:clean` and rebuild. Do NOT ship this APK.")
         return 1
 
-    if dex_carries_int(apk, version_code):
+    if dex_carries_int(blobs, version_code):
         print(f"OK   dex carries versionCode={version_code}")
     else:
         print(f"FAIL dex does NOT carry versionCode={version_code}")
@@ -57,6 +84,13 @@ def main() -> int:
         print("This is the Kotlin BuildConfig inlining trap: run `gradlew :app:clean`")
         print("and rebuild. Do NOT ship this APK.")
         return 1
+
+    if previous:
+        if dex_carries_string(blobs, previous):
+            print(f"FAIL dex still carries the old versionName={previous}")
+            print("\nThe manifest and the dex disagree - this is the stale build, not a probe problem.")
+            return 1
+        print(f"OK   dex no longer carries the old versionName={previous}")
 
     print("\nBoth version constants are present in classes.dex.")
     return 0
