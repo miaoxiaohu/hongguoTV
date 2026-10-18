@@ -29,8 +29,24 @@ class CatalogueIndex(entries: List<Series>, types: List<ContentType?> = emptyLis
      * re-running two regex replaces over each of them per keystroke would be the slowest part of a
      * keystroke.
      */
-    private val ordered: List<Entry> = entries.distinctBy { it.id }.mapIndexed { position, series ->
-        Entry(series, normalizeForSearch(series.title), normalizeForSearch(series.tags), types.getOrNull(position))
+    private val ordered: List<Entry> = run {
+        val rows = ArrayList<Entry>(entries.size)
+        val at = LinkedHashMap<String, Int>(entries.size.coerceAtLeast(1))
+        entries.forEachIndexed { position, series ->
+            val type = types.getOrNull(position)
+            val known = at[series.id]
+            if (known == null) {
+                at[series.id] = rows.size
+                rows += Entry(series, normalizeForSearch(series.title), normalizeForSearch(series.tags), type)
+            } else if (type != null) {
+                // 同一部剧可能来两次：一次来自还没记分类的老索引，一次来自补记分类的重走查。
+                // 记了分类的那份必须赢。老的 distinctBy 留的是先到的那份，也就是没分类的那份 ——
+                // 于是重走查把标签补回来了，browse 却仍然把这一行当成「属于所有分类」，
+                // 漫剧那一页照样翻出真人剧，而且补多少次都补不好。
+                rows[known] = rows[known].copy(type = type)
+            }
+        }
+        rows
     }
 
     /**
@@ -40,7 +56,7 @@ class CatalogueIndex(entries: List<Series>, types: List<ContentType?> = emptyLis
      * that never had a catalogue in mind. Those entries are treated as belonging to every filter, so
      * an old index still browses rather than coming up empty.
      */
-    private class Entry(val series: Series, val title: String, val tags: String, val type: ContentType?)
+    private data class Entry(val series: Series, val title: String, val tags: String, val type: ContentType?)
 
     /**
      * Ranked matches for [keyword], best first, capped at [limit].
@@ -191,8 +207,31 @@ data class CatalogueSnapshot(
 ) {
     val index: CatalogueIndex by lazy { CatalogueIndex(entries, types) }
     val size get() = entries.size
-    /** True when the walk reached the end of every catalogue. */
-    val complete get() = done.size == ContentType.entries.size
+    /**
+     * True when the walk reached the end of every catalogue.
+     *
+     * This alone used to be the whole definition of a finished index, and that is how an index
+     * written before the catalogues were labelled came to be reported as done forever.
+     */
+    val walkedToEnd get() = done.size == ContentType.entries.size
+    /**
+     * True when every show records the catalogue it came from.
+     *
+     * The size check matters as much as the null check: [types] defaults to empty, and `all` over an
+     * empty list is vacuously true, so a snapshot carrying no labels at all would sail through.
+     */
+    val labelled get() = types.size == entries.size && types.all { it != null }
+    /**
+     * True when the walk reached the end of every catalogue **and** every show is labelled.
+     *
+     * The second half is not decoration. [CatalogueIndex.browse] reads a missing label as
+     * 「属于所有分类」 so that an old index is not a blank screen — and with every row reading that
+     * way, the 漫剧 filter matches all 1600 shows and the walk order puts all 800 真人剧 first, so
+     * 漫剧 opens on 真人剧. Calling that state complete is what pinned it there: a finished index is
+     * never re-walked, so the labels would never arrive and the user would have to find the rebuild
+     * button themselves. An index that cannot answer 「这一页全是漫剧吗」 has not finished its job.
+     */
+    val complete get() = walkedToEnd && labelled
 }
 
 /**

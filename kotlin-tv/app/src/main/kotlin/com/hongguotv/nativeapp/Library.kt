@@ -144,14 +144,18 @@ class Library(context: Context) {
         if (catalogueBuilding || closed) return false
         catalogueBuilding = true
         val carried = catalogue
+        // 走完了却没记下每部属于哪套目录的索引，必须整趟重走一遍才能补上标签：
+        // 标签只有抓的时候才知道，而游标记着「两套都到头了」，接着走一步都不会走。
+        // 已收录的剧仍然留着 —— 丢掉 1600 部重新抓，正是这个索引当初建不成的原因。
+        val relabel = carried != null && carried.walkedToEnd && !carried.labelled
         // Touched only on the build thread; the main thread ever sees the immutable snapshots.
         val collected = (carried?.entries ?: emptyList()).toMutableList()
         val kinds = (carried?.types ?: emptyList()).toMutableList()
         // Forcing forgets the bookmark and rewalks from page one. The shows already held are kept
         // and deduped by id, so the second pass adds nothing and only repairs the pages that failed
         // the first time - which is what "retry the walk" has to mean once a pass has finished.
-        val resume = if (force) emptyMap() else carried?.cursor ?: emptyMap()
-        val done = if (force) emptySet() else carried?.done ?: emptySet()
+        val resume = if (force || relabel) emptyMap() else carried?.cursor ?: emptyMap()
+        val done = if (force || relabel) emptySet() else carried?.done ?: emptySet()
         var checkpointed = collected.size
         catalogueLoader.execute {
             val walk = CatalogueBuilder(repository).build(

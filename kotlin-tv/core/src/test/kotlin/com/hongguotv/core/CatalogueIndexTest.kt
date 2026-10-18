@@ -72,6 +72,35 @@ class CatalogueIndexTest {
         assertEquals(listOf("1", "2", "3", "4", "5"), paged)
     }
 
+    @Test fun `the last page can be pulled back so it lands whole`() {
+        // 每页 18 部 = 6 张 x 3 行。1600 部：末页只剩 4 部，摆出来是「两整行加四张」，右侧空两格。
+        // 把末页起点退到「最后 18 部」就永远是满的 —— 代价只是和上一页重叠几部。
+        val pageSize=18
+        val columns=6
+        val total=1_600
+        val pages=(total+pageSize-1)/pageSize
+        val library=CatalogueIndex((1..total).map { show(it.toString(), "第 $it 部") })
+
+        fun window(page: Int): Int {
+            if(total<=pageSize || page<=1) return (page-1)*pageSize
+            val nominal=(page-1)*pageSize
+            return if(page==pages && nominal+pageSize>total) (total-pageSize).coerceAtLeast(0) else nominal
+        }
+
+        // 中间每页都必须是整行 —— 页大小整除行宽，这一条比末页更要紧。
+        for(page in listOf(1,2,53,88)) {
+            assertEquals("第 $page 页应满", pageSize, library.browse(window(page),pageSize).size)
+            assertEquals("第 $page 页应收整行", 0, library.browse(window(page),pageSize).size % columns)
+        }
+        val last=library.browse(window(pages),pageSize)
+        assertEquals("末页必须是满的一页", pageSize, last.size)
+        assertEquals("末页落在索引末尾", "第 1600 部", last.last().title)
+        assertEquals("第 1 页从第一部开始", "第 1 部", library.browse(window(1),pageSize).first().title)
+        // 索引还不足一屏时退无可退，从头摆。
+        val small=index(show("1", "甲"), show("2", "乙"))
+        assertEquals(listOf("甲","乙"), small.browse(0,pageSize).map { it.title })
+    }
+
     @Test fun `a mistyped character still finds the show`() {
         val (rows, relaxed) = index(show("1", "雾锁情迷"), show("2", "京夜诱温")).searchAllowingTypo("雾锁请迷")
         assertEquals(listOf("1"), rows.map { it.id })
@@ -136,10 +165,52 @@ class CatalogueIndexTest {
         assertEquals(12, decoded.cursor[ContentType.SHORT])
         assertEquals(setOf(ContentType.COMIC), decoded.done)
         assertEquals(false, decoded.complete)
-        // A finished walk must not be re-requested on the next launch.
+        // 走完了、也记下了每部属于哪套目录：这种索引下次启动不该再抓一遍。
         assertEquals(true, CatalogueIndexDisk.decode(
-            CatalogueIndexDisk.encode(rows, emptyList(), mapOf(ContentType.SHORT to 34), ContentType.entries.toSet(), 1_000L), 2_000L
+            CatalogueIndexDisk.encode(
+                rows, List(rows.size) { ContentType.SHORT },
+                mapOf(ContentType.SHORT to 34), ContentType.entries.toSet(), 1_000L
+            ), 2_000L
         )!!.complete)
+    }
+
+    @Test fun `an index that finished without labelling its shows is not finished`() {
+        // 索引有了、游标也记着「两套目录都到头了」，但每部属于哪套目录是空的 —— 这正是分类按钮
+        // 加上来之前存下来的那份。browse 把没有标签的行当成「属于所有分类」，于是漫剧那一页照样
+        // 翻出排在最前面的真人剧；而 complete 只看游标，所以它永远不会被重走查修好。
+        // 判据漏了 labelled，这个状态就被永久钉死在「已完成」上。
+        val rows = listOf(show("1", "真人剧甲"), show("2", "真人剧乙"), show("3", "漫剧丙"))
+        val unlabelled = CatalogueIndexDisk.decode(
+            CatalogueIndexDisk.encode(rows, emptyList(), mapOf(ContentType.SHORT to 34), ContentType.entries.toSet(), 1_000L), 2_000L
+        )!!
+        assertTrue("游标确实走完了", unlabelled.walkedToEnd)
+        assertFalse("没有标签就不算有分类", unlabelled.labelled)
+        assertFalse("没记下分类的索引不算完成", unlabelled.complete)
+        // decode 会把 types 补齐到和 entries 一样长，所以光比长度是抓不住这个状态的 —— 每个位置
+        // 都得真的记下分类才行。这正是 labelled 两条都要查的原因。
+        assertEquals(unlabelled.entries.size, unlabelled.types.size)
+        assertTrue("全是空标签", unlabelled.types.all { it == null })
+
+        // 补上标签之后才算数。
+        val labelled = unlabelled.copy(types = listOf(ContentType.SHORT, ContentType.SHORT, ContentType.COMIC))
+        assertTrue(labelled.labelled); assertTrue(labelled.complete)
+        assertEquals(listOf("漫剧丙"), labelled.index.browse(0, 5, ContentType.COMIC).map { it.title })
+    }
+
+    @Test fun `a rewalk that labels a show fixes the copy an older index left unlabelled`() {
+        // 补标签这一趟会把同一部剧再抓一次，同一个 id 于是出现两次：先是没标签的老行，后是记了标签
+        // 的新行。老的去重留的是先到的那份，也就是没标签的那份 —— 于是标签补回来了，browse 却照样
+        // 把这行算进每一个分类，漫剧那一页还是真人剧，而且补多少次都补不好。
+        val old = listOf(show("1", "真人剧甲"), show("2", "漫剧乙"))
+        val fresh = listOf(show("1", "真人剧甲"), show("2", "漫剧乙"))
+        val carried = CatalogueIndex(old + fresh, listOf(null, null) + listOf(ContentType.SHORT, ContentType.COMIC))
+        assertEquals(2, carried.size)
+        assertEquals(1, carried.sizeOf(ContentType.SHORT))
+        assertEquals(1, carried.sizeOf(ContentType.COMIC))
+        assertEquals(listOf("真人剧甲"), carried.browse(0, 5, ContentType.SHORT).map { it.title })
+        assertEquals(listOf("漫剧乙"), carried.browse(0, 5, ContentType.COMIC).map { it.title })
+        // 没抓到的那一遍仍然按「属于所有分类」读，老索引不至于变成一片空白。
+        assertEquals(2, CatalogueIndex(old, emptyList()).sizeOf(ContentType.COMIC))
     }
 
     @Test fun `an index written before bookmarks existed still reads, and costs one extra walk`() {
@@ -177,6 +248,48 @@ class CatalogueIndexTest {
         assertEquals(4, library.sizeOf(ContentType.COMIC))
         // 不过滤就是全部，按入库顺序。
         assertEquals((real + comic).map { it.id }, library.browse(0, 20).map { it.id })
+    }
+
+    @Test fun `each catalogue is paged on its own count, so its last page still lands whole`() {
+        // 「随便看看」按 18 部一页翻，18 又必须整除行宽 6，否则每一页都收在半排上。
+        // 两套目录部数不同（真人剧 40、漫剧 25），所以页数和末页起点都只能按各自的总数算。
+        // 拿全库 65 去除：漫剧会被说有 4 页，用户翻两页就见底，第三页一片空白 —— 正是「翻着翻着
+        // 就白了」的来源，而页码本身不会报错。
+        val pageSize=18
+        val columns=6
+        val real=(1..40).map { show("r$it", "真人剧 $it") }
+        val comic=(1..25).map { show("c$it", "漫剧 $it") }
+        val library=CatalogueIndex(real + comic, List(40) { ContentType.SHORT } + List(25) { ContentType.COMIC })
+
+        // 与 MainActivity.browseWindow 同一套算法。放在测试里重写一遍是故意的：两边若有一处算法
+        // 变了，这里不会跟着变，会立刻红。
+        fun window(total: Int,page: Int): Int {
+            if(total<=pageSize || page<=1) return (page-1)*pageSize
+            val pages=(total+pageSize-1)/pageSize
+            val nominal=(page-1)*pageSize
+            return if(page==pages && nominal+pageSize>total) (total-pageSize).coerceAtLeast(0) else nominal
+        }
+
+        for((type,other) in listOf(ContentType.SHORT to "漫剧", ContentType.COMIC to "真人剧")) {
+            val total=library.sizeOf(type)
+            assertTrue("$type 的片库不该是空的", total>pageSize)
+            val pages=(total+pageSize-1)/pageSize
+            for(page in 1..pages) {
+                val shown=library.browse(window(total,page),pageSize,type)
+                assertEquals("$type 第 $page 页应满 $pageSize 部", pageSize, shown.size)
+                assertEquals("$type 第 $page 页应收整行", 0, shown.size % columns)
+                assertTrue("$type 第 $page 页混进了另一套目录", shown.none { it.title.startsWith(other) })
+            }
+            // 翻过自己那一档的最后一页就该什么都没有。
+            assertTrue("$type 翻过头还剩东西", library.browse(window(total,pages+1),pageSize,type).isEmpty())
+        }
+        assertEquals("真人剧 40", library.browse(window(40,3),pageSize,ContentType.SHORT).last().title)
+        assertEquals("漫剧 25", library.browse(window(25,2),pageSize,ContentType.COMIC).last().title)
+        // 共用全库总数会把漫剧那档的页数多说一倍。
+        assertEquals(4, (library.size+pageSize-1)/pageSize)
+        assertEquals(2, (library.sizeOf(ContentType.COMIC)+pageSize-1)/pageSize)
+        // 把上面那句错误做实：拿全库总数给漫剧翻，第 3 页就已经是空的了。
+        assertTrue("共用全库总数会让漫剧提前见底", library.browse(window(65,3),pageSize,ContentType.COMIC).isEmpty())
     }
 
     @Test fun `an index with no catalogue labels still browses under every filter`() {
