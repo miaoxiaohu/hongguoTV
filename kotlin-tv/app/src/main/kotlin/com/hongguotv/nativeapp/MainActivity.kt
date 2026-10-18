@@ -397,9 +397,10 @@ class MainActivity: Activity() {
     /**
      * 片库按钮能不能塞进导航栏那一行的右上角。
      *
-     * 条件写在首页这一处，是为了让它和首页长得一模一样 —— 它是导航的一部分，不是页内的一个控件。
+     * 条件写在首页这一处，是为了让「看真人剧还是漫剧」这个开关在首页和搜索页长得一模一样 ——
+     * 它是导航的一部分，不是页内的一个控件。
      */
-    private fun inlineCatalogueFilters()=tab==TAB_HOME && resources.configuration.fontScale<=1.2f && widthDp()>=900
+    private fun inlineCatalogueFilters()=(tab==TAB_HOME || tab==TAB_SEARCH) && resources.configuration.fontScale<=1.2f && widthDp()>=900
     /**
      * 把「片库」那一行摆到该去的地方，宽屏就并进导航栏右端，窄屏就自己占一行。
      *
@@ -473,10 +474,21 @@ class MainActivity: Activity() {
             searchRow.addView(input,lp(0,dp(45)).apply { weight=1f; rightMargin=dp(10) })
             fun search() { val next=input.text.toString().trim(); if(next.isBlank()) { input.requestFocus(); return }; runSearch(next) }
             searchInput=input; searchButton=addButton(searchRow,"搜索") { search() }
-            // The catalogue row is no longer drawn on this tab, so the search box is what the nav
-            // points down to, and typeButtons is empty here — getValue would throw.
             input.nextFocusUpId=nav[tab].id; searchButton?.nextFocusUpId=input.nextFocusUpId
-            nav.forEach { it.nextFocusDownId=input.id }
+            // 分类按钮进导航栏右上角，和首页完全同一套。它在搜索页是真的有作用：全库索引记着每部
+            // 剧属于哪套目录，而同一个题材词两边都命中 —— 搜「都市」685 部里 316 部是漫剧，
+            // 不分开的话大半结果和用户想要的不是一档。摆法和首页一样，是为了让这个开关在两页
+            // 里长得一模一样。
+            val types=row().apply { setPadding(0,dp(8),0,dp(6)) }
+            if(!inlineCatalogueFilters()) types.addView(text("片库",12f,muted),lp(dp(42),-2))
+            ContentType.entries.forEach { type ->
+                typeButtons[type]=addButton(types,type.label,library.contentType==type) { switchContentType(type) }
+                    .apply { isSelected=library.contentType==type; nextFocusUpId=input.nextFocusUpId }
+            }
+            placeCatalogueRow(top,container,types)
+            // 导航往下先落到分类按钮，再由它落到输入框 —— 分类按钮和导航同处一行，从导航往下跳到
+            // 左下角的输入框会显得突兀。
+            nav.forEach { it.nextFocusDownId=typeButtons[library.contentType]?.id ?: input.id }
             lateinit var recent: TextView
             recent=addButton(searchRow,"历史") { showSearchHistory(recent) }; recent.nextFocusUpId=input.nextFocusUpId
             lateinit var phone: TextView
@@ -611,6 +623,9 @@ class MainActivity: Activity() {
             val status=when {
                 building -> "正在建立全库索引 · 已收录 $indexed 部"
                 complete -> "已搜索全库 $indexed 部"
+                // 走完了但还没记下每部属于哪套目录：分类按钮此刻按下去是不分档的。与其让用户以为
+                // 自己按错了，不如把差在哪一步说出来 —— 「没建完」和「建完了但缺这一步」是两回事。
+                indexed>0 && !library.isCatalogueLabelled() -> "正在给每部剧记下属于哪套目录 · 已收录 $indexed 部，分开搜要等这一步做完"
                 indexed>0 -> "全库索引还没建完 · 已收录 $indexed 部，下次打开自动继续"
                 else -> "全库索引还没建起来 · 现在只能搜到站内的十条结果"
             }

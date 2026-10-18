@@ -173,6 +173,14 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      * seen is appended when the page has room. That keeps newly listed shows reachable without
      * letting ten unranked rows outrank a local exact match.
      *
+     * [type] narrows the local index to one catalogue, and only when [local] can actually classify
+     * its shows — see [CatalogueIndex.labelled]. It cannot narrow the server: the public search page
+     * accepts no category parameter at all. That is not a loss in practice, because the server only
+     * ever contributes ten top-up rows while the index answers with every match in the library.
+     * Measured over the whole library, 「都市」 hits 685 shows of which 316 are 漫剧, so without the
+     * split most of what a genre search wanted is mixed in with the other catalogue. The two
+     * catalogues are disjoint, so the split itself is clean.
+     *
      * [CatalogPage.matchedCount] records how many rows actually mention the keyword. It is not a
      * nicety: the site answers every query with ten rows and never an empty list, so 「站内没有这部
      * 剧」 can only be decided client-side — see [mentions].
@@ -180,13 +188,18 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT, local: CatalogueIndex? = null): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
         var fuzzy=false
-        val localRows = if(local==null) emptyList() else local.searchAllowingTypo(keyword,SEARCH_LOCAL_LIMIT).let { (rows,relaxed) -> fuzzy=relaxed; rows }
+        val localRows = if(local==null) emptyList() else local.searchAllowingTypo(keyword,SEARCH_LOCAL_LIMIT,type).let { (rows,relaxed) -> fuzzy=relaxed; rows }
         // The server is asked on page one only. Its ten rows merely top up a page that the local
         // index has not filled, so re-asking on page two would spend a request to return rows that
         // are already merged in - and with no index at all it would spend one to answer nothing.
         val serverRows = if(page==1) publicSearch(keyword) else emptyList()
+        // 分类过滤只在索引真能分类时才生效。索引里的每部剧都记着自己属于哪套目录，才谈得上
+        // 「只看漫剧」；索引还欠着标签时（刚装上、或正在补建），硬过滤会把服务端的补位行全判成
+        // 「不属于真人剧」而丢掉，搜什么都不出东西 —— 一个看起来生效、实际把人全筛没了的开关，
+        // 比没有这个开关更糟。所以这里退回不过滤，界面上另有交代。
+        val scoped = if(type==null || local?.labelled!=true) serverRows else serverRows.filter { local.kindOf(it.id)==type }
         val known = localRows.mapTo(HashSet()) { it.id }
-        val unseen = serverRows.filterNot { it.id in known }
+        val unseen = scoped.filterNot { it.id in known }
         // A local hit has to stay alone: 搜「雾锁情迷」finds exactly one show, and topping the page
         // up with the server's fuzzy rows would bury nine unrelated dramas under it. When the index
         // finds nothing at all those rows are the only thing left to show, and they are shown whole
@@ -194,7 +207,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val filler = if(localRows.isEmpty()) unseen else unseen.filter { mentions(it.title,keyword) }
         val window = when {
             // No index, or the index matched nothing: the ten server rows are all there is.
-            localRows.isEmpty() -> if(page>1) emptyList() else serverRows
+            localRows.isEmpty() -> if(page>1) emptyList() else scoped
             else -> {
                 val slice = localRows.drop((page-1)*SEARCH_PAGE_SIZE).take(SEARCH_PAGE_SIZE).toMutableList()
                 // Only the first page borrows room from the server, so paging never drifts between

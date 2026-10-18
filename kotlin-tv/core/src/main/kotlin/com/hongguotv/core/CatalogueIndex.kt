@@ -29,8 +29,24 @@ class CatalogueIndex(entries: List<Series>, types: List<ContentType?> = emptyLis
      * re-running two regex replaces over each of them per keystroke would be the slowest part of a
      * keystroke.
      */
-    private val ordered: List<Entry> = entries.distinctBy { it.id }.mapIndexed { position, series ->
-        Entry(series, normalizeForSearch(series.title), normalizeForSearch(series.tags), types.getOrNull(position))
+    private val ordered: List<Entry> = run {
+        val rows = ArrayList<Entry>(entries.size)
+        val at = LinkedHashMap<String, Int>(entries.size.coerceAtLeast(1))
+        entries.forEachIndexed { position, series ->
+            val type = types.getOrNull(position)
+            val known = at[series.id]
+            if (known == null) {
+                at[series.id] = rows.size
+                rows += Entry(series, normalizeForSearch(series.title), normalizeForSearch(series.tags), type)
+            } else if (type != null) {
+                // 同一部剧可能来两次：一次来自还没记分类的老索引，一次来自补记分类的重走查。
+                // 记了分类的那份必须赢。老的 distinctBy 留的是先到的那份，也就是没分类的那份 ——
+                // 于是标签抓回来了、存下去了，搜索按分类过滤时却仍然把这一行当成「哪边都算」，
+                // 分不开，而且补多少次都补不好。
+                rows[known] = Entry(rows[known].series, rows[known].title, rows[known].tags, type)
+            }
+        }
+        rows
     }
 
     /**
@@ -43,22 +59,42 @@ class CatalogueIndex(entries: List<Series>, types: List<ContentType?> = emptyLis
     private class Entry(val series: Series, val title: String, val tags: String, val type: ContentType?)
 
     /**
+     * True when every show here records the catalogue it came from.
+     *
+     * Only then can a search be split by catalogue. A missing label reads as 「belongs to both」 so
+     * that an index written before the labels existed still browses — but that same leniency makes a
+     * filter over such an index a no-op that looks like it worked. Callers check this and say so
+     * rather than serving results that quietly ignore what the user selected.
+     */
+    val labelled: Boolean = ordered.all { it.type != null }
+
+    /**
      * Ranked matches for [keyword], best first, capped at [limit].
      *
      * Blank input matches nothing rather than everything; [ContentRepository.mentions] relies on
      * the same rule, and an index that returned the whole library for a stray space would defeat
      * the 「站内没有这部剧」 notice entirely.
+     *
+     * [type] narrows to one catalogue. It is worth having because the same word lands on both:
+     * measured over the whole library, 「都市」 hits 685 shows of which 316 are 漫剧, 「穿越」 391 of
+     * which 316, 「重生」 180 of which 111. Searching the whole library for a genre therefore buries
+     * most of what the user wanted. Null means no filter, which is also what an index whose shows
+     * carry no catalogue label falls back to.
      */
-    fun search(keyword: String, limit: Int = DEFAULT_LIMIT): List<Series> {
+    fun search(keyword: String, limit: Int = DEFAULT_LIMIT, type: ContentType? = null): List<Series> {
         val needle = normalizeForSearch(keyword)
         if (needle.isEmpty() || limit <= 0) return emptyList()
-        return ordered.asSequence()
+        val pool = if (type == null) ordered else ordered.filter { it.type == null || it.type == type }
+        return pool.asSequence()
             .mapIndexedNotNull { order, entry -> rank(entry, needle)?.let { Ranked(entry.series, it, order) } }
             .sortedWith(compareBy({ it.rank }, { it.series.title.length }, { it.order }))
             .take(limit)
             .map { it.series }
             .toList()
     }
+
+    /** Which catalogue [id] was filed under, or null when the index never recorded it. */
+    fun kindOf(id: String): ContentType? = ordered.firstOrNull { it.series.id == id }?.type
 
     /** How many entries match, ignoring [CatalogueIndex.search]'s cap. */
     fun count(keyword: String): Int {
@@ -103,12 +139,15 @@ class CatalogueIndex(entries: List<Series>, types: List<ContentType?> = emptyLis
      *
      * The boolean says whether the results came from the fallback, so the tab can say so.
      */
-    fun searchAllowingTypo(keyword: String, limit: Int = DEFAULT_LIMIT): Pair<List<Series>, Boolean> {
-        val literal = search(keyword, limit)
+    fun searchAllowingTypo(keyword: String, limit: Int = DEFAULT_LIMIT, type: ContentType? = null): Pair<List<Series>, Boolean> {
+        val literal = search(keyword, limit, type)
         if (literal.isNotEmpty()) return literal to false
         val needle = normalizeForSearch(keyword)
         if (needle.length < TYPO_FLOOR) return emptyList<Series>() to false
-        val relaxed = ordered.asSequence()
+        // The fallback has to respect the same filter, or a mistyped 漫剧 title would come back as
+        // a 真人剧 and the page would claim to be filtered when it is not.
+        val pool = if (type == null) ordered else ordered.filter { it.type == null || it.type == type }
+        val relaxed = pool.asSequence()
             .mapNotNull { entry -> editDistanceWithinOne(needle, entry.title).let { it to entry } }
             .filter { it.first <= 1 }
             .sortedWith(compareBy({ it.first }, { it.second.series.title.length }))
@@ -192,7 +231,24 @@ data class CatalogueSnapshot(
     val index: CatalogueIndex by lazy { CatalogueIndex(entries, types) }
     val size get() = entries.size
     /** True when the walk reached the end of every catalogue. */
-    val complete get() = done.size == ContentType.entries.size
+    val walkedToEnd get() = done.size == ContentType.entries.size
+    /**
+     * True when every show records the catalogue it came from.
+     *
+     * The size check matters as much as the null check: [types] defaults to empty, and `all` over an
+     * empty list is vacuously true, so a snapshot carrying no labels at all would sail through.
+     */
+    val labelled get() = types.size == entries.size && types.all { it != null }
+    /**
+     * True when the walk reached the end of every catalogue **and** every show is labelled.
+     *
+     * The second half is not decoration. Search narrows to one catalogue through these labels, and
+     * a missing label reads as 「belongs to both」, so an index written before they existed would
+     * filter as though nothing were selected and silently keep mixing the two. Worse, calling that
+     * state complete stops it ever being re-walked, so the labels would never arrive. An index that
+     * cannot answer 「这一页全是漫剧吗」 has not finished its job.
+     */
+    val complete get() = walkedToEnd && labelled
 }
 
 /**

@@ -167,8 +167,71 @@ class CatalogueIndexTest {
         assertEquals(false, decoded.complete)
         // A finished walk must not be re-requested on the next launch.
         assertEquals(true, CatalogueIndexDisk.decode(
-            CatalogueIndexDisk.encode(rows, emptyList(), mapOf(ContentType.SHORT to 34), ContentType.entries.toSet(), 1_000L), 2_000L
+            CatalogueIndexDisk.encode(
+                rows, List(rows.size) { ContentType.SHORT },
+                mapOf(ContentType.SHORT to 34), ContentType.entries.toSet(), 1_000L
+            ), 2_000L
         )!!.complete)
+    }
+
+    @Test fun `an index that finished without labelling its shows is not finished`() {
+        // 游标记着「两套目录都到头了」，但每部属于哪套目录是空的 —— 分类按钮加上来之前存下的那份。
+        // 搜索是照着这些标签分档的，缺标签的行只能算「哪边都算」，于是分开搜会静悄悄地不起作用；
+        // 而 complete 只看游标，这份索引就永远不会被重走查修好。
+        val rows = listOf(show("1", "真人剧甲"), show("2", "真人剧乙"), show("3", "漫剧丙"))
+        val unlabelled = CatalogueIndexDisk.decode(
+            CatalogueIndexDisk.encode(rows, emptyList(), mapOf(ContentType.SHORT to 34), ContentType.entries.toSet(), 1_000L), 2_000L
+        )!!
+        assertTrue("游标确实走完了", unlabelled.walkedToEnd)
+        assertFalse("索引自己也知道它没标签", unlabelled.index.labelled)
+        assertFalse("没记下分类的索引不算完成", unlabelled.complete)
+        // decode 会把 types 补齐到和 entries 一样长，所以光比长度抓不住这个状态 —— 每个位置都得
+        // 真的记下分类才行。这正是 labelled 两条都要查的原因。
+        assertEquals(unlabelled.entries.size, unlabelled.types.size)
+        assertTrue("全是空标签", unlabelled.types.all { it == null })
+
+        val labelled = unlabelled.copy(types = listOf(ContentType.SHORT, ContentType.SHORT, ContentType.COMIC))
+        assertTrue(labelled.index.labelled); assertTrue(labelled.complete)
+    }
+
+    @Test fun `a rewalk that labels a show fixes the copy an older index left unlabelled`() {
+        // 补标签这一趟会把同一部剧再抓一次，同一个 id 于是出现两次：先是没标签的老行，后是记了标签
+        // 的新行。老的去重留的是先到的那份，也就是没标签的那份 —— 标签补回来了、存下去了，分开搜
+        // 却仍然把这一行算进两档，补多少次都补不好。
+        val old = listOf(show("1", "真人剧甲"), show("2", "漫剧乙"))
+        val fresh = listOf(show("1", "真人剧甲"), show("2", "漫剧乙"))
+        val carried = CatalogueIndex(old + fresh, listOf(null, null) + listOf(ContentType.SHORT, ContentType.COMIC))
+        assertEquals(2, carried.size)
+        assertTrue("补完之后每部都该有分类", carried.labelled)
+        assertEquals(1, carried.sizeOf(ContentType.SHORT))
+        assertEquals(1, carried.sizeOf(ContentType.COMIC))
+        assertEquals(listOf("真人剧甲"), carried.browse(0, 5, ContentType.SHORT).map { it.title })
+        assertEquals(listOf("漫剧乙"), carried.browse(0, 5, ContentType.COMIC).map { it.title })
+        // 没抓到标签的那一遍仍然算「哪边都算」，老索引不至于变成一片空白。
+        assertFalse(CatalogueIndex(old, emptyList()).labelled)
+        assertEquals(2, CatalogueIndex(old, emptyList()).sizeOf(ContentType.COMIC))
+    }
+
+    @Test fun `a search can be narrowed to one catalogue`() {
+        // 分开搜的依据：同一个题材词两边都命中，混在一起就找不到想要的那一档。
+        // 实测全库：「都市」685 部里 316 部是漫剧，「穿越」391 部里 316 部，「重生」180 部里 111 部。
+        val real=listOf(show("r1","都市爱情"),show("r2","都市商战"),show("r3","都市逆袭"),show("r4","都市风云"))
+        val comic=listOf(show("c1","都市冒险"),show("c2","都市传说"),show("c3","都市怪谈"))
+        val library=CatalogueIndex(real + comic, List(4) { ContentType.SHORT } + List(3) { ContentType.COMIC })
+
+        assertEquals(7, library.search("都市", 20).size)
+        assertEquals(real.map { it.title }, library.search("都市", 20, ContentType.SHORT).map { it.title })
+        assertEquals(comic.map { it.title }, library.search("都市", 20, ContentType.COMIC).map { it.title })
+        // 错字容错也得守同一个过滤，否则打错字的漫剧会以真人剧的身份回来，而页面声称在过滤。
+        assertEquals(listOf("都市传说"), library.searchAllowingTypo("都市传说明", 20, ContentType.COMIC).first.map { it.title })
+        assertEquals(emptyList<String>(), library.searchAllowingTypo("都市传说明", 20, ContentType.SHORT).first.map { it.title })
+        assertEquals("真人剧", library.kindOf("r1")?.label)
+        assertEquals("漫剧", library.kindOf("c1")?.label)
+        assertEquals(null, library.kindOf("nope"))
+        // 没有标签的索引不分档，但也不能因此变成搜不到 —— 缺标签的行仍算命中。
+        val bare=CatalogueIndex(real + comic, emptyList())
+        assertFalse(bare.labelled)
+        assertEquals(7, bare.search("都市", 20, ContentType.COMIC).size)
     }
 
     @Test fun `an index written before bookmarks existed still reads, and costs one extra walk`() {
