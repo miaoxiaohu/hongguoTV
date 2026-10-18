@@ -642,7 +642,10 @@ class MainActivity: Activity() {
         val rows=mutableListOf<List<View>>()
         displayed.chunked(maxColumns).forEach { items ->
             val columns=items.size
-            val line=row().apply { gravity=if(columns==1) Gravity.CENTER_HORIZONTAL or Gravity.TOP else Gravity.TOP }
+            // 每行都左对齐。曾经只把「孤零零一张卡」的那行居中，理由是让它看起来不像没渲染出来 ——
+            // 但同一页里别的行全是左对齐，唯独这行飘到中间，左边线在这里断开，反而更像出了错。
+            // 统一靠左，海报列才是齐的。
+            val line=row().apply { gravity=Gravity.TOP }
             val built=mutableListOf<View>()
             items.forEachIndexed { columnIndex,item ->
                 val card=column(); card.setPadding(dp(4),dp(4),dp(4),dp(9)); focusStyle(card); card.contentDescription=item.title; card.tag=item.id; catalogCards[item.id]=card
