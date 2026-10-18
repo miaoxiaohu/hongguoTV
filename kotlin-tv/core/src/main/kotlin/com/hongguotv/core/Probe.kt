@@ -102,7 +102,7 @@ fun main(args: Array<String>) {
             val entries=walk.shows
             println("索引建完：本轮 ${entries.size} 部，用时 ${(System.currentTimeMillis()-started)/1000}s，断点 ${walk.cursor}，已完成 ${walk.done.map { it.storedValue }}${if(walk.gaps.isEmpty()) "" else "，未取到 ${walk.gaps.joinToString("；")}"}")
             val index=CatalogueIndex(entries)
-            for(q in listOf("庆余年","总裁","雾锁情迷","修仙","庆余年第二季")) {
+            for(q in listOf("大明","总裁","雾锁情迷","修仙","庆余年第二季")) {
                 val serverOnly=repository.search(q)
                 val merged=repository.search(q,1,ContentType.SHORT,index)
                 println("  「$q」 本地命中=${index.search(q,400).size} | 服务端=${serverOnly.items.size} 条 matched=${serverOnly.matchedCount} | 合并后第1页=${merged.items.size} hasMore=${merged.hasMore} matched=${merged.matchedCount} total=${merged.totalHits}")
