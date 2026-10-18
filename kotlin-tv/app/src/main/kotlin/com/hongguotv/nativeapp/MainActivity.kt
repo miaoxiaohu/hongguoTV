@@ -369,7 +369,9 @@ class MainActivity: Activity() {
         tabState[tab]=CatalogState(page,catalog,hasMore,ranking); tabFocus[tab]=catalogFocus
         tab=next; val saved=tabState[next]; page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; catalogFocus=tabFocus[next].orEmpty()
         // 搜索页只有真的放过一个词才去请求；空着的搜索框配一张空网格，什么也没说。
-        showCatalog(load=(fetchesRemote(next) && catalog.isEmpty() && (next!=TAB_SEARCH || query.isNotBlank())))
+        // 从导航按「搜索」进来时焦点交给输入框：那才是这一页要做的事，跳到结果卡片等于让人先
+        // 看结果再想办法回去改词。返回详情页时不走这里，焦点仍旧回到上次看的那张卡。
+        showCatalog(load=(fetchesRemote(next) && catalog.isEmpty() && (next!=TAB_SEARCH || query.isNotBlank())),focusInput=(next==TAB_SEARCH))
     }
     private fun switchContentType(type: ContentType) {
         if(library.contentType==type) return
@@ -425,7 +427,7 @@ class MainActivity: Activity() {
         "resume" -> library.history().filterNot { library.watched(it.series.id) }.map { it.series }
         else -> if(tab==TAB_FAVORITES) library.favorites() else library.history().map { it.series }
     }
-    private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false) {
+    private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false,focusInput: Boolean=false) {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
         // Never cache a new page number with the previous page's results while a request is pending.
         if(load) {
@@ -540,7 +542,7 @@ class MainActivity: Activity() {
         }
         if(load) {
             if(tab==TAB_HOME) catalogGrid(body,focusNav,focusType,loading=true)
-            else { message(body,"正在加载…"); if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
+            else { message(body,"正在加载…"); if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
             val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType
             work({
                 val result=when(requestTab) { TAB_HOME -> repository.home(requestPage,requestType); TAB_RANKING -> repository.comicRanking(requestPage); else -> repository.search(requestQuery,requestPage,requestType,library.catalogue()) }
@@ -555,7 +557,7 @@ class MainActivity: Activity() {
                     searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy
                     val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }
                     rankSubtitle?.text=ranking?.updatedText?.ifBlank { "来源：红果漫剧热播榜" } ?: "来源：红果漫剧热播榜"
-                    body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType)
+                    body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType,focusInput=focusInput)
                 }
             }, { problem ->
                 if(requestTab==TAB_HOME && requestPage==1) {
@@ -574,9 +576,9 @@ class MainActivity: Activity() {
                     if(resumeCards.isNotEmpty()) resumeCards.first().requestFocus()
                 }
             })
-        } else catalogGrid(body,focusNav,focusType)
+        } else catalogGrid(body,focusNav,focusType,focusInput=focusInput)
     }
-    private fun catalogGrid(body: LinearLayout,focusNav: Boolean,focusType: Boolean=false,loading: Boolean=false) {
+    private fun catalogGrid(body: LinearLayout,focusNav: Boolean,focusType: Boolean=false,loading: Boolean=false,focusInput: Boolean=false) {
         if(tab==TAB_HOME && page==1 && collection==null) { renderHome(body,focusNav,focusType,loading); return }
         resumeCards.clear(); catalogCards.clear(); cardImages.clear(); collectionBack=null
         if(collection!=null) {
@@ -603,7 +605,7 @@ class MainActivity: Activity() {
                 typeButtons.values.forEach { it.nextFocusDownId=resumeCards.first().id }
                 resumeCards.forEach { it.nextFocusDownId=it.id }
             }
-            if(focusType) typeButtons[library.contentType]?.requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else if(focusNav || resumeCards.isEmpty()) nav[tab].requestFocus() else resumeCards.first().requestFocus()
+            if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else if(focusNav || resumeCards.isEmpty()) nav[tab].requestFocus() else resumeCards.first().requestFocus()
             return
         }
         // The site answers every query with ten same-genre rows and never an empty list, so a search
@@ -714,7 +716,7 @@ class MainActivity: Activity() {
         searchInput?.nextFocusDownId=cards.first().id
         searchButton?.nextFocusDownId=cards[minOf(4,cards.lastIndex)].id
         searchActions.forEach { it.nextFocusDownId=cards[minOf(4,cards.lastIndex)].id }
-        if(focusType) typeButtons[library.contentType]?.requestFocus() else if(focusNav) nav[tab].requestFocus()
+        if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else if(focusNav) nav[tab].requestFocus()
         else if(resumeCards.isNotEmpty() && (catalogFocus.isEmpty() || catalogFocus.startsWith("resume:"))) (resumeCards.firstOrNull { it.tag==catalogFocus } ?: resumeCards.first()).requestFocus()
         else cards[displayed.indexOfFirst { it.id==catalogFocus }.coerceAtLeast(0)].requestFocus()
         val savedScroll=scrollPositions[catalogPageKey]
