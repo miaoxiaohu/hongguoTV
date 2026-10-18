@@ -531,7 +531,8 @@ class MainActivity: Activity() {
         }
         catalogPageKey="$tab:${collection.orEmpty()}:$page:$query"
         // 空查询不发请求（switchTab 已经保证），所以这里用本地索引铺一批可直接点的剧。
-        // 一个刚装好、还没搜过任何词的用户，不该只看到一个输入框和一行提示。
+        // 一个刚装好、还没搜过任何词的用户，不该只看到一个输入框。铺出来的剧由下面
+        // 「随便看看」的标题交代来历——不交代的话，这片剧和搜索结果长得一模一样。
         if(tab==1 && query.isBlank() && catalog.isEmpty()) library.catalogue()?.newest(pageSize)?.let { catalog=it; hasMore=false }
         val preview=SeriesPreview(this); selectionPreview=preview; body.addView(preview)
         val scroll=ScrollView(this).apply { isFillViewport=false; isVerticalScrollBarEnabled=false; clipToPadding=false }; catalogScroll=scroll
@@ -571,7 +572,10 @@ class MainActivity: Activity() {
             }
             list.addView(text(status,13f,muted).apply { setPadding(dp(4),0,dp(4),dp(12)) },lp(-1,-2))
         } else if(tab==1 && query.isBlank() && !displayed.isEmpty()) {
-            list.addView(text("输入剧名或关键词搜索全库，或直接从下方开始看",13f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(12)) },lp(-1,-2))
+            // 这片剧是空查询时铺的，不是搜出来的。标题必须说在前面：一片剧突然出现在空的搜索框
+            // 下面，用户只会以为搜索出了故障，或者以为这就是搜索结果。来源讲不清，界面就是在骗人。
+            list.addView(text("随便看看",17f).apply { setTypeface(null,Typeface.BOLD); setPadding(dp(4),dp(4),dp(4),dp(2)) },lp(-1,-2))
+            list.addView(text("输入剧名或关键词才是搜索，会直接搜全库。",13f,muted).apply { setPadding(dp(4),0,dp(4),dp(12)) },lp(-1,-2))
         }
         val cards=mutableListOf<View>(); val count=6; val gap=dp(14); val width=((resources.displayMetrics.widthPixels*.9f-gap*(count-1))/count).toInt()
         displayed.chunked(count).forEach { items ->
