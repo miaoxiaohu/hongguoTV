@@ -30,19 +30,17 @@ class MainActivity: Activity() {
     /**
      * 导航标签的编号。常量编号 = 在 [TAB_LABELS] 里的下标，两边必须一起改。
      *
-     * 「随便看看」排在首页后面：它是浏览全片的入口，不是搜索的一部分，放末尾等于把它藏起来。
      * 早先这些编号是散在二十多处判断里的裸数字，换个顺序要逐处 +1，漏一处就是某个标签页悄悄
      * 长出另一个标签页的行为 —— 排行榜长出剧集进度、收藏页开始显示热度，都是这么来的。
      */
     companion object {
         const val TAB_HOME=0
-        const val TAB_BROWSE=1
-        const val TAB_SEARCH=2
-        const val TAB_RANKING=3
-        const val TAB_FAVORITES=4
-        const val TAB_HISTORY=5
-        const val TAB_SETTINGS=6
-        val TAB_LABELS=listOf("首页","随便看看","搜索","排行榜","收藏","最近观看","设置")
+        const val TAB_SEARCH=1
+        const val TAB_RANKING=2
+        const val TAB_FAVORITES=3
+        const val TAB_HISTORY=4
+        const val TAB_SETTINGS=5
+        val TAB_LABELS=listOf("首页","搜索","排行榜","收藏","最近观看","设置")
     }
     private val bg=TvStyle.background; private val surface=TvStyle.surface
     private val accent=TvStyle.accent; private val white=TvStyle.text; private val muted=TvStyle.muted
@@ -76,7 +74,7 @@ class MainActivity: Activity() {
     private var collectionFocus=""
     private var collectionBack: View?=null
     /**
-     * 一行几张。首页、搜索、随便看看、榜单共用，页大小按它对齐。
+     * 一行几张。首页、搜索、榜单、收藏共用，页大小按它对齐。
      *
      * 声明在 [pageSize] 之前是有原因的：属性按源码顺序初始化，反过来写编译器会拒绝。
      */
@@ -86,7 +84,6 @@ class MainActivity: Activity() {
      *
      * 网格一行摆 [GRID_COLUMNS] 张，页大小必须是它的整数倍，否则每一页都会收尾在半排上 —— 20 除以 6
      * 余 2，于是每一页都是「三整行加两张」，右边的空档比偶尔出现的还频繁。18 = 6 x 3，三行整。
-     * 这个数字也决定了下面 [browseWindow] 往回补的粒度。
      */
     private val pageSize=GRID_COLUMNS*3
     private var catalogScroll: ScrollView?=null
@@ -276,9 +273,8 @@ class MainActivity: Activity() {
             // a low-end box, so the notice steps in every 400 shows instead.
             if(total-cataloguePaintMark<400 || isDestroyed) return@buildCatalogue
             cataloguePaintMark=total
-            // 索引在长大，凡是看得见这份索引的页都要跟着重画：搜索结果，以及随便看看的总页数。
-            if(tab==TAB_SEARCH && query.isNotBlank()) refreshSearchQuietly()
-            else if(tab==TAB_SEARCH || tab==TAB_BROWSE) showCatalog()
+            // 索引在长大，搜索结果跟着重画一次，不闪「正在加载」。
+            if(tab==TAB_SEARCH && query.isNotBlank()) refreshSearchQuietly() else if(tab==TAB_SEARCH) showCatalog()
         }
     }
     /**
@@ -364,8 +360,8 @@ class MainActivity: Activity() {
         parent.addView(text(detail,13f,muted)); addButton(parent,"重试",onClick=retry).requestFocus()
     }
     /**
-     * 哪些标签页的内容来自网络。首页、搜索、排行榜要发请求；随便看看翻本机索引，收藏和最近观看
-     * 读本机记录，设置页什么都不读 —— 对它们调 showCatalog(true) 会白等一次「正在加载…」。
+     * 哪些标签页的内容来自网络。首页、搜索、排行榜要发请求；收藏和最近观看读本机记录，设置页
+     * 什么都不读 —— 对它们调 showCatalog(true) 会白等一次「正在加载…」。
      */
     private fun fetchesRemote(which: Int)=which==TAB_HOME || which==TAB_SEARCH || which==TAB_RANKING
     private fun switchTab(next: Int) {
@@ -380,12 +376,12 @@ class MainActivity: Activity() {
         leaveCollection()
         (searchInput as? EditText)?.let { query=it.text.toString().trim() }
         library.contentType=type
-        // 分类一变，首页、随便看看、搜索三页缓存的页码和列表就都是另一套片库的了，全部丢掉。
-        listOf(TAB_HOME,TAB_BROWSE,TAB_SEARCH).forEach { tabState.remove(it); tabFocus.remove(it) }
+        // 分类一变，首页和搜索两页缓存的页码和列表就都是另一套片库的了，全部丢掉。
+        listOf(TAB_HOME,TAB_SEARCH).forEach { tabState.remove(it); tabFocus.remove(it) }
         releaseCatalogViews()
         page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""; homePosition=null
-        // query 可能还是上一次搜索留下的。非空不等于现在在搜索页 —— 在随便看看上翻页时切分类，
-        // 按 query 非空去发请求会把搜索结果画到浏览页上。
+        // query 可能还是上一次搜索留下的。非空不等于现在在搜索页 —— 在首页上切分类，
+        // 按 query 非空去发请求会把搜索结果画到首页上。
         showCatalog(load=(tab==TAB_HOME || (tab==TAB_SEARCH && query.isNotBlank())),focusType=true)
     }
     private fun leaveCollection() {
@@ -401,11 +397,9 @@ class MainActivity: Activity() {
     /**
      * 片库按钮能不能塞进导航栏那一行的右上角。
      *
-     * 首页和随便看看共用一套：屏幕够宽、字号没被放大时，把按钮缩小推到导航栏最右边；否则退回
-     * 自己的一行。条件写成两页通用，是为了让「看真人剧还是漫剧」这个开关在两个页面里长得一模一样 ——
-     * 它是导航的一部分，不是页内的一个控件。
+     * 条件写在首页这一处，是为了让它和首页长得一模一样 —— 它是导航的一部分，不是页内的一个控件。
      */
-    private fun inlineCatalogueFilters()=(tab==TAB_HOME || tab==TAB_BROWSE) && resources.configuration.fontScale<=1.2f && widthDp()>=900
+    private fun inlineCatalogueFilters()=tab==TAB_HOME && resources.configuration.fontScale<=1.2f && widthDp()>=900
     /**
      * 把「片库」那一行摆到该去的地方，宽屏就并进导航栏右端，窄屏就自己占一行。
      *
@@ -423,8 +417,6 @@ class MainActivity: Activity() {
         }
     }
     private fun localCatalog()=tab==TAB_FAVORITES || tab==TAB_HISTORY || collection!=null
-    /** 翻页要不要发请求。随便看看翻的是本机索引，和收藏、记录一样，一个包都不用发。 */
-    private fun pagesRemotely()=!localCatalog() && tab!=TAB_BROWSE
     private fun localItems(): List<Series> = when(collection) {
         "hot" -> collectionReturn?.items.orEmpty().filterNot { it.id in library.hidden() }
         "later" -> library.later()
@@ -462,14 +454,10 @@ class MainActivity: Activity() {
             val scroll=ScrollView(this); val body=column(); scroll.addView(body); container.addView(scroll,lp(-1,0).apply { weight=1f })
             settings(body); if(focusNav) nav[tab].requestFocus(); return
         }
-        // The catalogue selector belongs to 随便看看, not to 搜索. It used to be drawn on 搜索 too,
-        // where it did nothing at all: ContentRepository.search ignores its type argument, and
-        // there is no way to scope it, so every button returned byte-identical results.
-        // The site's search accepts no filter (tab/category/categoryId/type/filter/sort_type all
-        // ignored), no list item, detail page or search result carries a category field, and
-        // filtering client-side against the browse catalogues leaves 0.2-2.1 of 10 rows on average.
-        // So 搜索 stays a pure search box - an empty query there shows nothing at all rather than a
-        // grid that has to explain itself, and 随便看看 is where the two catalogues are browsed.
+        // 分类按钮只画在首页。搜索那边画过，纯属骗人：ContentRepository.search 忽略它的 type
+        // 参数，而站点也没有任何办法给搜索加条件（tab/category/categoryId/type/filter/sort_type
+        // 全部无效），列表项、详情页和搜索结果里都没有分类字段，拿本地目录在客户端过滤只能剩下
+        // 十条里的 0.2 到 2.1 条。搜索页于是只留一个输入框。
         if(tab==TAB_HOME) {
             val types=row().apply { setPadding(0,dp(8),0,dp(6)) }
             if(!inlineCatalogueFilters()) types.addView(text("片库",12f,muted),lp(dp(42),-2))
@@ -515,25 +503,6 @@ class MainActivity: Activity() {
                 .apply { setPadding(0,0,0,dp(8)) }
             container.addView(rankSubtitle)
             nav.forEach { it.nextFocusDownId=rankRefresh!!.id }
-        } else if(tab==TAB_BROWSE) {
-            // 「随便看看」是纯本地浏览，不发任何请求。
-            //
-            // 分类切换在这里才有用：搜索那边不行，因为 ContentRepository.search 不接受 type，
-            // 摆个按钮在那里只会让人以为搜索能被分类。而这一页翻的是本地索引，每一部都记着自己
-            // 属于哪一套目录，所以两套能各自从自己的首页开始 —— 混在一个列表里的话，漫剧排在
-            // 800 部真人剧之后，等于看不见。
-            //
-            // 只有一行，而且和首页一模一样：片库按钮在导航栏右上角，选中哪个按钮就是看哪一套。
-            // 导航里已经写着「随便看看」，页面上不必再写一遍标题，也不必单列总数行。
-            val types=row().apply { setPadding(0,dp(8),0,dp(6)) }
-            if(!inlineCatalogueFilters()) types.addView(text("片库",12f,muted),lp(dp(42),-2))
-            ContentType.entries.forEach { type ->
-                typeButtons[type]=addButton(types,type.label,library.contentType==type) {
-                    if(library.contentType!=type) { switchContentType(type) }
-                }.apply { isSelected=library.contentType==type; nextFocusUpId=nav[tab].id }
-            }
-            placeCatalogueRow(top,container,types)
-            nav.forEach { it.nextFocusDownId=typeButtons.getValue(library.contentType).id }
         } else if(tab>TAB_RANKING) {
             val heading=row().apply { setPadding(0,dp(14),0,dp(6)) }
             heading.addView(text(if(tab==TAB_FAVORITES) "我的收藏" else "接着上次看",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
@@ -609,45 +578,15 @@ class MainActivity: Activity() {
             typeButtons.values.forEach { it.nextFocusDownId=collectionBack!!.id }
         }
         catalogPageKey="$tab:${collection.orEmpty()}:$page:$query"
-        // 随便看看翻的是本地索引，不发请求。
-        //
-        // 每次都重算，而不是只在 catalog 为空时算：索引在后台一页页长大，这一页的总页数和末页
-        // 起点都会跟着变，用上一次的窗口画出来的就是一个已经过期的页码。
-        //
-        // 顺序是网站自己的目录顺序，两套各 800 部、零重叠，所以按当前分类过滤后才可能从这套的
-        // 首页开始 —— 混着翻的话漫剧排在 800 部真人剧之后，第一页永远是真人剧。
-        if(tab==TAB_BROWSE && collection==null) {
-            // 索引可能整个还没建起来（还没落盘）。空状态会去讲这件事，所以这里不必再单列一行：
-            // 导航已经写着「随便看看」，选中哪个分类按钮本身就是「看的是哪一套」，再写一遍是占地方。
-            val index=library.catalogue()
-            val type=library.contentType
-            val total=index?.sizeOf(type) ?: 0
-            val shown=browseWindow(total)
-            catalog=index?.browse(shown,pageSize,type).orEmpty(); hasMore=shown+pageSize<total
-        }
-        // 随便看看不摆预览栏：那儿是翻片库，选中的那张卡自己就写着名字、集数和标签，再在顶上放大
-        // 重述一遍只是占掉一行高度，还会把网格挤矮。首页、搜索、收藏这些要留着 —— 那是「选中哪
-        // 一部」的主要说明处，海报本身只写得下剧名。
-        val preview=if(tab==TAB_BROWSE) null else SeriesPreview(this).also { selectionPreview=it; body.addView(it) }
+        val preview=SeriesPreview(this); selectionPreview=preview; body.addView(preview)
         val scroll=ScrollView(this).apply { isFillViewport=false; isVerticalScrollBarEnabled=false; clipToPadding=false }; catalogScroll=scroll
         val list=column(); scroll.addView(list); body.addView(scroll,lp(-1,0).apply { weight=1f })
         var restoringScroll=true
-        // 随便看看的 catalog 在上面已经按窗口切成了正好一页，不再对它分页。
-        val displayed=when {
-            localCatalog() -> catalog.drop((page-1)*pageSize).take(pageSize)
-            tab==TAB_HOME -> catalog.filterNot { it.id in library.hidden() }
-            else -> catalog.take(30)
-        }
+        val displayed=if(localCatalog()) catalog.drop((page-1)*pageSize).take(pageSize) else if(tab==TAB_HOME) catalog.filterNot { it.id in library.hidden() } else catalog.take(30)
         if(displayed.isEmpty()) {
-            message(list,if(loading) "正在加载推荐…" else when(tab) {
-                TAB_SEARCH -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关剧，换个关键词试试"
-                TAB_BROWSE -> if(library.catalogueSize()==0) "片库索引还在建立中，好了就能在这里翻" else "这个片库里没有更多内容"
-                TAB_FAVORITES -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"
-                TAB_HISTORY -> "播放过的剧集会自动保存在这里"
-                else -> "本页没有更多内容"
-            })
-            if((tab<=TAB_RANKING || localCatalog()) && page>1) addButton(list,"上一页") { page--; showCatalog(pagesRemotely()) }
-            if((tab<=TAB_RANKING || localCatalog()) && hasMore) addButton(list,"下一页") { page++; showCatalog(pagesRemotely()) }
+            message(list,if(loading) "正在加载推荐…" else when(tab) { TAB_SEARCH -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关剧，换个关键词试试"; TAB_FAVORITES -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; TAB_HISTORY -> "播放过的剧集会自动保存在这里"; else -> "本页没有更多内容" })
+            if((tab<=TAB_RANKING || localCatalog()) && page>1) addButton(list,"上一页") { page--; showCatalog(!localCatalog()) }
+            if((tab<=TAB_RANKING || localCatalog()) && hasMore) addButton(list,"下一页") { page++; showCatalog(!localCatalog()) }
             if(resumeCards.isNotEmpty()) {
                 typeButtons.values.forEach { it.nextFocusDownId=resumeCards.first().id }
                 resumeCards.forEach { it.nextFocusDownId=it.id }
@@ -682,8 +621,8 @@ class MainActivity: Activity() {
         val cards=mutableListOf<View>(); val maxColumns=GRID_COLUMNS; val gap=dp(14)
         // One width for every card on every screen. Two earlier attempts at a full last row both
         // broke this: widening those cards gave the grid two poster sizes, and stretching the
-        // spacing left the same visible gap. The row is now made full by the pager instead - see
-        // browseWindow, which pulls the last page back to the end of the index so it lands whole.
+        // spacing left the same visible gap. The row width is now a multiple of the page size
+        // instead, so a page never ends short to begin with.
         val cardWidth=((resources.displayMetrics.widthPixels*.9f-gap*(maxColumns-1))/maxColumns).toInt()
         val rows=mutableListOf<List<View>>()
         displayed.chunked(maxColumns).forEach { items ->
@@ -721,7 +660,6 @@ class MainActivity: Activity() {
             paging.addView(text(pagingLabel(),14f,muted).apply { gravity=Gravity.CENTER },lp(dp(
                 when {
                     tab==TAB_RANKING -> 135
-                    tab==TAB_BROWSE -> 135              // 总部数上面那行已经写过了，这里只报页码
                     tab==TAB_SEARCH && searchTotal!=null -> 210
                     else -> 95
                 }),dp(44)))
@@ -752,7 +690,7 @@ class MainActivity: Activity() {
         if(resumeCards.isNotEmpty()) firstRow.forEachIndexed { index,v -> v.nextFocusUpId=resumeCards[minOf(index,resumeCards.lastIndex)].id }
         else homeUpdates?.let { updates -> updates.nextFocusUpId=typeButtons[library.contentType]?.id ?: nav[TAB_HOME].id; updates.nextFocusDownId=cards.first().id; firstRow.forEach { it.nextFocusUpId=updates.id } }
         typeButtons.values.forEach { it.nextFocusDownId=searchInput?.id ?: collectionBack?.id ?: resumeCards.firstOrNull()?.id ?: homeUpdates?.id ?: cards.first().id }
-        // 上一行把导航往下接到了分类按钮（随便看看、首页两页都有），这一行再把最后一排接回海报。
+        // 上一行把导航往下接到了分类按钮，这一行再把最后一排接回海报。
         // 少了它 Android 会按几何位置乱找，遥控器从分类按钮直接落到导航栏，网格就选不中。
         // 搜索页没有分类按钮，searchInput 自己往下走一跳。
         searchInput?.nextFocusDownId=cards.first().id
@@ -963,9 +901,7 @@ class MainActivity: Activity() {
      */
     private fun turnPage(target: Int) {
         page=target; catalogFocus=""
-        // 随便看看和本机记录翻页都不发请求。随便看看的窗口在 catalogGrid 里按索引现算，
-        // 这里要是再算一遍，两处就会各有一份页码算法，改一处忘一处就翻到空白页。
-        if(tab==TAB_BROWSE || localCatalog()) { showCatalog(false); return }
+        if(localCatalog()) { showCatalog(false); return }
         val local=library.catalogue()
         if(tab!=TAB_SEARCH || local==null) { showCatalog(true); return }
         if(page==1) { showCatalog(true); return }
@@ -974,32 +910,11 @@ class MainActivity: Activity() {
         searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy
         showCatalog()
     }
-    /**
-     * 随便看看这一页从索引的第几部开始；末页不够一整屏时，往回退几部补满。
-     *
-     * [total] 是当前分类的部数，不是全库 —— 两套各 800 部，混着算页码会把漫剧那半说少一半。
-     *
-     * 页大小 [pageSize] 已经是行宽的整数倍，所以中间每页天生就是满的，只有整个索引的最后一页可能
-     * 收在半排上。把这一页的起点挪到「最后 pageSize 部」就永远是满的：代价是它和上一页重叠几部，
-     * 而重叠几部远比右侧空两格好懂。仍然从 0 起算的只有两种情况 —— 这是第一页，或者索引还不足
-     * 一屏（刚开始建时），那时退无可退。
-     */
-    private fun browseWindow(total: Int): Int {
-        if (total<=pageSize || page<=1) return (page-1)*pageSize
-        val pages=(total+pageSize-1)/pageSize
-        val nominal=(page-1)*pageSize
-        return if(page==pages && nominal+pageSize>total) (total-pageSize).coerceAtLeast(0) else nominal
-    }
 
     /** 「第 X / Y 页 · 共 N 部」；只有搜索知道命中总数，其它页维持原来的写法。 */
     private fun pagingLabel(): String = when {
         localCatalog() -> "第 $page / ${maxOf(1,(catalog.size+pageSize-1)/pageSize)} 页"
         tab==TAB_RANKING && ranking!=null -> "第 $page / ${ranking!!.totalPages} 页"
-        // 按当前分类算总页数：两套各 800 部，拿全库 1600 去除，会把漫剧那一半的页码说少一半。
-        tab==TAB_BROWSE -> {
-            val total=library.catalogue()?.sizeOf(library.contentType) ?: 0
-            "第 $page / ${maxOf(1,(total+pageSize-1)/pageSize)} 页"
-        }
         tab==TAB_SEARCH && (searchTotal ?: 0)>0 -> {
             val pages=maxOf(1,((searchTotal ?: 0)+pageSize-1)/pageSize)
             "第 $page / $pages 页 · 共 $searchTotal 部"
@@ -1009,7 +924,7 @@ class MainActivity: Activity() {
     private fun runSearch(value: String,type: ContentType=library.contentType) {
         val clean=value.trim(); if(clean.isEmpty() || clean.length>80) return
         (searchInput as? EditText)?.let { (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(it.windowToken,0) }
-        if(library.contentType!=type) { library.contentType=type; listOf(TAB_HOME,TAB_BROWSE,TAB_SEARCH).forEach { tabState.remove(it); tabFocus.remove(it) } }
+        if(library.contentType!=type) { library.contentType=type; listOf(TAB_HOME,TAB_SEARCH).forEach { tabState.remove(it); tabFocus.remove(it) } }
         library.rememberSearch(clean,type); query=clean; tab=TAB_SEARCH; page=1; catalogFocus=""
         searchMatched=null; searchTotal=null; searchFuzzy=false; showCatalog(true)
     }
@@ -1588,7 +1503,7 @@ class MainActivity: Activity() {
                 when(screen) {
                     "player" -> playEpisode(episodeIndex,startPosition,autoplay=false)
                     "detail" -> if(detail!=null) showDetail(false) else pendingDetail?.let { openDetail(it,directPlayback,autoplay=false) } ?: showCatalog()
-                    else -> showCatalog(load=!localCatalog() && tab!=TAB_BROWSE && catalog.isEmpty() && fetchesRemote(tab) && (tab!=TAB_SEARCH || query.isNotBlank()))
+                    else -> showCatalog(load=!localCatalog() && catalog.isEmpty() && fetchesRemote(tab) && (tab!=TAB_SEARCH || query.isNotBlank()))
                 }
             } else {
                 val waiting=deferredWork; deferredWork=null; waiting?.apply?.invoke()

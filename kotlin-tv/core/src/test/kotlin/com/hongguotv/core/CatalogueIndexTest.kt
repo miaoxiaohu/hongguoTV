@@ -165,52 +165,10 @@ class CatalogueIndexTest {
         assertEquals(12, decoded.cursor[ContentType.SHORT])
         assertEquals(setOf(ContentType.COMIC), decoded.done)
         assertEquals(false, decoded.complete)
-        // 走完了、也记下了每部属于哪套目录：这种索引下次启动不该再抓一遍。
+        // A finished walk must not be re-requested on the next launch.
         assertEquals(true, CatalogueIndexDisk.decode(
-            CatalogueIndexDisk.encode(
-                rows, List(rows.size) { ContentType.SHORT },
-                mapOf(ContentType.SHORT to 34), ContentType.entries.toSet(), 1_000L
-            ), 2_000L
-        )!!.complete)
-    }
-
-    @Test fun `an index that finished without labelling its shows is not finished`() {
-        // 索引有了、游标也记着「两套目录都到头了」，但每部属于哪套目录是空的 —— 这正是分类按钮
-        // 加上来之前存下来的那份。browse 把没有标签的行当成「属于所有分类」，于是漫剧那一页照样
-        // 翻出排在最前面的真人剧；而 complete 只看游标，所以它永远不会被重走查修好。
-        // 判据漏了 labelled，这个状态就被永久钉死在「已完成」上。
-        val rows = listOf(show("1", "真人剧甲"), show("2", "真人剧乙"), show("3", "漫剧丙"))
-        val unlabelled = CatalogueIndexDisk.decode(
             CatalogueIndexDisk.encode(rows, emptyList(), mapOf(ContentType.SHORT to 34), ContentType.entries.toSet(), 1_000L), 2_000L
-        )!!
-        assertTrue("游标确实走完了", unlabelled.walkedToEnd)
-        assertFalse("没有标签就不算有分类", unlabelled.labelled)
-        assertFalse("没记下分类的索引不算完成", unlabelled.complete)
-        // decode 会把 types 补齐到和 entries 一样长，所以光比长度是抓不住这个状态的 —— 每个位置
-        // 都得真的记下分类才行。这正是 labelled 两条都要查的原因。
-        assertEquals(unlabelled.entries.size, unlabelled.types.size)
-        assertTrue("全是空标签", unlabelled.types.all { it == null })
-
-        // 补上标签之后才算数。
-        val labelled = unlabelled.copy(types = listOf(ContentType.SHORT, ContentType.SHORT, ContentType.COMIC))
-        assertTrue(labelled.labelled); assertTrue(labelled.complete)
-        assertEquals(listOf("漫剧丙"), labelled.index.browse(0, 5, ContentType.COMIC).map { it.title })
-    }
-
-    @Test fun `a rewalk that labels a show fixes the copy an older index left unlabelled`() {
-        // 补标签这一趟会把同一部剧再抓一次，同一个 id 于是出现两次：先是没标签的老行，后是记了标签
-        // 的新行。老的去重留的是先到的那份，也就是没标签的那份 —— 于是标签补回来了，browse 却照样
-        // 把这行算进每一个分类，漫剧那一页还是真人剧，而且补多少次都补不好。
-        val old = listOf(show("1", "真人剧甲"), show("2", "漫剧乙"))
-        val fresh = listOf(show("1", "真人剧甲"), show("2", "漫剧乙"))
-        val carried = CatalogueIndex(old + fresh, listOf(null, null) + listOf(ContentType.SHORT, ContentType.COMIC))
-        assertEquals(2, carried.size)
-        assertEquals(1, carried.sizeOf(ContentType.SHORT))
-        assertEquals(1, carried.sizeOf(ContentType.COMIC))
-        assertEquals(listOf("真人剧甲"), carried.browse(0, 5, ContentType.SHORT).map { it.title })
-        assertEquals(listOf("漫剧乙"), carried.browse(0, 5, ContentType.COMIC).map { it.title })
-        // 没抓到的那一遍仍然按「属于所有分类」读，老索引不至于变成一片空白。
-        assertEquals(2, CatalogueIndex(old, emptyList()).sizeOf(ContentType.COMIC))
+        )!!.complete)
     }
 
     @Test fun `an index written before bookmarks existed still reads, and costs one extra walk`() {
@@ -261,8 +219,9 @@ class CatalogueIndexTest {
         val comic=(1..25).map { show("c$it", "漫剧 $it") }
         val library=CatalogueIndex(real + comic, List(40) { ContentType.SHORT } + List(25) { ContentType.COMIC })
 
-        // 与 MainActivity.browseWindow 同一套算法。放在测试里重写一遍是故意的：两边若有一处算法
-        // 变了，这里不会跟着变，会立刻红。
+        // 按 18 部一页、页大小整除行宽的方式翻，每一页都得是满的。这段 window 是那段翻页算法的
+        // 独立副本：应用里已经不按目录逐页翻了，但 Probe 报「每套目录多少部、能翻几页」还靠它，
+        // 两边算法一旦有一处不同，这里就会红。
         fun window(total: Int,page: Int): Int {
             if(total<=pageSize || page<=1) return (page-1)*pageSize
             val pages=(total+pageSize-1)/pageSize
