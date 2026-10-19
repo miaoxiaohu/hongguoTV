@@ -171,8 +171,6 @@ class MainActivity: Activity() {
     /** 上次重绘索引进度时已收录的部数，用于把 68 次回调压成每 400 部一次。 */
     private var cataloguePaintMark=0
     private var catalogFocus=""
-    /** Set by 「刷新榜单」: fetch the list again even though today's copy is still good. */
-    @Volatile private var forceRankingRefresh=false
     /**
      * 异步加载期间用户可能用 D-pad 把焦点从 nav/typeButtons 移到 searchRow 里的搜索/历史/手机输入/
      * 续建索引这些按钮。releaseCatalogViews 之后这些 view 引用会清，加载回调拿不回当时焦点，
@@ -186,8 +184,6 @@ class MainActivity: Activity() {
     private var seasonsHolder: LinearLayout?=null
     private data class CatalogState(val page: Int,val items: List<Series>,val hasMore: Boolean,val ranking: HotRanking?)
     private var ranking: HotRanking?=null
-    private var rankRefresh: View?=null
-    private var rankSubtitle: TextView?=null
     private val tabState=mutableMapOf<Int,CatalogState>()
     private val tabFocus=mutableMapOf<Int,String>()
     private val nav=mutableListOf<View>()
@@ -350,7 +346,7 @@ class MainActivity: Activity() {
         catalogBody=null
         homeScreen=null; selectionPreview=null; catalogScroll=null
         nav.clear(); typeButtons.clear(); searchInput=null; searchButton=null; searchActions.clear()
-        historyManage=null; rankRefresh=null; rankSubtitle=null; collectionBack=null; favoriteBadges.clear()
+        historyManage=null; collectionBack=null; favoriteBadges.clear()
         favoriteStatus=null; favoriteCheck=null; homeUpdates=null; resumeCards.clear()
         catalogCards.clear(); cardImages.clear()
     }
@@ -565,24 +561,9 @@ class MainActivity: Activity() {
                     .apply { isSelected=library.contentType==type; nextFocusUpId=nav[tab].id }
             }
             placeCatalogueRow(top,container,types)
-            // 「XX热播榜」那行大字去掉了：这一页已经用分类按钮说明了是哪一档，标题只是占地方。
-            // 刷新按钮和站方的更新说明并排一行，省下的是一整行。
-            val info=row().apply { setPadding(0,dp(4),0,dp(6)) }
-            val source="来源：红果${library.contentType.label}热播榜"
-            rankSubtitle=text(if(load) "正在读取最新榜单…" else ranking?.updatedText?.ifBlank { source } ?: source,13f,muted)
-                .apply { layoutParams=lp(0,dp(30)).apply { weight=1f } }
-            info.addView(rankSubtitle)
-            rankRefresh=addButton(info,"刷新榜单") {
-                // 重新取一份：手上那份还留着，取到了就换上去，用户全程都在看东西。
-                forceRankingRefresh=true
-                page=1; catalogFocus=""; showCatalog(true)
-            }.apply {
-                nextFocusUpId=typeButtons[library.contentType]?.id ?: nav[tab].id
-                // 跟导航栏里那排分类按钮一样的大小：它是个次要动作，不该占一整行。
-                textSize=12f; minHeight=dp(34); setPadding(dp(12),dp(7),dp(12),dp(7))
-            }
-            container.addView(info)
-            nav.forEach { it.nextFocusDownId=typeButtons[library.contentType]?.id ?: rankRefresh!!.id }
+            // 标题、刷新按钮、站方的更新说明，整行都去掉了：这一页已经用分类按钮说明了是哪一档，
+            // 榜单自己会更新（一天一次），用户没有任何需要按的东西。
+            nav.forEach { it.nextFocusDownId=typeButtons.getValue(library.contentType).id }
         } else if(tab>TAB_RANKING) {
             val heading=row().apply { setPadding(0,dp(14),0,dp(6)) }
             heading.addView(text(if(tab==TAB_FAVORITES) "我的收藏" else "接着上次看",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
@@ -639,7 +620,6 @@ class MainActivity: Activity() {
                     catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
                     searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy
                     val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }
-                    rankSubtitle?.text=ranking?.updatedText?.ifBlank { "来源：红果${requestType.label}热播榜" } ?: "来源：红果${requestType.label}热播榜"
                     body.removeAllViews()
                     // keptFocusAnchor 优先：用户在加载期间用 D-pad 把焦点挪到「历史/手机输入/续建索引」
                     // 上时，加载回来不能被 focusInput/focusNav 等默认值挤掉，否则焦点会跳走。
@@ -652,7 +632,7 @@ class MainActivity: Activity() {
                     homeScreen?.refresh?.setOnClickListener { showCatalog(true) }
                     return@work
                 }
-                catalog=emptyList(); hasMore=false; ranking=null; searchMatched=null; rankSubtitle?.text="榜单加载失败"
+                catalog=emptyList(); hasMore=false; ranking=null; searchMatched=null
                 if(problem is SearchSessionExpiredException) {
                     page=1; catalogFocus=""
                     Toast.makeText(this,"搜索结果已过期，已回到第 1 页刷新",Toast.LENGTH_LONG).show()
@@ -675,10 +655,8 @@ class MainActivity: Activity() {
      */
     private fun rankingList(type: ContentType): HotRank.HotList {
         val cached=library.cachedRanking()
-        if(cached!=null && !cached.isStale(System.currentTimeMillis()) && !forceRankingRefresh) return cached
-        val list=repository.rankingList(type,forceRankingRefresh)
-        forceRankingRefresh=false
-        return list
+        if(cached!=null && !cached.isStale(System.currentTimeMillis())) return cached
+        return repository.rankingList(type)
     }
 
     /**
@@ -690,7 +668,6 @@ class MainActivity: Activity() {
     private fun showRankingPage(list: HotRank.HotList, body: LinearLayout, focusNav: Boolean, focusType: Boolean) {
         val shown=HotRank.page(list,page,rankingPageSize)
         catalog=shown.items; hasMore=shown.hasMore; ranking=shown.ranking
-        rankSubtitle?.text=list.updatedText.ifBlank { "来源：红果${library.contentType.label}热播榜" }
         val anchor=when {
             nav.any { it.hasFocus() } -> "nav"
             typeButtons.values.any { it.hasFocus() } -> "type"
@@ -858,15 +835,14 @@ class MainActivity: Activity() {
             rowCards.forEachIndexed { columnIndex,card ->
                 card.nextFocusLeftId=if(columnIndex==0) card.id else rowCards[columnIndex-1].id
                 card.nextFocusRightId=if(columnIndex==rowCards.lastIndex) card.id else rowCards[columnIndex+1].id
-                // 第一排海报的上方，在榜单页就是「刷新榜单」那一行：它就贴在海报上面，
+                // 第一排海报的上方，贴着它的是这一页的分类按钮所在的那一行：
                 // 上下键该是对称的，不该从海报一下跳到导航栏去。
-                card.nextFocusUpId=if(above==null) (rankRefresh?.id ?: searchInput?.id ?: collectionBack?.id ?: typeButtons[library.contentType]?.id ?: favoriteCheck?.id ?: historyManage?.id ?: resumeCards.getOrNull(minOf(columnIndex,2))?.id ?: nav[tab].id) else above[columnIndex.coerceAtMost(above.lastIndex)].id
+                card.nextFocusUpId=if(above==null) (searchInput?.id ?: collectionBack?.id ?: typeButtons[library.contentType]?.id ?: favoriteCheck?.id ?: historyManage?.id ?: resumeCards.getOrNull(minOf(columnIndex,2))?.id ?: nav[tab].id) else above[columnIndex.coerceAtMost(above.lastIndex)].id
                 // 最后一排往下落到翻页那一行：上一页（第一页时不可选）→ 页码 → 下一页。
                 card.nextFocusDownId=if(below==null) (prev?.takeIf { it.isFocusable }?.id ?: pageJump?.id ?: next?.takeIf { it.isFocusable }?.id ?: card.id) else below[columnIndex.coerceAtMost(below.lastIndex)].id
             }
         }
-        nav.forEach { it.nextFocusDownId=typeButtons[library.contentType]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
-        rankRefresh?.nextFocusDownId=cards.first().id
+        nav.forEach { it.nextFocusDownId=typeButtons[library.contentType]?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
         historyManage?.nextFocusDownId=cards.first().id
         favoriteCheck?.nextFocusDownId=cards.first().id
         collectionBack?.nextFocusDownId=cards.first().id
@@ -874,9 +850,8 @@ class MainActivity: Activity() {
         val firstRow=cards.take(maxColumns)
         if(resumeCards.isNotEmpty()) firstRow.forEachIndexed { index,v -> v.nextFocusUpId=resumeCards[minOf(index,resumeCards.lastIndex)].id }
         else homeUpdates?.let { updates -> updates.nextFocusUpId=typeButtons[library.contentType]?.id ?: nav[TAB_HOME].id; updates.nextFocusDownId=cards.first().id; firstRow.forEach { it.nextFocusUpId=updates.id } }
-        // 分类按钮往下要经过榜单页的「刷新榜单」才轮到海报：把它漏掉，那个按钮就选不中
-        // （导航往下先落在分类按钮，分类按钮又直接接到第一张海报，中间的按钮被跳过去了）。
-        typeButtons.values.forEach { it.nextFocusDownId=searchInput?.id ?: collectionBack?.id ?: resumeCards.firstOrNull()?.id ?: homeUpdates?.id ?: rankRefresh?.id ?: cards.first().id }
+        // 分类按钮往下直接轮到海报。
+        typeButtons.values.forEach { it.nextFocusDownId=searchInput?.id ?: collectionBack?.id ?: resumeCards.firstOrNull()?.id ?: homeUpdates?.id ?: cards.first().id }
         // 上一行把导航往下接到了分类按钮，这一行再把最后一排接回海报。
         // 少了它 Android 会按几何位置乱找，遥控器从分类按钮直接落到导航栏，网格就选不中。
         // 搜索页没有分类按钮，searchInput 自己往下走一跳。
@@ -1213,7 +1188,9 @@ class MainActivity: Activity() {
         val hero=row(); hero.gravity=Gravity.TOP; hero.setPadding(0,dp(12),0,dp(12))
         val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER }; hero.addView(image,lp(dp(123),dp(174)).apply { rightMargin=dp(24) }); loadCover(image,data.series.cover)
         val info=column(); hero.addView(info,lp(0,-2).apply { weight=1f })
-        info.addView(text(data.series.title,26f).apply { setTypeface(null,Typeface.BOLD); maxLines=2; ellipsize=TextUtils.TruncateAt.END })
+        // 顶部那行大剧名去掉了：它占的是整块屏幕，海报上本来就写着剧名，屏幕该留给简介和按钮。
+        // 名字挪到下面那行小字里 —— 全删掉的话，这一页就认不出是哪部剧了。
+        info.addView(text(data.series.title,13f,muted).apply { maxLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(0,dp(2),0,dp(2)) })
         info.addView(text("${data.episodes.size} 集  ·  ${data.series.tags}",13f,muted).apply { maxLines=1; setPadding(0,dp(8),0,dp(8)) })
         val description=data.series.description.ifBlank { "选择剧集开始观看" }
         val synopsis=text(description,15f,muted).apply { maxLines=if(synopsisExpanded) 20 else 2; ellipsize=TextUtils.TruncateAt.END }
