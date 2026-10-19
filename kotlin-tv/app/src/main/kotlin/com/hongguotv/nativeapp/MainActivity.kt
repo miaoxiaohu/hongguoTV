@@ -636,7 +636,13 @@ class MainActivity: Activity() {
         val scroll=ScrollView(this).apply { isFillViewport=false; isVerticalScrollBarEnabled=false; clipToPadding=false }; catalogScroll=scroll
         val list=column(); scroll.addView(list); body.addView(scroll,lp(-1,0).apply { weight=1f })
         var restoringScroll=true
-        val displayed=if(localCatalog()) catalog.drop((page-1)*pageSize).take(pageSize) else if(tab==TAB_HOME) catalog.filterNot { it.id in library.hidden() } else catalog.take(30)
+        // 榜单的一页有多少行就画多少行：真人剧档 20 行，漫剧档是两张榜合成后的 40 行。
+        // 那个 take(30) 是搜索页的一页（30 条搜索结果），套到榜单上会把第 31 到 40 行永远
+        // 藏起来 —— 名次是连续的，看得见的和看不见的之间会凭空少掉一截。
+        val displayed=if(localCatalog()) catalog.drop((page-1)*pageSize).take(pageSize)
+            else if(tab==TAB_HOME) catalog.filterNot { it.id in library.hidden() }
+            else if(tab==TAB_RANKING) catalog
+            else catalog.take(30)
         if(displayed.isEmpty()) {
             message(list,if(loading) "正在加载推荐…" else when(tab) { TAB_SEARCH -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关剧，换个关键词试试"; TAB_FAVORITES -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; TAB_HISTORY -> "播放过的剧集会自动保存在这里"; else -> "本页没有更多内容" })
             // 没结果可跳时，searchInput / searchButton / searchActions 的 ↓ 不能再指 cards.first()，
