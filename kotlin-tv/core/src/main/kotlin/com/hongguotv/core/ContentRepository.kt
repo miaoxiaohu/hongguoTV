@@ -146,42 +146,35 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     private fun valid(rows: List<Series>) = rows.filter { it.id.matches(Regex("[0-9]{1,30}")) && it.title.isNotBlank() }.distinctBy { it.id }
     /**
-     * The hot list of one shelf, one app page at a time.
+     * The hot list of one shelf.
      *
      * The board serves twenty rows a page and has no page-size parameter to change that - measured
      * 2026-10-19, ten spellings (pageSize, page_size, size, limit, rows, count, per_page, num and
      * combinations), all twenty. Twenty is not a multiple of the app's six columns, so a page
      * drawn straight from the board always ends with a short row - the thing the rest of the app
-     * avoids by making its own pages a multiple of the row width.
+     * avoids by making its own pages a multiple of the row width. The app therefore cuts its pages
+     * out of this list with [HotRank.page].
      *
-     * So the app's page is the unit instead: [HotRank.PAGE_SIZE] cards, cut out of the shelf's
-     * list. The list itself is every board of the shelf's routes, merged into one heat order,
-     * because the heat is a per-show number that reads the same on every board. Merging the
-     * whole list is also what makes the ranks mean anything: the comic board's number 21 is
-     * hotter than the AI board's number 30, so without one order the 「第 41 名」 on the second
-     * screen can be hotter than the 「第 40 名」 on the first - measured 2026-10-19, 5437万 on
-     * the first screen's last card against 5500万 on the second screen's first.
+     * The list itself is every board of the shelf's routes, merged into one heat order, because
+     * the heat is a per-show number that reads the same on every board. Merging the whole list is
+     * also what makes the ranks mean anything: the comic board's number 21 is hotter than the AI
+     * board's number 30, so without one order the 「第 41 名」 on the second screen can be hotter
+     * than the 「第 40 名」 on the first - measured 2026-10-19, 5437万 on the first screen's last
+     * card against 5500万 on the second screen's first.
      *
-     * The whole shelf is fetched on the first request, which is the only way to get one order out
-     * of it: five requests for 真人剧, ten for 漫剧 (two boards). They are held for the session, so
-     * turning the page costs nothing more, and [clearRankingCache] throws them away when the user
-     * asks for the list to be fetched again.
+     * Fetching the whole shelf is the only way to get one order out of it: five requests for 真人剧,
+     * ten for 漫剧 (two boards), two seconds measured. The list is held for the session, so turning
+     * the page costs nothing more.
      *
      * A board that fails does not take the whole tab down: the rest still lists, and the shelf's
      * hot list is shorter rather than missing. Only every board failing is a failure.
+     *
+     * @param force fetch even when a list fetched recently is already held.
      */
-    fun ranking(page: Int = 1, type: ContentType = ContentType.SHORT, pageSize: Int = HotRank.DEFAULT_PAGE_SIZE): CatalogPage {
-        require(page in 1..100)
-        require(pageSize>0)
-        val list=rankingList(type)
-        val items=list.items.drop((page-1)*pageSize).take(pageSize)
-        val totalPages=maxOf(1,(list.items.size+pageSize-1)/pageSize)
-        return CatalogPage(items,items.isNotEmpty() && page<totalPages,HotRanking(list.positions,totalPages,list.updatedText))
-    }
-    /** Throws the fetched boards away, so the next request goes to the site again. */
-    fun clearRankingCache() { rankingCache.clear() }
-    private fun rankingList(type: ContentType): HotRank.HotList {
-        rankingCache[type]?.let { return it }
+    @Synchronized
+    fun rankingList(type: ContentType = ContentType.SHORT, force: Boolean = false): HotRank.HotList {
+        val now=System.currentTimeMillis()
+        rankingCache[type]?.let { if(!force && !it.isStale(now)) return it }
         var failure: Exception?=null
         val boards=mutableListOf<HotRank.Board>()
         for(route in type.routes) {
@@ -200,6 +193,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         rankingCache[type]=list
         return list
     }
+    /** Throws the fetched boards away, so the next request goes to the site again. */
+    fun clearRankingCache() { rankingCache.clear() }
     /**
      * One route's page, exactly as the site serves it.
      *

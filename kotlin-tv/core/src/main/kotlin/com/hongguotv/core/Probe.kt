@@ -210,12 +210,12 @@ private fun run(args: Array<String>, report: ProbeReport) {
             // 两档都量：真人剧档一个榜，漫剧档两个榜合成一张。名次必须连续且递增 ——
             // 合成后的名次是这一档自己的热度序，不是两个榜各自的第几名。
             for(type in ContentType.entries) {
-                val first=repository.ranking(1,type)
-                val metadata=checkNotNull(first.ranking)
-                check(first.items.isNotEmpty())
+                val list=repository.rankingList(type)
+                val metadata=checkNotNull(HotRank.page(list,1,18).ranking)
+                check(list.items.isNotEmpty())
                 val seen=mutableSetOf<String>()
                 for(pageNumber in listOf(1,2,metadata.totalPages).distinct().filter { it<=metadata.totalPages }) {
-                    val result=if(pageNumber==1) first else repository.ranking(pageNumber,type)
+                    val result=HotRank.page(list,pageNumber,18)
                     val ranking=checkNotNull(result.ranking)
                     check(result.items.isNotEmpty() && result.items.none { it.id in seen })
                     seen.addAll(result.items.map { it.id })

@@ -190,6 +190,8 @@ class ContentRepositoryTest {
             .apply { if(rank!=null) put("rank",rank); if(heat.isNotEmpty()) put("heatText",heat) }))
         .put("pagination",JSONObject().put("pageNum",page).put("totalPages",totalPages))
 
+    private fun show(id: String, title: String) = Series(id, title, "https://example.com/$id.jpg", "", "", "")
+
     private fun script(name: String, args: JSONArray) =
         "<script data-fn-name=\"$name\" data-fn-args=\"${args.toString().replace("&","&amp;").replace("\"","&quot;")}\"></script>"
 
@@ -271,7 +273,7 @@ class ContentRepositoryTest {
             val page=request.url.queryParameter("page")?.toInt() ?: 1
             boardPage(Route.REAL_DRAMA,boardRows(page,20,9000-(page-1)*20,1+(page-1)*20))
         }
-        val page=repo.ranking(1,ContentType.SHORT)
+        val page=HotRank.page(repo.rankingList(ContentType.SHORT),1,18)
         assertEquals("第 1 部",page.items.first().title)
         assertEquals("https://example.com/1.jpg",page.items.first().cover)
         assertEquals("全 10 集",page.items.first().badge)
@@ -295,7 +297,7 @@ class ContentRepositoryTest {
             requested += "${request.url.encodedPath}?$page"
             boardPage(Route.REAL_DRAMA,boardRows(page,20,9000-(page-1)*20,page*100))
         }
-        val page=repo.ranking(1,ContentType.SHORT)
+        val page=HotRank.page(repo.rankingList(ContentType.SHORT),1,18)
         // 整份榜单是取回来才排得出一个顺序的，所以它的每一页都要取。
         assertEquals(listOf("/rank/hot-real-drama?1","/rank/hot-real-drama?2","/rank/hot-real-drama?3","/rank/hot-real-drama?4","/rank/hot-real-drama?5"),requested)
         assertEquals(18,page.items.size)
@@ -314,7 +316,7 @@ class ContentRepositoryTest {
                 else -> throw AssertionError("unexpected path "+request.url.encodedPath)
             }
         }
-        val page=repo.ranking(1,ContentType.COMIC)
+        val page=HotRank.page(repo.rankingList(ContentType.COMIC),1,18)
         // 一页 18 张，正好三行六列 —— 网格永远不缺最后一行。
         assertEquals(18,page.items.size)
         assertEquals(0,page.items.size%6)
@@ -325,10 +327,10 @@ class ContentRepositoryTest {
         assertEquals(1,page.ranking!!.positions[page.items.first().id]!!.rank)
         assertEquals(18,page.ranking!!.positions[page.items.last().id]!!.rank)
         // 第二页接着 19，不重置 —— 名次是一个顺序，不是一页一页的。
-        val second=repo.ranking(2,ContentType.COMIC)
+        val list=repo.rankingList(ContentType.COMIC); val second=HotRank.page(list,2,18)
         assertEquals(19,second.ranking!!.positions[second.items.first().id]!!.rank)
         // 合成的是整份榜单：AI 榜最热的那部排在漫剧榜 100 部之后，而不是排在前面。
-        val all=repo.ranking(1,ContentType.COMIC,200)
+        val all=HotRank.page(list,1,200)
         assertEquals(200,all.items.size)
         assertEquals(101,all.ranking!!.positions["1001"]!!.rank)
     }
@@ -353,14 +355,47 @@ class ContentRepositoryTest {
                 else -> throw AssertionError("unexpected path "+request.url.encodedPath)
             }
         }
-        val page=repo.ranking(1,ContentType.COMIC)
+        val page=HotRank.page(repo.rankingList(ContentType.COMIC),1,18)
         assertEquals(18,page.items.size)
         assertEquals("第 1 部",page.items.first().title)
     }
 
     @Test fun aShelfWithNoWorkingBoardAtAllFails() {
         val repo=repository { throw IOException("boom") }
-        assertThrows(IOException::class.java) { repo.ranking(1,ContentType.COMIC) }
+        assertThrows(IOException::class.java) { repo.rankingList(ContentType.COMIC) }
+    }
+
+    @Test fun theRankingSurvivesBeingWrittenDownAndReadBack() {
+        // 榜单落盘是为了「下次打开就有东西看」：用户不必等网络，也不必按刷新。
+        val list=HotRank.combine(listOf(
+            HotRank.Board(Route.COMIC_DRAMA,listOf(show("1","漫剧甲")),mapOf("1" to RankPosition(1,"8370万热度")),5,"10月20日已更新"),
+            HotRank.Board(Route.AI_DRAMA,listOf(show("2","AI剧甲")),mapOf("2" to RankPosition(2,"7406万热度")),5,"10月20日已更新")))
+        val decoded=HotRank.decode(HotRank.encode(list))
+        assertNotNull(decoded)
+        assertEquals(listOf("漫剧甲","AI剧甲"),decoded!!.items.map { it.title })
+        assertEquals(RankPosition(1,"8370万热度"),decoded.positions["1"])
+        assertEquals(RankPosition(2,"7406万热度"),decoded.positions["2"])
+        assertEquals("10月20日已更新",decoded.updatedText)
+    }
+
+    @Test fun aRankingIsGoodForADayAndThenWorthFetchingAgain() {
+        // 站方的榜一天只更新一次，所以一天取一次就够了 —— 一天取四次只是白花站的调用频率。
+        val now=1_000_000L
+        val list=HotRank.HotList(listOf(show("1","甲")),emptyMap(),"10月20日已更新",now)
+        assertFalse(list.isStale(now+23*60*60*1000L))
+        assertTrue(list.isStale(now+25*60*60*1000L))
+    }
+
+    @Test fun aRankingPageIsCutOutOfTheWholeList() {
+        val items=(1..100).map { show(it.toString(),"第 $it 部") }
+        val list=HotRank.HotList(items,items.mapIndexed { index,series -> series.id to RankPosition(index+1,"") }.toMap(),"",0L)
+        val page=HotRank.page(list,1,36)
+        assertEquals(36,page.items.size)
+        assertEquals("第 1 部",page.items.first().title)
+        assertEquals(3,page.ranking!!.totalPages)
+        val last=HotRank.page(list,3,36)
+        assertEquals(28,last.items.size)
+        assertFalse(last.hasMore)
     }
 
     private fun searchPage(vararg rows: String) =

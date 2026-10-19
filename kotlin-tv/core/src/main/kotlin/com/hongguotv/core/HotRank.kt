@@ -27,7 +27,7 @@ import java.io.IOException
  *
  * Read the website's serialized data only; never execute its scripts.
  */
-internal object HotRank {
+object HotRank {
     /** One board, as the site serves it. */
     class Board(
         val route: Route,
@@ -133,8 +133,25 @@ internal object HotRank {
      */
     const val DEFAULT_PAGE_SIZE = 18
 
+    /**
+     * How long a fetched ranking is served before it is fetched again.
+     *
+     * The site's boards are updated once a day - the page says 「10月20日已更新」 - so fetching
+     * them more often only spends the site's rate for the same list. A day is also what the user
+     * expects: a hot list that changes under their feet every few hours is not a hot list.
+     */
+    const val FRESH_MS = 24 * 60 * 60 * 1000L
+
     /** A shelf's hot list: every show it holds, in one order, with the place each one holds. */
-    class HotList(val items: List<Series>, val positions: Map<String, RankPosition>, val updatedText: String)
+    class HotList(
+        val items: List<Series>,
+        val positions: Map<String, RankPosition>,
+        val updatedText: String,
+        val fetchedAt: Long
+    ) {
+        /** True when this list is old enough to be worth fetching again. */
+        fun isStale(now: Long) = now - fetchedAt > FRESH_MS
+    }
 
     /**
      * Puts the boards of a shelf into one list, in one heat order.
@@ -161,8 +178,55 @@ internal object HotRank {
         val positions = LinkedHashMap<String, RankPosition>()
         ordered.forEachIndexed { index, (position, series) -> positions[series.id] = RankPosition(index + 1, position?.heat.orEmpty()) }
         val updated = boards.firstOrNull { it.updatedText.isNotBlank() }?.updatedText.orEmpty()
-        return HotList(ordered.map { it.second }, positions, updated)
+        return HotList(ordered.map { it.second }, positions, updated, System.currentTimeMillis())
     }
+
+    /**
+     * One page of the list.
+     *
+     * The app's grid is six columns wide, and a page whose size is not a multiple of six ends
+     * with a short row - the one thing the rest of the app is careful never to do. The app passes
+     * its own size in, because the row width is the app's business and the two must not drift
+     * apart.
+     */
+    fun page(list: HotList, page: Int, pageSize: Int): CatalogPage {
+        require(page>=1 && pageSize>0)
+        val items=list.items.drop((page-1)*pageSize).take(pageSize)
+        val totalPages=maxOf(1,(list.items.size+pageSize-1)/pageSize)
+        return CatalogPage(items,items.isNotEmpty() && page<totalPages,HotRanking(list.positions,totalPages,list.updatedText))
+    }
+
+    /**
+     * The list as it is written down, so the next launch has something to show before the
+     * network answers.
+     *
+     * The description of each show is left out, the way the catalogue index leaves it out: the
+     * detail page fetches it when the show is opened, and keeping two hundred of them would
+     * make the file about twice the size for text nobody reads here.
+     */
+    fun encode(list: HotList): String = JSONObject()
+        .put("fetchedAt",list.fetchedAt)
+        .put("updatedText",list.updatedText)
+        .put("items",JSONArray(list.items.map { series ->
+            val position=list.positions[series.id]
+            JSONObject().put("i",series.id).put("t",series.title).put("c",series.cover)
+                .put("b",series.badge).put("g",series.tags)
+                .put("r",position?.rank ?: JSONObject.NULL).put("h",position?.heat.orEmpty())
+        })).toString()
+
+    /** Reads back what [encode] wrote; null for anything unreadable - a broken list is not worth failing over. */
+    fun decode(value: String): HotList? = runCatching {
+        val o=JSONObject(value)
+        val items=ArrayList<Series>()
+        val positions=LinkedHashMap<String,RankPosition>()
+        o.getJSONArray("items").objects().forEach { row ->
+            val id=row.getString("i")
+            items+=Series(id,row.getString("t"),row.optString("c",""),"",row.optString("b",""),row.optString("g",""))
+            positions[id]=RankPosition(if(row.isNull("r")) null else row.optInt("r"),row.optString("h",""))
+        }
+        require(items.isNotEmpty())
+        HotList(items,positions,o.optString("updatedText",""),o.getLong("fetchedAt"))
+    }.getOrNull()
 
     /**
      * "8370万热度" -> 837000000.

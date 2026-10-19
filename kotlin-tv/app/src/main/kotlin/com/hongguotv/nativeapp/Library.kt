@@ -25,7 +25,8 @@ class Library(context: Context) {
         val index: LibraryIndex,
         val homes: Map<ContentType, CatalogPage>,
         val stamps: Map<ContentType, Long>,
-        val catalogue: CatalogueSnapshot?
+        val catalogue: CatalogueSnapshot?,
+        val ranking: HotRank.HotList?
     )
     private val app = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
@@ -33,17 +34,22 @@ class Library(context: Context) {
     private val prefs by lazy { app.getSharedPreferences("native-library-v1", Context.MODE_PRIVATE) }
     private val homePrefs by lazy { app.getSharedPreferences("native-home-cache-v1", Context.MODE_PRIVATE) }
     private val cataloguePrefs by lazy { app.getSharedPreferences("native-catalogue-index-v1", Context.MODE_PRIVATE) }
+    private val rankingPrefs by lazy { app.getSharedPreferences("native-ranking-cache-v1", Context.MODE_PRIVATE) }
     private val writes = LatestWriteQueue<String, () -> Any?>("hongguotv-library-write", write = { batch -> commit(prefs, batch) },
         failed = { Log.w("HongguoTV", "Local library commit failed; pending changes retained for retry") })
     private val homeWrites = LatestWriteQueue<String, () -> Any?>("hongguotv-home-write", write = { batch -> commit(homePrefs, batch) },
         failed = { Log.w("HongguoTV", "Home cache commit failed") })
     private val catalogueWrites = LatestWriteQueue<String, () -> Any?>("hongguotv-catalogue-write", write = { batch -> commit(cataloguePrefs, batch) },
         failed = { Log.w("HongguoTV", "Catalogue index commit failed; the index is rebuilt next launch") })
+    private val rankingWrites = LatestWriteQueue<String, () -> Any?>("hongguotv-ranking-write", write = { batch -> commit(rankingPrefs, batch) },
+        failed = { Log.w("HongguoTV", "Ranking cache commit failed; the list is fetched again next launch") })
     private val catalogueLoader = Executors.newSingleThreadExecutor { task -> Thread(task, "hongguotv-catalogue-build") }
     private var index: LibraryIndex? = null
     private val homes = mutableMapOf<ContentType, CatalogPage>()
     private val homeSavedAt = mutableMapOf<ContentType, Long>()
     private var catalogue: CatalogueSnapshot? = null
+    /** The hot list as it was last fetched, kept on disk so the next launch has something to show. */
+    private var rankingCache: HotRank.HotList? = null
     private var catalogueBuilding = false
     private var loading = false
     private var closed = false
@@ -90,7 +96,9 @@ class Library(context: Context) {
                 // missing one costs search breadth, not favorites, so it is read separately and
                 // simply leaves null behind.
                 val builtCatalogue = cataloguePrefs.getString("index", null)?.let { CatalogueIndexDisk.decode(it, now) }
-                Loaded(loaded, cached, stamps, builtCatalogue)
+                // 榜单也是上一份就能先看的东西：它不是用户的记录，坏了也只影响「热播榜」这一页。
+                val builtRanking = rankingPrefs.getString("ranking", null)?.let { HotRank.decode(it) }
+                Loaded(loaded, cached, stamps, builtCatalogue, builtRanking)
             }
             main.post {
                 loading = false
@@ -99,7 +107,7 @@ class Library(context: Context) {
                 val errors = errorCallbacks.toList(); errorCallbacks.clear()
                 result.onSuccess { loaded ->
                     index = loaded.index; homes.putAll(loaded.homes); homeSavedAt.putAll(loaded.stamps)
-                    catalogue = loaded.catalogue
+                    catalogue = loaded.catalogue; rankingCache = loaded.ranking
                     ready.forEach { it() }
                 }.onFailure { failure -> errors.forEach { it(failure) } }
             }
@@ -127,6 +135,19 @@ class Library(context: Context) {
     fun isCatalogueComplete() = catalogue?.complete == true
     /** Whether every indexed show records the catalogue it came from; until then 分开搜 cannot split. */
     fun isCatalogueLabelled() = catalogue?.labelled == true
+    /**
+     * The hot list as it was last fetched, or null when there is none yet.
+     *
+     * It is kept on disk so the ranking page has something to show before the network answers -
+     * the page then updates itself in the background instead of making the user wait and press
+     * anything.
+     */
+    fun cachedRanking() = rankingCache
+    /** Keeps a freshly fetched hot list, in memory and on disk. */
+    fun saveRanking(list: HotRank.HotList) {
+        rankingCache = list
+        rankingWrites.submit(mapOf("ranking" to { HotRank.encode(list) }))
+    }
     /**
      * True when the index is old enough that a rebuild is due.
      *

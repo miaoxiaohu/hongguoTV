@@ -171,6 +171,8 @@ class MainActivity: Activity() {
     /** 上次重绘索引进度时已收录的部数，用于把 68 次回调压成每 400 部一次。 */
     private var cataloguePaintMark=0
     private var catalogFocus=""
+    /** Set by 「刷新榜单」: fetch the list again even though today's copy is still good. */
+    @Volatile private var forceRankingRefresh=false
     /**
      * 异步加载期间用户可能用 D-pad 把焦点从 nav/typeButtons 移到 searchRow 里的搜索/历史/手机输入/
      * 续建索引这些按钮。releaseCatalogViews 之后这些 view 引用会清，加载回调拿不回当时焦点，
@@ -269,6 +271,8 @@ class MainActivity: Activity() {
         }) {
             if(!isDestroyed && foreground) { showCatalog(load=true); favoriteMonitor.check() }
             startCatalogueBuild()
+            // 今天的热播榜先在后台取回来，等用户翻到那一页时不用等。
+            refreshRankingInBackground()
         }
     }
     /**
@@ -569,8 +573,8 @@ class MainActivity: Activity() {
                 .apply { layoutParams=lp(0,dp(30)).apply { weight=1f } }
             info.addView(rankSubtitle)
             rankRefresh=addButton(info,"刷新榜单") {
-                // 整份榜单是取回来才排得出一个顺序的，所以它在内存里留着；刷新就是把它丢掉重取。
-                repository.clearRankingCache()
+                // 重新取一份：手上那份还留着，取到了就换上去，用户全程都在看东西。
+                forceRankingRefresh=true
                 page=1; catalogFocus=""; showCatalog(true)
             }.apply {
                 nextFocusUpId=typeButtons[library.contentType]?.id ?: nav[tab].id
@@ -604,12 +608,29 @@ class MainActivity: Activity() {
         }
         if(load) {
             if(tab==TAB_HOME) catalogGrid(body,focusNav,focusType,loading=true)
-            else { message(body,"正在加载…"); if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
-            val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType
-            work({
-                val result=when(requestTab) { TAB_HOME -> repository.home(requestPage,requestType); TAB_RANKING -> repository.ranking(requestPage,requestType,rankingPageSize); else -> repository.search(requestQuery,requestPage,requestType,library.catalogue()) }
-                result
-            }, { result ->
+            else if(tab==TAB_RANKING) {
+                // 榜单永远先显示手上有的那份 —— 上次取到的，或者刚在后台取到的。新的在后台取，
+                // 到货再换上去：用户不用等，也不用按什么。站方的榜一天只更新一次，所以一天取一次
+                // 就够了（HotRank.FRESH_MS）。
+                val cached=library.cachedRanking()
+                if(cached!=null && cached.items.isNotEmpty()) showRankingPage(cached,body,focusNav,focusType)
+                else { message(body,"正在读取最新榜单…"); if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
+                val requestType=library.contentType
+                work({ rankingList(requestType) }, { list ->
+                    library.saveRanking(list)
+                    showRankingPage(list,body,focusNav,focusType)
+                }, { problem ->
+                    // 取不到就继续显示手上那份，不把用户正在看的东西清空。
+                    if(catalog.isEmpty()) { body.removeAllViews(); error(body,problem) { showCatalog(true) } }
+                })
+            }
+            else {
+                message(body,"正在加载…"); if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus()
+                val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType
+                work({
+                    val result=when(requestTab) { TAB_HOME -> repository.home(requestPage,requestType); else -> repository.search(requestQuery,requestPage,requestType,library.catalogue()) }
+                    result
+                }, { result ->
                 if(requestTab==TAB_HOME && requestPage==1) library.cacheHome(requestType,result.items,result.hasMore)
                 if(requestTab==TAB_HOME && requestPage==1 && (homeFromCache || tvTools.showing || updater.showing)) {
                     homeScreen?.refresh?.text="热门已更新 · 按确认查看"
@@ -642,10 +663,59 @@ class MainActivity: Activity() {
                     if(resumeCards.isNotEmpty()) resumeCards.first().requestFocus()
                 }
             })
+            }
         } else catalogGrid(body,focusNav,focusType,focusInput=focusInput)
     }
-    private fun catalogGrid(body: LinearLayout,focusNav: Boolean,focusType: Boolean=false,loading: Boolean=false,focusInput: Boolean=false,focusAnchor: String?=null) {
-        if(tab==TAB_HOME && page==1 && collection==null) { renderHome(body,focusNav,focusType,loading); return }
+    /**
+     * The hot list the app should be showing, fetched only when there is none worth showing.
+     *
+     * The site's board changes once a day, so a list fetched today is good for today. That is what
+     * makes the refresh invisible: the page always has something to show, and the day's list is
+     * already there when the user asks for it.
+     */
+    private fun rankingList(type: ContentType): HotRank.HotList {
+        val cached=library.cachedRanking()
+        if(cached!=null && !cached.isStale(System.currentTimeMillis()) && !forceRankingRefresh) return cached
+        val list=repository.rankingList(type,forceRankingRefresh)
+        forceRankingRefresh=false
+        return list
+    }
+
+    /**
+     * Draws the ranking page from a hot list - one fetched now, or one from an earlier launch.
+     *
+     * The focus is not taken from the user: a list that refreshes by itself must not move the
+     * card they were looking at out from under the remote.
+     */
+    private fun showRankingPage(list: HotRank.HotList, body: LinearLayout, focusNav: Boolean, focusType: Boolean) {
+        val shown=HotRank.page(list,page,rankingPageSize)
+        catalog=shown.items; hasMore=shown.hasMore; ranking=shown.ranking
+        rankSubtitle?.text=list.updatedText.ifBlank { "来源：红果${library.contentType.label}热播榜" }
+        val anchor=when {
+            nav.any { it.hasFocus() } -> "nav"
+            typeButtons.values.any { it.hasFocus() } -> "type"
+            else -> null
+        }
+        body.removeAllViews()
+        catalogGrid(body,focusNav,focusType,focusAnchor=anchor)
+    }
+
+    /**
+     * Fetches the day's hot list in the background, so the ranking page has it before it is asked
+     * for.
+     *
+     * It runs on the shared pool rather than through [work]: work() cancels whatever was running,
+     * and this must not cancel the page the user is on.
+     */
+    private fun refreshRankingInBackground() {
+        val cached=library.cachedRanking()
+        if(cached!=null && !cached.isStale(System.currentTimeMillis())) return
+        io.submit {
+            runCatching { repository.rankingList(library.contentType) }
+                .onSuccess { list -> main.post { if(!isDestroyed) library.saveRanking(list) } }
+        }
+    }
+    private fun catalogGrid(body: LinearLayout,focusNav: Boolean,focusType: Boolean=false,loading: Boolean=false,focusInput: Boolean=false,focusAnchor: String?=null) {        if(tab==TAB_HOME && page==1 && collection==null) { renderHome(body,focusNav,focusType,loading); return }
         resumeCards.clear(); catalogCards.clear(); cardImages.clear(); collectionBack=null
         if(collection!=null) {
             val heading=row()
