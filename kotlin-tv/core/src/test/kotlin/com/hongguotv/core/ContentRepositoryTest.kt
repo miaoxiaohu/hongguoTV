@@ -325,6 +325,36 @@ class ContentRepositoryTest {
     }
 
     /**
+     * A show the site lists in its search results but that no browsable catalogue carries can only
+     * be reached through the search page: the walk covers the catalogues, and this show is in none
+     * of them. Measured 2026-10-19 — 《回到心跳开始时》 is the site's first search row and appears in
+     * none of the 2400 catalogue shows — so a filter that drops every row the index cannot
+     * classify deletes exactly the shows that have no other way in.
+     */
+    @Test fun aServerRowTheIndexCannotClassifyIsKept() {
+        val local=CatalogueIndex(listOf(Series("1","雾锁情迷")),listOf(ContentType.SHORT))
+        val repo=repository { searchPage(searchRow("7697172143917779992","回到心跳开始时")) }
+        val result=repo.search("回到心跳开始时",1,ContentType.SHORT,local)
+        assertEquals(listOf("7697172143917779992"),result.items.map { it.id })
+        assertEquals(1,result.matchedCount)
+    }
+
+    /**
+     * The other half of the same rule: a row the index can classify still goes when it belongs to
+     * the catalogue the user did not pick. Splitting by catalogue is the point of the filter, and
+     * keeping the rows the index cannot judge must not turn it into no filter at all.
+     */
+    @Test fun aServerRowTheIndexKnowsIsStillSplitByCatalogue() {
+        val local=CatalogueIndex(listOf(Series("1","雾锁情迷"),Series("2","总裁归来")),listOf(ContentType.SHORT,ContentType.COMIC))
+        val repo=repository { searchPage(searchRow("2","总裁归来新番"),searchRow("999","总裁归来后传")) }
+        val result=repo.search("总裁归来",1,ContentType.SHORT,local)
+        // 「总裁归来」 is filed under 漫剧, so the row the index can place goes; the one it cannot
+        // place stays, because dropping it would make a searchable show unsearchable.
+        assertEquals(listOf("999"),result.items.map { it.id })
+        assertEquals(1,result.matchedCount)
+    }
+
+    /**
      * The site never answers a search with an empty list, so 「站内没有这部剧」 can only be
      * decided client-side. These rows are what it really returns for 「庆余年」, which is a TV
      * drama this short-drama site does not carry: ten confident same-genre rows, a totalCount of

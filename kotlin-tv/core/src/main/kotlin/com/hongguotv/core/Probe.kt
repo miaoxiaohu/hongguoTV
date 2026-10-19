@@ -107,7 +107,7 @@ fun main(args: Array<String>) {
             val firstElapsed=(System.currentTimeMillis()-started)/1000
             println("第一趟：${first.shows.size} 部，用时 ${firstElapsed}s，断点 ${first.cursor}，已完成 ${first.done.map { it.storedValue }}${if(first.gaps.isEmpty()) "" else "，未取到 ${first.gaps.joinToString("；")}"}")
 
-            val json=CatalogueIndexDisk.encode(first.shows,first.cursor,first.done,System.currentTimeMillis())
+            val json=CatalogueIndexDisk.encode(first.shows,first.types,first.cursor,first.done,System.currentTimeMillis())
             val saved=checkNotNull(CatalogueIndexDisk.decode(json,System.currentTimeMillis())) { "断点没能落盘" }
 
             val resumedAt=System.currentTimeMillis()
@@ -144,9 +144,15 @@ fun main(args: Array<String>) {
                 val (hits,fuzzy)=index.searchAllowingTypo(q)
                 println("  错字「$q」 fuzzy=$fuzzy 命中=${hits.size} top=${hits.take(3).map { it.title }}")
             }
-            val json=CatalogueIndexDisk.encode(entries,walk.cursor,walk.done,System.currentTimeMillis())
+            val json=CatalogueIndexDisk.encode(entries,walk.types,walk.cursor,walk.done,System.currentTimeMillis())
             val decoded=CatalogueIndexDisk.decode(json,System.currentTimeMillis())
             println("磁盘：${json.length} 字符（上限 1500000），解码后 ${decoded?.size} 部，断点 ${decoded?.cursor}，回搜雾锁情迷 -> ${decoded?.index?.search("雾锁情迷")?.firstOrNull()?.title}")
+            // 「随便看看」按分类翻页，两个档各自从自己的首页开始 —— 分类按钮全靠这个。
+            for(type in ContentType.entries) {
+                val total=decoded?.index?.sizeOf(type) ?: 0
+                val first=decoded?.index?.browse(0,6,type).orEmpty().map { it.title }
+                println("  ${type.label}：$total 部 -> ${(total+29)/30} 页，首屏 ${first.joinToString("、")}")
+            }
         } finally {
             repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
         }
