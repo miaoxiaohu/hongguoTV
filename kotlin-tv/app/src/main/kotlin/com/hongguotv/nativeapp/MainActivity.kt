@@ -588,8 +588,7 @@ class MainActivity: Activity() {
             catalog=localItems(); ranking=null; searchMatched=null; searchTotal=null; searchFuzzy=false; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=page*pageSize<catalog.size
         }
         if(load) {
-            if(tab==TAB_HOME) catalogGrid(body,focusNav,focusType,loading=true)
-            else if(tab==TAB_RANKING) {
+            if(tab==TAB_RANKING) {
                 // 榜单永远先显示手上有的那份 —— 上次取到的，或者刚在后台取到的。新的在后台取，
                 // 到货再换上去：用户不用等，也不用按什么。站方的榜一天只更新一次，所以一天取一次
                 // 就够了（HotRank.FRESH_MS）。
@@ -606,7 +605,10 @@ class MainActivity: Activity() {
                 })
             }
             else {
-                message(body,"正在加载…"); if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus()
+                // 首页和搜索页共用这一个请求。首页**必须**走这里 —— 它画完「正在加载推荐…」的
+                // 网格之后，就靠这次请求把内容换上去；请求不发，这一页会永远停在那句话上。
+                if(tab==TAB_HOME) catalogGrid(body,focusNav,focusType,loading=true)
+                else { message(body,"正在加载…"); if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
                 val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType
                 work({
                     val result=when(requestTab) { TAB_HOME -> repository.home(requestPage,requestType); else -> repository.search(requestQuery,requestPage,requestType,library.catalogue()) }
