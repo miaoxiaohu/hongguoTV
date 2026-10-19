@@ -246,6 +246,7 @@ private fun run(args: Array<String>, report: ProbeReport) {
                 try {
                     val detail=repository.detail(id)
                     val stream=repository.stream(detail.series.id,detail.episodes.first())
+                    say("streamUrl=${stream.url}")
                     RemoteVideo(repository.http,stream).use { remote ->
                         remote.prepare(); val head=remote.read(0,1024*1024)
                         ok++; say("play OK  $id ${detail.series.title} 集数=${detail.episodes.size} 画质=${stream.quality} 字节=${head.size}")

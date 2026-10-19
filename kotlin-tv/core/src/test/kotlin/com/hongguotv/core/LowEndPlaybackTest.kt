@@ -48,13 +48,16 @@ class LowEndPlaybackTest {
         assertEquals("data",current.run { RequestScope.execute(next) { it.body!!.string() } })
         assertFalse(next.cancelled)
     }
-    @Test fun prefetchWindowUsesRemainingWallTimeAndRejectsUnknownDuration() {
-        assertFalse(PrefetchPolicy.nearEnd(5_000,180_000,1f))
-        assertTrue(PrefetchPolicy.nearEnd(150_000,180_000,1f))
-        assertTrue(PrefetchPolicy.nearEnd(120_000,180_000,2f))
-        assertFalse(PrefetchPolicy.nearEnd(150_000,180_000,.5f))
-        assertFalse(PrefetchPolicy.nearEnd(0,0,1f))
-        assertFalse(PrefetchPolicy.nearEnd(0,180_000,Float.NaN))
+    @Test fun prefetchStartsAsSoonAsTheCurrentEpisodeSettles() {
+        // 原来是「本集还剩 30 秒」才动手。取签名地址加预热 1MB 在慢机器上跑不完，
+        // 下一集开始时往往还没准备好 —— 每次自动连播都要先等一下。现在本集一播稳就准备。
+        assertFalse("刚开始播不算稳", PrefetchPolicy.shouldPrepare(5_000,30_000))
+        assertTrue("播了十秒就该准备了", PrefetchPolicy.shouldPrepare(10_000,30_000))
+        // 但本集得先缓冲起来，否则预取抢的是画面的带宽。
+        assertFalse("本集没缓冲就不能抢带宽", PrefetchPolicy.shouldPrepare(10_000,1_000))
+        assertTrue(PrefetchPolicy.shouldPrepare(10_000,3_000))
+        // 准备好的下一集要能等过本集播完：短剧的集子一两分钟。
+        assertTrue("准备好的下一集得比一集长", PrefetchPolicy.TTL_MS > 3*60_000L)
     }
     @Test fun expiredPrefetchCanBeReplacedAfterLongPauseWithoutReturningOldResource() {
         var now=0L
