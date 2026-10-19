@@ -18,7 +18,7 @@ class Library(context: Context) {
     private companion object {
         // A replacement Activity must not load before its predecessor's final checkpoint commits.
         val retiredWrites = mutableListOf<LatestWriteQueue<String, () -> Any?>>()
-        /** Shows between disk checkpoints. Re-encoding 1600 rows costs a J1900 real time. */
+        /** Shows between disk checkpoints. Re-encoding 2400 rows costs a J1900 real time. */
         const val CHECKPOINT_EVERY = 200
     }
     private data class Loaded(
@@ -112,7 +112,7 @@ class Library(context: Context) {
      * The whole-catalogue search index, or null while there is none worth searching.
      *
      * Search on its own can only see the ten rows the site renders. This is what makes the other
-     * 1590 reachable - see [CatalogueIndex].
+     * 2390 reachable - see [CatalogueIndex].
      */
     fun catalogue() = catalogue?.index
     /** How many shows the index currently holds; 0 until a build lands its first pages. */
@@ -122,7 +122,7 @@ class Library(context: Context) {
      * True when the walk reached the end of every catalogue and skipped no page.
      *
      * This is what stops a completed index from being rebuilt on every launch: without it, each
-     * start would spend another 68 serial requests re-collecting shows it already has on disk.
+     * start would spend another 102 serial requests re-collecting shows it already has on disk.
      */
     fun isCatalogueComplete() = catalogue?.complete == true
     /** Whether every indexed show records the catalogue it came from; until then 分开搜 cannot split. */
@@ -146,13 +146,13 @@ class Library(context: Context) {
         if (catalogueBuilding || closed) return false
         catalogueBuilding = true
         val carried = catalogue
-        // 走完了却没记下每部属于哪套目录的索引，必须整趟重走一遍才能补上标签：
-        // 标签只有抓的时候才知道，而游标记着「两套都到头了」，接着走一步都不会走。
-        // 已收录的剧仍然留着 —— 丢掉 1600 部重新抓，正是这个索引当初建不成的原因。
+        // 走完了却没记下每部属于哪条货架的索引，必须整趟重走一遍才能补上标签：
+        // 标签只有抓的时候才知道，而游标记着「都到头了」，接着走一步都不会走。
+        // 已收录的剧仍然留着 —— 丢掉两千多部重新抓，正是这个索引当初建不成的原因。
         val relabel = carried != null && carried.walkedToEnd && !carried.labelled
         // Touched only on the build thread; the main thread ever sees the immutable snapshots.
         val collected = (carried?.entries ?: emptyList()).toMutableList()
-        val kinds = (carried?.types ?: emptyList()).toMutableList()
+        val kinds = (carried?.routes ?: emptyList()).toMutableList()
         // Forcing forgets the bookmark and rewalks from page one. The shows already held are kept
         // and deduped by id, so the second pass adds nothing and only repairs the pages that failed
         // the first time - which is what "retry the walk" has to mean once a pass has finished.
@@ -166,14 +166,14 @@ class Library(context: Context) {
                 isCancelled = { closed },
                 onPage = { step ->
                     collected += step.fresh
-                    repeat(step.fresh.size) { kinds += step.type }
+                    repeat(step.fresh.size) { kinds += step.route }
                     val snapshot = collected.toList()
                     val snapshotKinds = kinds.toList()
                     val total = snapshot.size
                     // WalkStep.total counts this pass only; a resumed build carries a thousand shows
                     // it never re-fetched, and the number the user reads has to include them.
                     main.post { if (!closed) { catalogue = CatalogueSnapshot(snapshot, snapshotKinds, step.cursor, step.done); onProgress(total) } }
-                    // Checkpointing on every page would re-encode the whole library 68 times on a
+                    // Checkpointing on every page would re-encode the whole library 102 times on a
                     // box that can barely parse one of them.
                     if (total - checkpointed >= CHECKPOINT_EVERY) {
                         checkpointed = total
@@ -192,7 +192,7 @@ class Library(context: Context) {
         return true
     }
     /** Hands an immutable snapshot to the write thread; encode() runs there, not here. */
-    private fun checkpoint(collected: List<Series>, kinds: List<ContentType?>, cursor: Map<ContentType, Int>, done: Set<ContentType>) {
+    private fun checkpoint(collected: List<Series>, kinds: List<Route?>, cursor: Map<Route, Int>, done: Set<Route>) {
         val snapshot = collected.toList()
         val snapshotKinds = kinds.toList()
         val now = System.currentTimeMillis()

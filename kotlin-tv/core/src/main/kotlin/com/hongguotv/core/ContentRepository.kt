@@ -139,11 +139,32 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return ComicRank.parse(text("$site/rank/hot-comic-drama?page=$page"),page)
     }
     /**
-     * Browse one of the catalogues named by [ContentType.categorySlug].
+     * One route's page, exactly as the site serves it.
+     *
+     * The walk consumes this, one route at a time, because each route has its own page count and
+     * its own bookmark. Browsing does not: a type is browsed as the whole of it, which is
+     * [home]'s job.
+     */
+    fun routePage(page: Int = 1, route: Route = Route.REAL_DRAMA): CatalogPage {
+        require(page in 1..100)
+        val data=router("$site/category/${route.categorySlug}"+if(page>1) "?page=$page" else "")
+        val section=data.optJSONObject("category_page") ?: data.optJSONObject("category_$") ?: throw IOException("首页数据结构已变化")
+        val rows=section.optJSONArray("recommendList") ?: section.optJSONObject("categoryData")?.optJSONArray("recommendList") ?: throw IOException("首页数据暂不可用")
+        val items=valid(rows.objects().map(::card))
+        val lastPage=section.optJSONObject("pagination")?.optInt("totalPages",100) ?: 100
+        return CatalogPage(items,items.isNotEmpty() && page<minOf(lastPage,100))
+    }
+    /**
+     * Browse one of the catalogues the user picks, named by [ContentType].
      *
      * The retired `?tab=1&sort_type=1` browse path only ever reached 874 shows, and `sort_type` is
      * inert there anyway — 0/1/2/3/4 all answer with byte-identical first pages, so there was no
      * "newest first" ordering to ask for. The named routes are the site's real navigation.
+     *
+     * A type can be served by more than one route: 漫剧 is `comic-drama` **and** `ai-drama`, and
+     * browsing 漫剧 shows both shelves. Each route keeps its own ordering, and they are concatenated
+     * rather than interleaved — the first shelf's own "hot" list stays the first thing on screen, and
+     * the second shelf follows it on the same page instead of 34 pages later.
      *
      * The comic hot board deliberately no longer hangs off this function: it is reached through
      * [comicRanking] alone, so browsing a category and reading a ranking stay separate views
@@ -151,12 +172,15 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      */
     fun home(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(page in 1..100)
-        val data=router("$site/category/${type.categorySlug}"+if(page>1) "?page=$page" else "")
-        val section=data.optJSONObject("category_page") ?: data.optJSONObject("category_$") ?: throw IOException("首页数据结构已变化")
-        val rows=section.optJSONArray("recommendList") ?: section.optJSONObject("categoryData")?.optJSONArray("recommendList") ?: throw IOException("首页数据暂不可用")
-        val items=valid(rows.objects().map(::card))
-        val lastPage=section.optJSONObject("pagination")?.optInt("totalPages",100) ?: 100
-        return CatalogPage(items,items.isNotEmpty() && page<minOf(lastPage,100))
+        // 漫剧这一档由两条货架拼成，其中一条挂掉时不该把整页变成空白：能拿多少算多少，
+        // 页面照样能翻。只有两条都失败，才算这次请求失败。
+        var failure: Exception?=null
+        val pages=type.routes.mapNotNull { route ->
+            try { routePage(page,route) } catch(e: Exception) { if(failure==null) failure=e; null }
+        }
+        if(pages.isEmpty()) throw failure ?: IOException("首页数据暂不可用")
+        val items=pages.flatMap { it.items }.distinctBy { it.id }
+        return CatalogPage(items,items.isNotEmpty() && pages.any { it.hasMore })
     }
     /**
      * Search the whole catalogue locally when an index is available, otherwise through the public page.
@@ -167,7 +191,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      * `reading/bookapi/search/tab/v/` returns HTTP 200 with a zero-byte body for every parameter
      * shape tried while `video_model/v1/` returns 24 KB in the same process. So the public page
      * alone is a ten-row ceiling no client change can lift - see [CatalogueIndex], which is built
-     * from the catalogue pages that *do* work and turns ten rows into the full 1600.
+     * from the catalogue pages that *do* work and turns ten rows into the full 2400.
      *
      * The server is still asked once per search, and whatever it returns that the index has never
      * seen is appended when the page has room. That keeps newly listed shows reachable without
@@ -177,9 +201,10 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      * its shows — see [CatalogueIndex.labelled]. It cannot narrow the server: the public search page
      * accepts no category parameter at all. That is not a loss in practice, because the server only
      * ever contributes ten top-up rows while the index answers with every match in the library.
-     * Measured over the whole library, 「都市」 hits 685 shows of which 316 are 漫剧, so without the
-     * split most of what a genre search wanted is mixed in with the other catalogue. The two
-     * catalogues are disjoint, so the split itself is clean.
+     * Measured over the whole library on 2026-10-19 (2400 shows: 800 真人剧, 1600 漫剧),
+     * 「都市」 hits 1042 shows of which 670 are 漫剧, so without the split most of what a genre
+     * search wanted is mixed in with the other shelf. The three routes are disjoint, so the
+     * split itself is clean.
      *
      * [CatalogPage.matchedCount] records how many rows actually mention the keyword. It is not a
      * nicety: the site answers every query with ten rows and never an empty list, so 「站内没有这部
@@ -204,7 +229,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         // 「不属于当前分类」筛掉，等于让这部剧从此搜不到 —— 恰恰是过滤最不该做的事。
         // 索引判不出来的行一律留下：分类过滤只筛索引能分类的行，判不出来的就别替它下结论。
         // （type 是非空的，所以这里没有 type==null 这一说；编译器本来就在报它恒为 false。）
-        val scoped = if(local?.labelled!=true) serverRows else serverRows.filter { row -> local.kindOf(row.id)?.let { it==type } ?: true }
+        val scoped = if(local?.labelled!=true) serverRows else serverRows.filter { row -> local.routeOf(row.id)?.let { it.type==type } ?: true }
         val known = localRows.mapTo(HashSet()) { it.id }
         val unseen = scoped.filterNot { it.id in known }
         // A local hit has to stay alone: 搜「雾锁情迷」finds exactly one show, and topping the page
@@ -347,7 +372,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         const val VIDEO_MODEL_API = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/video_model/v1/"
         /** One screen of search results, matching the 30 rows the list renders. */
         const val SEARCH_PAGE_SIZE = 30
-        /** Upper bound on local matches per search, so one keystroke cannot re-rank 1600 rows. */
+        /** Upper bound on local matches per search, so one keystroke cannot re-rank 2400 rows. */
         private const val SEARCH_LOCAL_LIMIT = 400
         fun extractRouter(html: String): JSONObject {
             val marker=html.indexOf("_ROUTER_DATA"); if(marker<0) throw IOException("页面没有内容数据")

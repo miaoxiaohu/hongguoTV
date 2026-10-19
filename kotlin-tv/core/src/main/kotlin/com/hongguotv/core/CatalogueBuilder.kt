@@ -6,49 +6,50 @@ package com.hongguotv.core
  *
  * @property fresh shows this page added that the walk had not already seen.
  * @property total everything collected so far, including what an earlier pass left behind.
- * @property cursor catalogue -> last page folded in, so the next pass resumes instead of restarting.
- * @property done catalogues that reached their final page and never need another request.
+ * @property cursor route -> last page folded in, so the next pass resumes instead of restarting.
+ * @property done routes that reached their final page and never need another request.
  */
 data class WalkStep(
     val fresh: List<Series>,
-    val type: ContentType,
+    val route: Route,
     val total: Int,
-    val cursor: Map<ContentType, Int>,
-    val done: Set<ContentType>
+    val cursor: Map<Route, Int>,
+    val done: Set<Route>
 )
 
 /**
  * What one walk pass saw.
  *
- * The cursor is what makes this finishable on a slow box. A J1900 needs minutes for the 68 serial
+ * The cursor is what makes this finishable on a slow box. A J1900 needs minutes for the 102 serial
  * requests, so a walk that is interrupted - by the user leaving the app, by the box running out of
  * memory, by one page timing out - must be resumable rather than restarted. Without it the index can
  * never complete: every launch begins at page one, dies in the same place, and a walk short enough
  * to be interrupted never gets far enough to be worth storing.
  *
- * @property types which catalogue each show in [shows] came from, parallel list. The two catalogues
- * are separate routes with separate ordering, and interleaving them would destroy each one's own
+ * @property routes which route each show in [shows] came from, parallel list. The routes are
+ * separate shelves with separate ordering, and interleaving them would destroy each one's own
  * order - which is why browsing filters by kind instead of walking them in lockstep.
  * @property gaps pages that survived their retries. A hole is recorded rather than hidden, because a
  * library that silently hides shows is worse than one that admits a page was missed.
  */
 data class CatalogueWalk(
     val shows: List<Series>,
-    val types: List<ContentType>,
-    val cursor: Map<ContentType, Int>,
-    val done: Set<ContentType>,
+    val routes: List<Route>,
+    val cursor: Map<Route, Int>,
+    val done: Set<Route>,
     val gaps: List<String>
 ) {
-    /** Every catalogue reached its end and no page was skipped. */
-    val complete get() = gaps.isEmpty() && done.size == ContentType.entries.size
+    /** Every route reached its end and no page was skipped. */
+    val complete get() = gaps.isEmpty() && done.size == Route.entries.size
 }
 
 /**
  * Walks the site's paged catalogues so the local search index can hold every show it carries.
  *
  * The catalogue is the one thing the site still pages properly: 34 pages x 24 rows in each named
- * route, 1600 shows, measured with zero duplicates and zero overlap between the two. That is what a
- * [CatalogueIndex] is built from, because the search page itself will only ever render ten rows.
+ * route, 800 shows per route, measured with zero duplicates and zero overlap between the three.
+ * That is what a [CatalogueIndex] is built from, because the search page itself will only ever
+ * render ten rows.
  *
  * Pages are handed to [onPage] as they land rather than collected and returned at the end, so a
  * search issued two minutes into a build already covers most of the library. Requests are serial
@@ -62,33 +63,33 @@ class CatalogueBuilder(
     private val retryPauseMillis: Long = RETRY_PAUSE_MILLIS
 ) {
     /**
-     * @param resume the last page already folded in per catalogue; this pass starts at the next one.
-     * @param done catalogues that already reached their end and must not be requested again.
+     * @param resume the last page already folded in per route; this pass starts at the next one.
+     * @param done routes that already reached their end and must not be requested again.
      * @param isCancelled polled before every request so a closing Activity stops the walk at once.
      * @param onPage receives each page as it lands, with the state needed to checkpoint the walk.
      * @return the shows this pass added, plus where the next one should pick up.
      */
     fun build(
-        resume: Map<ContentType, Int> = emptyMap(),
-        done: Set<ContentType> = emptySet(),
+        resume: Map<Route, Int> = emptyMap(),
+        done: Set<Route> = emptySet(),
         isCancelled: () -> Boolean = { false },
         onPage: (WalkStep) -> Unit = {}
     ): CatalogueWalk {
         val seen = mutableSetOf<String>()
         val collected = mutableListOf<Series>()
-        val collectedTypes = mutableListOf<ContentType>()
+        val collectedRoutes = mutableListOf<Route>()
         val cursor = LinkedHashMap(resume)
         val finished = LinkedHashSet(done)
         val gaps = mutableListOf<String>()
         var failures = 0
         var streakStart = 0
         var lastReason = ""
-        for (type in ContentType.entries) {
-            if (isCancelled() || type in finished) continue
-            var page = (cursor[type] ?: 0) + 1
+        for (route in Route.entries) {
+            if (isCancelled() || route in finished) continue
+            var page = (cursor[route] ?: 0) + 1
             while (page <= MAX_PAGES) {
                 if (isCancelled()) break
-                val result = fetch(type, page, gaps, isCancelled) { lastReason = it }
+                val result = fetch(route, page, gaps, isCancelled) { lastReason = it }
                 if (result == null) {
                     // Cancelled mid-retry: leave the cursor where it is so the next pass refetches
                     // this page rather than recording a gap for something that was never tried.
@@ -97,29 +98,29 @@ class CatalogueBuilder(
                         // Three near-identical 「no network」 entries are noise; one line says it.
                         gaps.subList(streakStart, gaps.size).clear()
                         gaps += "连续 $failures 页抓取失败（$lastReason），本次走查提前结束，将从断点继续"
-                        return CatalogueWalk(collected, collectedTypes, cursor, finished, gaps)
+                        return CatalogueWalk(collected, collectedRoutes, cursor, finished, gaps)
                     }
                     // A page that survived its retries is a hole, not a reason to abandon the other
-                    // sixty-odd requests. Skip it, remember it, and let the walk finish.
-                    cursor[type] = page
+                    // ninety-odd requests. Skip it, remember it, and let the walk finish.
+                    cursor[route] = page
                     page++
                     continue
                 }
                 failures = 0
                 streakStart = gaps.size
-                cursor[type] = page
+                cursor[route] = page
                 page++
                 val fresh = result.items.filter { seen.add(it.id) }
                 collected += fresh
-                repeat(fresh.size) { collectedTypes += type }
-                onPage(WalkStep(fresh, type, collectedTypes.size, cursor.toMap(), finished.toSet()))
-                // No rows, or the site saying this was the last page, ends that catalogue. Left
+                repeat(fresh.size) { collectedRoutes += route }
+                onPage(WalkStep(fresh, route, collectedRoutes.size, cursor.toMap(), finished.toSet()))
+                // No rows, or the site saying this was the last page, ends that route. Left
                 // unfinished on MAX_PAGES, which is a runaway hasMore rather than an end.
-                if (result.items.isEmpty() || !result.hasMore) { finished += type; break }
+                if (result.items.isEmpty() || !result.hasMore) { finished += route; break }
             }
             if (isCancelled()) break
         }
-        return CatalogueWalk(collected, collectedTypes, cursor, finished, gaps)
+        return CatalogueWalk(collected, collectedRoutes, cursor, finished, gaps)
     }
 
     /**
@@ -132,7 +133,7 @@ class CatalogueBuilder(
      * @return the page, or null when every attempt failed or the thread was interrupted.
      */
     private fun fetch(
-        type: ContentType,
+        route: Route,
         page: Int,
         gaps: MutableList<String>,
         isCancelled: () -> Boolean,
@@ -141,11 +142,11 @@ class CatalogueBuilder(
         var failure: Exception? = null
         for (attempt in 0 until attempts.coerceAtLeast(1)) {
             if (attempt > 0 && (!pause() || isCancelled())) return null
-            try { return repository.home(page, type) } catch (e: Exception) { failure = e }
+            try { return repository.routePage(page, route) } catch (e: Exception) { failure = e }
         }
         val reason = failure?.message?.take(80) ?: "未知原因"
         onFailure(reason)
-        gaps += "${type.categorySlug} 第 $page 页：$reason"
+        gaps += "${route.categorySlug} 第 $page 页：$reason"
         return null
     }
 
@@ -161,7 +162,7 @@ class CatalogueBuilder(
         /**
          * Give up on the whole pass after this many pages in a row.
          *
-         * Without it, a box with no network would burn 68 pages x 3 tries x 45s of call timeout -
+         * Without it, a box with no network would burn 102 pages x 3 tries x 45s of call timeout -
          * hours of requests against an endpoint that is already sensitive to call rate, all of them
          * certain to fail.
          */

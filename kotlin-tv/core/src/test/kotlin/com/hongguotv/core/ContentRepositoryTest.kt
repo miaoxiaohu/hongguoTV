@@ -332,7 +332,7 @@ class ContentRepositoryTest {
      * classify deletes exactly the shows that have no other way in.
      */
     @Test fun aServerRowTheIndexCannotClassifyIsKept() {
-        val local=CatalogueIndex(listOf(Series("1","雾锁情迷")),listOf(ContentType.SHORT))
+        val local=CatalogueIndex(listOf(Series("1","雾锁情迷")),listOf(Route.REAL_DRAMA))
         val repo=repository { searchPage(searchRow("7697172143917779992","回到心跳开始时")) }
         val result=repo.search("回到心跳开始时",1,ContentType.SHORT,local)
         assertEquals(listOf("7697172143917779992"),result.items.map { it.id })
@@ -345,7 +345,7 @@ class ContentRepositoryTest {
      * keeping the rows the index cannot judge must not turn it into no filter at all.
      */
     @Test fun aServerRowTheIndexKnowsIsStillSplitByCatalogue() {
-        val local=CatalogueIndex(listOf(Series("1","雾锁情迷"),Series("2","总裁归来")),listOf(ContentType.SHORT,ContentType.COMIC))
+        val local=CatalogueIndex(listOf(Series("1","雾锁情迷"),Series("2","总裁归来")),listOf(Route.REAL_DRAMA,Route.COMIC_DRAMA))
         val repo=repository { searchPage(searchRow("2","总裁归来新番"),searchRow("999","总裁归来后传")) }
         val result=repo.search("总裁归来",1,ContentType.SHORT,local)
         // 「总裁归来」 is filed under 漫剧, so the row the index can place goes; the one it cannot
@@ -504,44 +504,63 @@ class ContentRepositoryTest {
     }
 
     /**
-     * The four catalogues are disjoint on the site (measured pairwise overlap: zero), so each must
-     * ask for its own route. A shared path here would silently collapse them back into one list —
-     * which is exactly the bug that hid 1600 shows.
+     * 站方有三条能播的货架，用户挑的是两档：`ai-drama` 是 800 部 AI 剧，并进「漫剧」而不是单开一档。
+     *
+     * `/category/comic`（漫画，74 部）故意不列进来：它确实有 `vid_list`，但那些 id 是漫画章节而不是
+     * 视频 id，签名播放接口对试过的八部全部回 HTTP 500 —— 一整页死路。
+     *
+     * 落盘的 id 沿用旧的（short / comic / ai），所以电视上已有的索引和断点继续有效，只需补走
+     * AI 剧那一档的 34 页，而不是把 102 页重走一遍。
      */
-    /**
-     * `/category/comic` (漫画, 74 shows) is intentionally not browsable: it does list a `vid_list`,
-     * but those ids are comic chapters rather than video — the signed player endpoint answers
-     * HTTP 500 for every show tried. `ai-drama` is browsable and was offered in 0.9.14, but browsing
-     * it did not pay for itself, so 0.9.15 offers two. Both decisions are pinned here on purpose so
-     * nobody re-adds a tab without re-measuring first.
-     */
-    @Test fun browseableCataloguesAreExactlyTheTwoWeOffer() {
-        assertEquals(listOf("real-drama","comic-drama"),ContentType.entries.map { it.categorySlug })
-        assertEquals(ContentType.entries.size,ContentType.entries.map { it.categorySlug }.distinct().size)
-        assertEquals(ContentType.entries.size,ContentType.entries.map { it.label }.distinct().size)
-        assertEquals(ContentType.entries.size,ContentType.entries.map { it.storedValue }.distinct().size)
-        assertFalse("漫画 的分集不是视频 id，放进来是死路", ContentType.entries.any { it.categorySlug=="comic" })
+    @Test fun browseableCataloguesAreExactlyTheRoutesWeOffer() {
+        assertEquals(listOf("real-drama","comic-drama","ai-drama"),Route.entries.map { it.categorySlug })
+        assertEquals(Route.entries.size,Route.entries.map { it.categorySlug }.distinct().size)
+        assertEquals(Route.entries.size,Route.entries.map { it.storedValue }.distinct().size)
+        assertFalse("漫画 的分集不是视频 id，放进来是死路", Route.entries.any { it.categorySlug=="comic" })
+        // 用户挑的是两档，不是三条货架。
+        assertEquals(listOf("真人剧","漫剧"),ContentType.entries.map { it.label })
+        assertEquals(listOf(ContentType.SHORT,ContentType.COMIC),Route.entries.map { it.type }.distinct())
+        assertEquals(listOf(Route.REAL_DRAMA),ContentType.SHORT.routes)
+        assertEquals(listOf(Route.COMIC_DRAMA,Route.AI_DRAMA),ContentType.COMIC.routes)
+        // 旧索引的落盘 id 不能变，否则电视上已有的 1600 部索引要重走一遍。
+        assertEquals(listOf("short","comic","ai"),Route.entries.map { it.storedValue })
     }
 
-    @Test fun everyCatalogueBrowsesItsOwnNamedRoute() {
+    @Test fun everyRouteBrowsesItsOwnNamedRoute() {
         val seen=mutableListOf<String>()
         val repo=repository { request ->
             seen += request.url.encodedPath
             assertNull(request.url.queryParameter("tab"))
-            val type=ContentType.entries.single { request.url.encodedPath=="/category/${it.categorySlug}" }
-            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"1","series_name":"测试${type.label}"}],"pagination":{"total":800,"pageNum":1,"pageSize":24,"totalPages":34}}}};</script>"""
+            val route=Route.entries.single { request.url.encodedPath=="/category/${it.categorySlug}" }
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"1","series_name":"测试${route.label}"}],"pagination":{"total":800,"pageNum":1,"pageSize":24,"totalPages":34}}}};</script>"""
         }
-        for(type in ContentType.entries) {
-            val page=repo.home(type=type)
-            assertEquals("测试${type.label}",page.items.single().title)
+        for(route in Route.entries) {
+            val page=repo.routePage(route=route)
+            assertEquals("测试${route.label}",page.items.single().title)
             assertTrue(page.hasMore)
         }
-        assertEquals(ContentType.entries.size,seen.distinct().size)
+        assertEquals(Route.entries.size,seen.distinct().size)
+    }
+
+    @Test fun browsingTheComicShelfShowsBothOfItsRoutes() {
+        // 漫剧这一档由 comic-drama 和 ai-drama 两条货架拼成：两条各自的排序原样保留，拼接而不是
+        // 交错，所以第一条货架自己的热门序仍然排在最前面。
+        val repo=repository { request ->
+            val route=Route.entries.single { request.url.encodedPath=="/category/${it.categorySlug}" }
+            val id=Route.entries.indexOf(route)+1
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"$id","series_name":"测试${route.label}"}],"pagination":{"total":800,"pageNum":1,"pageSize":24,"totalPages":34}}}};</script>"""
+        }
+        val result=repo.home(1,ContentType.COMIC)
+        assertEquals(listOf("测试漫剧","测试AI剧"),result.items.map { it.title })
+        assertTrue(result.hasMore)
+        // 真人剧这一档只有一条货架，不该被拼上什么。
+        val single=repo.home(1,ContentType.SHORT)
+        assertEquals(listOf("测试真人剧"),single.items.map { it.title })
     }
 
     @Test fun browsingTheComicCatalogueNoLongerReturnsHotBoardMetadata() {
         val repo=repository { request ->
-            assertEquals("/category/comic-drama",request.url.encodedPath)
+            assertTrue(request.url.encodedPath in setOf("/category/comic-drama","/category/ai-drama"))
             """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"456","series_name":"测试漫剧"}],"pagination":{"totalPages":2}}}};</script>"""
         }
         val result=repo.home(1,ContentType.COMIC)
@@ -556,7 +575,8 @@ class ContentRepositoryTest {
             """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"456","series_name":"测试"}],"pagination":{"totalPages":34}}}};</script>"""
         }
         repo.home(1,ContentType.COMIC); repo.home(2,ContentType.COMIC); repo.home(12,ContentType.COMIC)
-        assertEquals(listOf(null,"2","12"),queries)
+        // 漫剧这一档由两条货架拼成，所以每次翻页各请求一次；第一页不带 page 参数。
+        assertEquals(listOf(null,null,"2","2","12","12"),queries)
     }
 
     @Test fun searchSkipsRowsWithoutAUsableSeriesId() {

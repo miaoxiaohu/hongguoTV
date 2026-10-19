@@ -272,7 +272,7 @@ class MainActivity: Activity() {
      * the first search usually happens long before the walk finishes and should still find it.
      */
     private fun startCatalogueBuild(force: Boolean=false) {
-        // A finished index is already on disk. Re-walking 68 serial pages on every launch would buy
+        // A finished index is already on disk. Re-walking 102 serial pages on every launch would buy
         // nothing and keep hammering an endpoint that is already sensitive to call rate.
         if(library.isBuildingCatalogue() || (!force && library.isCatalogueComplete())) return
         library.buildCatalogue(repository,force) { total ->
@@ -495,7 +495,7 @@ class MainActivity: Activity() {
             searchInput=input; searchButton=addButton(searchRow,"搜索") { search() }
             input.nextFocusUpId=nav[tab].id; searchButton?.nextFocusUpId=input.nextFocusUpId
             // 分类按钮进导航栏右上角，和首页完全同一套。它在搜索页是真的有作用：全库索引记着每部
-            // 剧属于哪套目录，而同一个题材词两边都命中 —— 搜「都市」685 部里 316 部是漫剧，
+            // 剧属于哪套目录，而同一个题材词两边都命中 —— 搜「都市」1042 部里 670 部是漫剧，
             // 不分开的话大半结果和用户想要的不是一档。摆法和首页一样，是为了让这个开关在两页
             // 里长得一模一样。
             val types=row().apply { setPadding(0,dp(8),0,dp(6)) }

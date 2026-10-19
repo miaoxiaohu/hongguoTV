@@ -14,18 +14,18 @@ import org.json.JSONObject
  * parameter shapes while a control request to `video_model/v1/` returns 24 KB in the same process.
  * Ten is therefore the server's ceiling, not a client-side shortcoming.
  *
- * What the site *does* page is the catalogue: 34 pages x 24 rows in each of the two named
- * catalogues, 1600 shows with zero overlap between them. [CatalogueBuilder] walks those, and this
+ * What the site *does* page is the catalogue: 34 pages x 24 rows in each of the three named
+ * routes, 2400 shows with zero overlap between them. [CatalogueBuilder] walks those, and this
  * class searches the result locally.
  *
  * Matching is ranked rather than boolean, because a flat "contains" loses the show the user
  * actually typed: 「谁让这个文盲修仙的」 must come before 「谁让这个文盲修仙的第三季」's neighbours.
  */
-class CatalogueIndex(entries: List<Series>, types: List<ContentType?> = emptyList()) {
+class CatalogueIndex(entries: List<Series>, routes: List<Route?> = emptyList()) {
     /**
      * Entries are kept in catalogue order so ties resolve to the site's own ranking.
      *
-     * Normalised titles and tags are computed once here: a search sweeps all 1600 entries, and
+     * Normalised titles and tags are computed once here: a search sweeps all 2400 entries, and
      * re-running two regex replaces over each of them per keystroke would be the slowest part of a
      * keystroke.
      */
@@ -33,40 +33,40 @@ class CatalogueIndex(entries: List<Series>, types: List<ContentType?> = emptyLis
         val rows = ArrayList<Entry>(entries.size)
         val at = LinkedHashMap<String, Int>(entries.size.coerceAtLeast(1))
         entries.forEachIndexed { position, series ->
-            val type = types.getOrNull(position)
+            val route = routes.getOrNull(position)
             val known = at[series.id]
             if (known == null) {
                 at[series.id] = rows.size
-                rows += Entry(series, normalizeForSearch(series.title), normalizeForSearch(series.tags), type)
-            } else if (type != null) {
+                rows += Entry(series, normalizeForSearch(series.title), normalizeForSearch(series.tags), route)
+            } else if (route != null) {
                 // 同一部剧可能来两次：一次来自还没记分类的老索引，一次来自补记分类的重走查。
                 // 记了分类的那份必须赢。老的 distinctBy 留的是先到的那份，也就是没分类的那份 ——
                 // 于是标签抓回来了、存下去了，搜索按分类过滤时却仍然把这一行当成「哪边都算」，
                 // 分不开，而且补多少次都补不好。
-                rows[known] = Entry(rows[known].series, rows[known].title, rows[known].tags, type)
+                rows[known] = Entry(rows[known].series, rows[known].title, rows[known].tags, route)
             }
         }
         rows
     }
 
     /**
-     * One entry plus which catalogue it came from.
+     * One entry plus which route it came from.
      *
-     * [type] is null for an index written before the two catalogues were labelled, and for tests
+     * [route] is null for an index written before the catalogues were labelled, and for tests
      * that never had a catalogue in mind. Those entries are treated as belonging to every filter, so
      * an old index still browses rather than coming up empty.
      */
-    private class Entry(val series: Series, val title: String, val tags: String, val type: ContentType?)
+    private class Entry(val series: Series, val title: String, val tags: String, val route: Route?)
 
     /**
-     * True when every show here records the catalogue it came from.
+     * True when every show here records the route it came from.
      *
      * Only then can a search be split by catalogue. A missing label reads as 「belongs to both」 so
      * that an index written before the labels existed still browses — but that same leniency makes a
      * filter over such an index a no-op that looks like it worked. Callers check this and say so
      * rather than serving results that quietly ignore what the user selected.
      */
-    val labelled: Boolean = ordered.all { it.type != null }
+    val labelled: Boolean = ordered.all { it.route != null }
 
     /**
      * Ranked matches for [keyword], best first, capped at [limit].
@@ -76,15 +76,15 @@ class CatalogueIndex(entries: List<Series>, types: List<ContentType?> = emptyLis
      * the 「站内没有这部剧」 notice entirely.
      *
      * [type] narrows to one catalogue. It is worth having because the same word lands on both:
-     * measured over the whole library, 「都市」 hits 685 shows of which 316 are 漫剧, 「穿越」 391 of
-     * which 316, 「重生」 180 of which 111. Searching the whole library for a genre therefore buries
-     * most of what the user wanted. Null means no filter, which is also what an index whose shows
-     * carry no catalogue label falls back to.
+     * measured over the whole library on 2026-10-19 (2400 shows), 「都市」 hits 1042 of which 670
+     * are 漫剧, 「穿越」 545 of which 476, 「重生」 358 of which 289. Searching the whole library for
+     * a genre therefore buries most of what the user wanted. Null means no filter, which is also
+     * what an index whose shows carry no catalogue label falls back to.
      */
     fun search(keyword: String, limit: Int = DEFAULT_LIMIT, type: ContentType? = null): List<Series> {
         val needle = normalizeForSearch(keyword)
         if (needle.isEmpty() || limit <= 0) return emptyList()
-        val pool = if (type == null) ordered else ordered.filter { it.type == null || it.type == type }
+        val pool = if (type == null) ordered else ordered.filter { it.route == null || it.route.type == type }
         return pool.asSequence()
             .mapIndexedNotNull { order, entry -> rank(entry, needle)?.let { Ranked(entry.series, it, order) } }
             .sortedWith(compareBy({ it.rank }, { it.series.title.length }, { it.order }))
@@ -93,8 +93,8 @@ class CatalogueIndex(entries: List<Series>, types: List<ContentType?> = emptyLis
             .toList()
     }
 
-    /** Which catalogue [id] was filed under, or null when the index never recorded it. */
-    fun kindOf(id: String): ContentType? = ordered.firstOrNull { it.series.id == id }?.type
+    /** Which route [id] was filed under, or null when the index never recorded it. */
+    fun routeOf(id: String): Route? = ordered.firstOrNull { it.series.id == id }?.route
 
     /** How many entries match, ignoring [CatalogueIndex.search]'s cap. */
     fun count(keyword: String): Int {
@@ -113,20 +113,20 @@ class CatalogueIndex(entries: List<Series>, types: List<ContentType?> = emptyLis
      * `newest()` name claimed something the data cannot support, and a user reasonably asked why
      * 「随便看看」was showing these particular shows. The honest answer had to be a name too.
      *
-     * [type] filters to one catalogue because the two are separate routes with separate ordering:
-     * walking them one after the other put all 800 真人剧 ahead of all 800 漫剧, so a filtered view
-     * over the flat list is what makes 「真人剧」and 「漫剧」each start at their own front page
-     * instead of the 漫剧 filter landing 800 rows in. Null means "no filter", which is also what an
-     * index written before catalogues were labelled falls back to.
+     * [type] filters to one catalogue because the routes behind it are separate shelves with
+     * separate ordering: walking them one after the other put all 800 真人剧 ahead of all 1600
+     * 漫剧, so a filtered view over the flat list is what makes 「真人剧」and 「漫剧」each start at
+     * its own front page instead of the 漫剧 filter landing 800 rows in. Null means "no filter",
+     * which is also what an index written before catalogues were labelled falls back to.
      */
     fun browse(offset: Int, size: Int, type: ContentType? = null): List<Series> {
         if (offset < 0 || size <= 0) return emptyList()
-        val source = if (type == null) ordered else ordered.filter { it.type == null || it.type == type }
+        val source = if (type == null) ordered else ordered.filter { it.route == null || it.route.type == type }
         return source.drop(offset).take(size).map { it.series }
     }
 
     /** How many shows [type] holds, so the browse label can say 「共 N 部」. */
-    fun sizeOf(type: ContentType): Int = ordered.count { it.type == null || it.type == type }
+    fun sizeOf(type: ContentType): Int = ordered.count { it.route == null || it.route.type == type }
 
     /**
      * [search], then a one-character fallback when nothing matched literally.
@@ -146,7 +146,7 @@ class CatalogueIndex(entries: List<Series>, types: List<ContentType?> = emptyLis
         if (needle.length < TYPO_FLOOR) return emptyList<Series>() to false
         // The fallback has to respect the same filter, or a mistyped 漫剧 title would come back as
         // a 真人剧 and the page would claim to be filtered when it is not.
-        val pool = if (type == null) ordered else ordered.filter { it.type == null || it.type == type }
+        val pool = if (type == null) ordered else ordered.filter { it.route == null || it.route.type == type }
         val relaxed = pool.asSequence()
             .mapNotNull { entry -> editDistanceWithinOne(needle, entry.title).let { it to entry } }
             .filter { it.first <= 1 }
@@ -169,7 +169,7 @@ class CatalogueIndex(entries: List<Series>, types: List<ContentType?> = emptyLis
      *   the shared 回 and drops back to 1. The total really is a single substitution.
      *
      * Only the length-gap early exit survives, because it is a property of the inputs rather than
-     * of the matrix. A 1600-show sweep is a couple of milliseconds, and it runs only when the
+     * of the matrix. A 2400-show sweep is a couple of milliseconds, and it runs only when the
      * literal search came back empty.
      *
      * @return the distance, or `budget + 1` if it is at least that.
@@ -218,27 +218,27 @@ class CatalogueIndex(entries: List<Series>, types: List<ContentType?> = emptyLis
  * A decoded index plus the walk state needed to carry on from where it stopped.
  *
  * @property entries the shows themselves, so a build can append to them without refetching.
- * @property cursor catalogue -> last page already folded in.
- * @property done catalogues that reached their final page.
+ * @property cursor route -> last page already folded in.
+ * @property done routes that reached their final page.
  */
 data class CatalogueSnapshot(
     val entries: List<Series>,
-    /** Which catalogue each entry in [entries] came from, parallel list; null where unrecorded. */
-    val types: List<ContentType?>,
-    val cursor: Map<ContentType, Int>,
-    val done: Set<ContentType>
+    /** Which route each entry in [entries] came from, parallel list; null where unrecorded. */
+    val routes: List<Route?>,
+    val cursor: Map<Route, Int>,
+    val done: Set<Route>
 ) {
-    val index: CatalogueIndex by lazy { CatalogueIndex(entries, types) }
+    val index: CatalogueIndex by lazy { CatalogueIndex(entries, routes) }
     val size get() = entries.size
-    /** True when the walk reached the end of every catalogue. */
-    val walkedToEnd get() = done.size == ContentType.entries.size
+    /** True when the walk reached the end of every route. */
+    val walkedToEnd get() = done.size == Route.entries.size
     /**
-     * True when every show records the catalogue it came from.
+     * True when every show records the route it came from.
      *
-     * The size check matters as much as the null check: [types] defaults to empty, and `all` over an
+     * The size check matters as much as the null check: [routes] defaults to empty, and `all` over an
      * empty list is vacuously true, so a snapshot carrying no labels at all would sail through.
      */
-    val labelled get() = types.size == entries.size && types.all { it != null }
+    val labelled get() = routes.size == entries.size && routes.all { it != null }
     /**
      * True when the walk reached the end of every catalogue **and** every show is labelled.
      *
@@ -255,7 +255,7 @@ data class CatalogueSnapshot(
  * On-disk form of a [CatalogueIndex].
  *
  * Only the five fields a search result needs are written. The catalogue rows also carry a full
- * `series_intro`, and keeping it would push 1600 shows past 800 KB of JSON for text the detail
+ * `series_intro`, and keeping it would push 2400 shows past 800 KB of JSON for text the detail
  * page fetches anyway on open.
  *
  * The walk cursor is written alongside the rows, which is the whole point: an index that cannot say
@@ -272,18 +272,18 @@ object CatalogueIndexDisk {
 
     fun encode(
         entries: List<Series>,
-        types: List<ContentType?>,
-        cursor: Map<ContentType, Int>,
-        done: Set<ContentType>,
+        routes: List<Route?>,
+        cursor: Map<Route, Int>,
+        done: Set<Route>,
         now: Long
     ): String = JSONObject()
         .put("savedAt", now)
         .put("count", entries.size)
-        // Per-entry catalogue, so the two filters can each show their own front page after a restart.
+        // Per-entry route, so each filter can show its own front page after a restart.
         .put("kinds", JSONArray(entries.indices.map { position ->
-            types.getOrNull(position)?.storedValue ?: JSONObject.NULL
+            routes.getOrNull(position)?.storedValue ?: JSONObject.NULL
         }))
-        .put("cursor", JSONObject().apply { cursor.forEach { (type, page) -> put(type.storedValue, page) } })
+        .put("cursor", JSONObject().apply { cursor.forEach { (route, page) -> put(route.storedValue, page) } })
         .put("done", JSONArray(done.map { it.storedValue }))
         .put("items", JSONArray(entries.map {
             JSONObject().put("i", it.id).put("t", it.title).put("c", it.cover)
@@ -313,23 +313,27 @@ object CatalogueIndexDisk {
             }.getOrNull()
         }
         require(entries.isNotEmpty())
-        // An index written before this field existed has no per-entry catalogue; every entry reads
+        // An index written before this field existed has no per-entry route; every entry reads
         // back as null and matches any filter, so an old index still browses.
         val kinds = o.optJSONArray("kinds")
-        val types = entries.indices.map { position ->
+        val routes = entries.indices.map { position ->
             kinds?.optString(position).orEmpty().takeIf { it.isNotEmpty() && it != "null" }
-                ?.let { stored -> ContentType.entries.firstOrNull { type -> type.storedValue == stored } }
+                ?.let { stored -> Route.fromStored(stored) }
         }
+        // The route ids deliberately reuse the old per-type ones ("short", "comic"), so an index
+        // written before AI dramas were folded in keeps its bookmark: the two routes it already
+        // walked stay walked, and only "ai" is left to fetch. Without that, folding AI dramas in
+        // would cost the user a full re-walk of 102 pages on a box that needs minutes for 68.
         val cursor = o.optJSONObject("cursor")?.let { stored ->
-            ContentType.entries.mapNotNull { type -> stored.optInt(type.storedValue, 0).takeIf { it > 0 }?.let { type to it } }
+            Route.entries.mapNotNull { route -> stored.optInt(route.storedValue, 0).takeIf { it > 0 }?.let { route to it } }
         }.orEmpty().toMap()
-        // An unknown stored value is dropped rather than rejected: a build that retired a category
+        // An unknown stored value is dropped rather than rejected: a build that retired a route
         // must not make the whole index unreadable.
         val done = o.optJSONArray("done")?.let { stored ->
             (0 until stored.length()).mapNotNull { position ->
-                ContentType.entries.firstOrNull { type -> type.storedValue == stored.optString(position) }
+                Route.fromStored(stored.optString(position))
             }
         }.orEmpty().toSet()
-        CatalogueSnapshot(entries, types, cursor, done)
+        CatalogueSnapshot(entries, routes, cursor, done)
     }.getOrNull()
 }

@@ -160,37 +160,37 @@ class CatalogueIndexTest {
 
     @Test fun `the walk bookmark survives disk so a slow box can carry on`() {
         val rows = listOf(show("1", "雾锁情迷"), show("2", "京夜诱温"))
-        val json = CatalogueIndexDisk.encode(rows, emptyList(), mapOf(ContentType.SHORT to 12), setOf(ContentType.COMIC), 1_000L)
+        val json = CatalogueIndexDisk.encode(rows, emptyList(), mapOf(Route.REAL_DRAMA to 12), setOf(Route.COMIC_DRAMA), 1_000L)
         val decoded = CatalogueIndexDisk.decode(json, 2_000L)!!
-        assertEquals(12, decoded.cursor[ContentType.SHORT])
-        assertEquals(setOf(ContentType.COMIC), decoded.done)
+        assertEquals(12, decoded.cursor[Route.REAL_DRAMA])
+        assertEquals(setOf(Route.COMIC_DRAMA), decoded.done)
         assertEquals(false, decoded.complete)
         // A finished walk must not be re-requested on the next launch.
         assertEquals(true, CatalogueIndexDisk.decode(
             CatalogueIndexDisk.encode(
-                rows, List(rows.size) { ContentType.SHORT },
-                mapOf(ContentType.SHORT to 34), ContentType.entries.toSet(), 1_000L
+                rows, List(rows.size) { Route.REAL_DRAMA },
+                mapOf(Route.REAL_DRAMA to 34), Route.entries.toSet(), 1_000L
             ), 2_000L
         )!!.complete)
     }
 
     @Test fun `an index that finished without labelling its shows is not finished`() {
-        // 游标记着「两套目录都到头了」，但每部属于哪套目录是空的 —— 分类按钮加上来之前存下的那份。
+        // 游标记着「三条货架都到头了」，但每部属于哪条货架是空的 —— 分类按钮加上来之前存下的那份。
         // 搜索是照着这些标签分档的，缺标签的行只能算「哪边都算」，于是分开搜会静悄悄地不起作用；
         // 而 complete 只看游标，这份索引就永远不会被重走查修好。
         val rows = listOf(show("1", "真人剧甲"), show("2", "真人剧乙"), show("3", "漫剧丙"))
         val unlabelled = CatalogueIndexDisk.decode(
-            CatalogueIndexDisk.encode(rows, emptyList(), mapOf(ContentType.SHORT to 34), ContentType.entries.toSet(), 1_000L), 2_000L
+            CatalogueIndexDisk.encode(rows, emptyList(), mapOf(Route.REAL_DRAMA to 34), Route.entries.toSet(), 1_000L), 2_000L
         )!!
         assertTrue("游标确实走完了", unlabelled.walkedToEnd)
         assertFalse("索引自己也知道它没标签", unlabelled.index.labelled)
         assertFalse("没记下分类的索引不算完成", unlabelled.complete)
-        // decode 会把 types 补齐到和 entries 一样长，所以光比长度抓不住这个状态 —— 每个位置都得
+        // decode 会把 routes 补齐到和 entries 一样长，所以光比长度抓不住这个状态 —— 每个位置都得
         // 真的记下分类才行。这正是 labelled 两条都要查的原因。
-        assertEquals(unlabelled.entries.size, unlabelled.types.size)
-        assertTrue("全是空标签", unlabelled.types.all { it == null })
+        assertEquals(unlabelled.entries.size, unlabelled.routes.size)
+        assertTrue("全是空标签", unlabelled.routes.all { it == null })
 
-        val labelled = unlabelled.copy(types = listOf(ContentType.SHORT, ContentType.SHORT, ContentType.COMIC))
+        val labelled = unlabelled.copy(routes = listOf(Route.REAL_DRAMA, Route.REAL_DRAMA, Route.COMIC_DRAMA))
         assertTrue(labelled.index.labelled); assertTrue(labelled.complete)
     }
 
@@ -200,7 +200,7 @@ class CatalogueIndexTest {
         // 却仍然把这一行算进两档，补多少次都补不好。
         val old = listOf(show("1", "真人剧甲"), show("2", "漫剧乙"))
         val fresh = listOf(show("1", "真人剧甲"), show("2", "漫剧乙"))
-        val carried = CatalogueIndex(old + fresh, listOf(null, null) + listOf(ContentType.SHORT, ContentType.COMIC))
+        val carried = CatalogueIndex(old + fresh, listOf(null, null) + listOf(Route.REAL_DRAMA, Route.COMIC_DRAMA))
         assertEquals(2, carried.size)
         assertTrue("补完之后每部都该有分类", carried.labelled)
         assertEquals(1, carried.sizeOf(ContentType.SHORT))
@@ -214,10 +214,10 @@ class CatalogueIndexTest {
 
     @Test fun `a search can be narrowed to one catalogue`() {
         // 分开搜的依据：同一个题材词两边都命中，混在一起就找不到想要的那一档。
-        // 实测全库：「都市」685 部里 316 部是漫剧，「穿越」391 部里 316 部，「重生」180 部里 111 部。
+        // 实测全库（2400 部）：「都市」1042 部里 670 部是漫剧，「穿越」545 部里 476 部，「重生」358 部里 289 部。
         val real=listOf(show("r1","都市爱情"),show("r2","都市商战"),show("r3","都市逆袭"),show("r4","都市风云"))
         val comic=listOf(show("c1","都市冒险"),show("c2","都市传说"),show("c3","都市怪谈"))
-        val library=CatalogueIndex(real + comic, List(4) { ContentType.SHORT } + List(3) { ContentType.COMIC })
+        val library=CatalogueIndex(real + comic, List(4) { Route.REAL_DRAMA } + List(3) { Route.COMIC_DRAMA })
 
         assertEquals(7, library.search("都市", 20).size)
         assertEquals(real.map { it.title }, library.search("都市", 20, ContentType.SHORT).map { it.title })
@@ -225,9 +225,9 @@ class CatalogueIndexTest {
         // 错字容错也得守同一个过滤，否则打错字的漫剧会以真人剧的身份回来，而页面声称在过滤。
         assertEquals(listOf("都市传说"), library.searchAllowingTypo("都市传说明", 20, ContentType.COMIC).first.map { it.title })
         assertEquals(emptyList<String>(), library.searchAllowingTypo("都市传说明", 20, ContentType.SHORT).first.map { it.title })
-        assertEquals("真人剧", library.kindOf("r1")?.label)
-        assertEquals("漫剧", library.kindOf("c1")?.label)
-        assertEquals(null, library.kindOf("nope"))
+        assertEquals("真人剧", library.routeOf("r1")?.label)
+        assertEquals("漫剧", library.routeOf("c1")?.label)
+        assertEquals(null, library.routeOf("nope"))
         // 没有标签的索引不分档，但也不能因此变成搜不到 —— 缺标签的行仍算命中。
         val bare=CatalogueIndex(real + comic, emptyList())
         assertFalse(bare.labelled)
@@ -238,8 +238,8 @@ class CatalogueIndexTest {
         val legacy = """{"savedAt":1000,"count":1,"items":[{"i":"1","t":"雾锁情迷"}]}"""
         val decoded = CatalogueIndexDisk.decode(legacy, 2_000L)
         assertNotNull(decoded)
-        assertEquals("没写断点的老索引应当从头再走", emptyMap<ContentType, Int>(), decoded!!.cursor)
-        assertEquals(emptySet<ContentType>(), decoded.done)
+        assertEquals("没写断点的老索引应当从头再走", emptyMap<Route, Int>(), decoded!!.cursor)
+        assertEquals(emptySet<Route>(), decoded.done)
     }
 
     @Test fun `a stale, corrupt or oversized index is dropped rather than surfaced`() {
@@ -253,12 +253,12 @@ class CatalogueIndexTest {
         assertNull(CatalogueIndexDisk.decode(fresh, 999L))
     }
 
-    @Test fun `browse keeps the two catalogues apart so each filter starts at its own front page`() {
+    @Test fun `browse keeps the two shelves apart so each filter starts at its own front page`() {
         // 两套目录是两个站点、两种排序。混在一个列表里按类型过滤的话，漫剧那一档得翻过 800 行
         // 真人剧才见得到第一行漫剧 —— 用户看到的「随便看看」就全是真人剧。
         val real = (1..5).map { show("1$it", "真人剧 $it") }
         val comic = (1..4).map { show("9$it", "漫剧 $it") }
-        val library = CatalogueIndex(real + comic, List(5) { ContentType.SHORT } + List(4) { ContentType.COMIC })
+        val library = CatalogueIndex(real + comic, List(5) { Route.REAL_DRAMA } + List(4) { Route.COMIC_DRAMA })
 
         assertEquals(listOf("真人剧 1", "真人剧 2"), library.browse(0, 2, ContentType.SHORT).map { it.title })
         assertEquals(listOf("真人剧 5"), library.browse(4, 2, ContentType.SHORT).map { it.title })
@@ -271,6 +271,38 @@ class CatalogueIndexTest {
         assertEquals((real + comic).map { it.id }, library.browse(0, 20).map { it.id })
     }
 
+    @Test fun `the comic shelf holds both of its routes and the real shelf only one`() {
+        // AI 剧并进漫剧之后，「漫剧」这一档是 comic-drama 加 ai-drama，两条货架各自 800 部。
+        // 搜到 AI 剧时它必须算作漫剧，而真人剧那一档不能混进任何一部。
+        val real = (1..3).map { show("1$it", "真人剧 $it") }
+        val comic = (1..4).map { show("9$it", "漫剧 $it") }
+        val ai = (1..5).map { show("7$it", "AI剧 $it") }
+        val library = CatalogueIndex(
+            real + comic + ai,
+            List(3) { Route.REAL_DRAMA } + List(4) { Route.COMIC_DRAMA } + List(5) { Route.AI_DRAMA }
+        )
+
+        assertEquals(3, library.sizeOf(ContentType.SHORT))
+        assertEquals(9, library.sizeOf(ContentType.COMIC))
+        // 漫剧这一档先走 comic-drama，再走 ai-drama：两条货架的排序原样保留，拼接而不是交错。
+        assertEquals(
+            (comic + ai).map { it.title },
+            library.browse(0, 20, ContentType.COMIC).map { it.title }
+        )
+        assertEquals("AI剧 1", library.browse(4, 1, ContentType.COMIC).first().title)
+        assertEquals("AI剧 5", library.browse(8, 1, ContentType.COMIC).first().title)
+        assertTrue("翻过漫剧这一档就该空了", library.browse(9, 5, ContentType.COMIC).isEmpty())
+        // 真人剧那一档不掺任何 AI 剧。
+        assertTrue(library.browse(0, 20, ContentType.SHORT).none { it.title.startsWith("AI剧") })
+        // 题材词两边都命中时，按档分开才找得到想要的那一档。
+        val tagged = CatalogueIndex(
+            listOf(show("r1", "都市爱情"), show("c1", "都市冒险"), show("a1", "都市推理")),
+            listOf(Route.REAL_DRAMA, Route.COMIC_DRAMA, Route.AI_DRAMA)
+        )
+        assertEquals(listOf("都市爱情"), tagged.search("都市", 20, ContentType.SHORT).map { it.title })
+        assertEquals(listOf("都市冒险", "都市推理"), tagged.search("都市", 20, ContentType.COMIC).map { it.title })
+    }
+
     @Test fun `each catalogue is paged on its own count, so its last page still lands whole`() {
         // 「随便看看」按 18 部一页翻，18 又必须整除行宽 6，否则每一页都收在半排上。
         // 两套目录部数不同（真人剧 40、漫剧 25），所以页数和末页起点都只能按各自的总数算。
@@ -280,7 +312,7 @@ class CatalogueIndexTest {
         val columns=6
         val real=(1..40).map { show("r$it", "真人剧 $it") }
         val comic=(1..25).map { show("c$it", "漫剧 $it") }
-        val library=CatalogueIndex(real + comic, List(40) { ContentType.SHORT } + List(25) { ContentType.COMIC })
+        val library=CatalogueIndex(real + comic, List(40) { Route.REAL_DRAMA } + List(25) { Route.COMIC_DRAMA })
 
         // 按 18 部一页、页大小整除行宽的方式翻，每一页都得是满的。这段 window 是那段翻页算法的
         // 独立副本：应用里已经不按目录逐页翻了，但 Probe 报「每套目录多少部、能翻几页」还靠它，
@@ -321,21 +353,40 @@ class CatalogueIndexTest {
         assertEquals(2, library.browse(0, 5, ContentType.COMIC).size)
     }
 
-    @Test fun `each entry keeps its catalogue across a disk round trip`() {
-        val entries = listOf(show("11", "真人剧甲"), show("99", "漫剧乙"))
-        val kinds = listOf(ContentType.SHORT, ContentType.COMIC)
-        val decoded = CatalogueIndexDisk.decode(CatalogueIndexDisk.encode(entries, kinds, mapOf(ContentType.SHORT to 3), setOf(ContentType.COMIC), 1_000L), 2_000L)!!
+    @Test fun `each entry keeps its route across a disk round trip`() {
+        val entries = listOf(show("11", "真人剧甲"), show("99", "漫剧乙"), show("77", "AI剧丙"))
+        val routes = listOf(Route.REAL_DRAMA, Route.COMIC_DRAMA, Route.AI_DRAMA)
+        val decoded = CatalogueIndexDisk.decode(CatalogueIndexDisk.encode(entries, routes, mapOf(Route.REAL_DRAMA to 3), setOf(Route.COMIC_DRAMA), 1_000L), 2_000L)!!
         assertEquals(listOf("真人剧甲"), decoded.index.browse(0, 5, ContentType.SHORT).map { it.title })
-        assertEquals(listOf("漫剧乙"), decoded.index.browse(0, 5, ContentType.COMIC).map { it.title })
+        assertEquals(listOf("漫剧乙", "AI剧丙"), decoded.index.browse(0, 5, ContentType.COMIC).map { it.title })
+        assertEquals(Route.AI_DRAMA, decoded.index.routeOf("77"))
     }
 
-    @Test fun `the builder labels every show with the catalogue it came from`() {
+    @Test fun `an index written before AI dramas were folded in keeps its bookmark`() {
+        // 落盘的 id 沿用旧的（short / comic），所以电视上已有的 1600 部索引和断点继续有效：
+        // 走完的两条货架仍然是走完的，只剩 AI 剧那一档要补 34 页，而不是把 102 页重走一遍。
+        val legacy = """{"savedAt":1000,"count":2,"kinds":["short","comic"],
+            "cursor":{"short":34,"comic":34},"done":["short","comic"],
+            "items":[{"i":"1","t":"真人剧甲"},{"i":"2","t":"漫剧乙"}]}"""
+        val decoded = CatalogueIndexDisk.decode(legacy, 2_000L)!!
+        assertEquals(mapOf(Route.REAL_DRAMA to 34, Route.COMIC_DRAMA to 34), decoded.cursor)
+        assertEquals(setOf(Route.REAL_DRAMA, Route.COMIC_DRAMA), decoded.done)
+        // 两条走完了，AI 剧还没走，所以这份索引不算建完 —— 但也不该重走已经走完的两条。
+        assertFalse(decoded.complete)
+        assertFalse(decoded.walkedToEnd)
+        // 走完的这两条仍然是漫剧/真人剧，AI 剧那一条留空，等补走。
+        assertEquals(Route.REAL_DRAMA, decoded.index.routeOf("1"))
+        assertEquals(Route.COMIC_DRAMA, decoded.index.routeOf("2"))
+    }
+
+    @Test fun `the builder labels every show with the route it came from`() {
         val walk = CatalogueBuilder(CountingCatalogue().repository()).build()
-        assertEquals(walk.shows.size, walk.types.size)
-        // 两套各 5 页 x 2 部，标签必须和走查时的归属一致。
-        assertEquals(walk.shows.indices.filter { walk.types[it] == ContentType.SHORT }.size, 10)
-        assertEquals(walk.shows.indices.filter { walk.types[it] == ContentType.COMIC }.size, 10)
-        assertEquals(walk.shows.map { it.title.substringBefore(' ').take(4) }, walk.types.map { it.categorySlug.take(4) })
+        assertEquals(walk.shows.size, walk.routes.size)
+        // 三条各 5 页 x 2 部，标签必须和走查时的归属一致。
+        assertEquals(10, walk.shows.indices.count { walk.routes[it] == Route.REAL_DRAMA })
+        assertEquals(10, walk.shows.indices.count { walk.routes[it] == Route.COMIC_DRAMA })
+        assertEquals(10, walk.shows.indices.count { walk.routes[it] == Route.AI_DRAMA })
+        assertEquals(walk.shows.map { it.title.substringBefore(' ').take(4) }, walk.routes.map { it.categorySlug.take(4) })
     }
 
     @Test fun `the builder walks every page, never repeats a show and can be stopped`() {
@@ -345,26 +396,27 @@ class CatalogueIndexTest {
             val slug = request.url.encodedPath.substringAfterLast('/')
             val page = request.url.queryParameter("page")?.toInt() ?: 1
             // Ids must be digits: valid() drops anything else, which would empty the index.
-            val prefix = if (slug.startsWith("comic")) "9" else "1"
+            // Each route needs its own prefix, or the two shelves would collide into one.
+            val prefix = when { slug.startsWith("comic") -> "9"; slug.startsWith("ai") -> "7"; else -> "1" }
             val rows = (1..3).map { i -> """{"series_id":"${prefix}${page}$i","series_name":"$slug p$page n$i"}""" }
             val pages = if (page >= 3) 3 else 9
             """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[${rows.joinToString(",")}],"pagination":{"totalPages":$pages}}}};</script>"""
         }
         val seen = mutableListOf<Int>()
         val walk = CatalogueBuilder(repo).build(onPage = { step -> seen += step.total })
-        // Pages 1-3 per catalogue, 3 shows each; hasMore stops the walk after page three.
-        assertEquals(18, walk.shows.size)
-        assertEquals(listOf(3, 6, 9, 12, 15, 18), seen)
+        // Pages 1-3 per route, 3 shows each; hasMore stops the walk after page three.
+        assertEquals(27, walk.shows.size)
+        assertEquals((3..27 step 3).toList(), seen)
         assertEquals(walk.shows.map { it.id }.distinct().size, walk.shows.size)
         assertTrue(walk.shows.all { it.id.length in 3..4 })
-        assertTrue("两套目录都走到了最后一页", walk.complete)
-        // Page one is requested without a query string, later pages with it, and the two
-        // catalogues take turns rather than one running to the end before the other starts.
-        // Page one is requested without a query string, later pages with it.
+        assertTrue("三条货架都走到了最后一页", walk.complete)
+        // Page one is requested without a query string, later pages with it, and one route is
+        // walked to its end before the next one starts.
         assertEquals("/category/real-drama?null", requested[0])
         assertEquals("/category/real-drama?2", requested[1])
         assertEquals("/category/real-drama?3", requested[2])
         assertEquals("/category/comic-drama?null", requested[3])
+        assertEquals("/category/ai-drama?null", requested[6])
     }
 
     @Test fun `the builder stops on demand and keeps what it already has`() {
@@ -386,12 +438,12 @@ class CatalogueIndexTest {
             val page = request.url.queryParameter("page")?.toInt() ?: 1
             calls.merge("$slug?$page", 1, Int::plus)
             if (slug.startsWith("real") && page == 2 && calls["$slug?$page"]!! < 3) throw IOException("timeout")
-            val prefix = if (slug.startsWith("comic")) "9" else "1"
+            val prefix = when { slug.startsWith("comic") -> "9"; slug.startsWith("ai") -> "7"; else -> "1" }
             """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"${prefix}${page}","series_name":"$slug p$page"}],"pagination":{"totalPages":3}}}};</script>"""
         }
         val walk = CatalogueBuilder(repo, retryPauseMillis = 0).build()
         assertTrue("重试成功就不该留下缺口", walk.gaps.isEmpty())
-        assertEquals(6, walk.shows.size)
+        assertEquals(9, walk.shows.size)
         assertEquals(3, calls["real-drama?2"])
         assertTrue(walk.complete)
     }
@@ -401,25 +453,28 @@ class CatalogueIndexTest {
             val slug = request.url.encodedPath.substringAfterLast('/')
             val page = request.url.queryParameter("page")?.toInt() ?: 1
             if (slug.startsWith("real") && page == 2) throw IOException("boom")
-            val prefix = if (slug.startsWith("comic")) "9" else "1"
+            val prefix = when { slug.startsWith("comic") -> "9"; slug.startsWith("ai") -> "7"; else -> "1" }
             """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"${prefix}${page}","series_name":"$slug p$page"}],"pagination":{"totalPages":3}}}};</script>"""
         }
         val walk = CatalogueBuilder(repo, retryPauseMillis = 0).build()
-        // real-drama keeps pages 1 and 3, comic-drama keeps all three: the gap costs one page.
-        assertEquals(listOf("comic-drama p1", "comic-drama p2", "comic-drama p3", "real-drama p1", "real-drama p3"), walk.shows.map { it.title }.sorted())
+        // real-drama keeps pages 1 and 3, the other two keep all three: the gap costs one page.
+        assertEquals(
+            listOf("ai-drama p1", "ai-drama p2", "ai-drama p3", "comic-drama p1", "comic-drama p2", "comic-drama p3", "real-drama p1", "real-drama p3"),
+            walk.shows.map { it.title }.sorted()
+        )
         assertEquals(1, walk.gaps.size)
         assertTrue("缺口要指名道姓", walk.gaps.single().contains("real-drama 第 2 页"))
         assertFalse(walk.complete)
         // 断点越过坏页，下一趟不会在同一页上死循环。
-        assertEquals(3, walk.cursor[ContentType.SHORT])
+        assertEquals(3, walk.cursor[Route.REAL_DRAMA])
     }
 
-    @Test fun `an offline box gives up on the pass instead of hammering 68 pages three times over`() {
+    @Test fun `an offline box gives up on the pass instead of hammering 102 pages three times over`() {
         var requests = 0
         val repo = repository { _ -> requests++; throw IOException("no network") }
         val walk = CatalogueBuilder(repo, retryPauseMillis = 0).build()
         // Three tries on the first page, three on the second, and the pass is abandoned rather
-        // than worked through all 68 pages x 3.
+        // than worked through all 102 pages x 3.
         assertEquals(CatalogueBuilder.MAX_CONSECUTIVE_FAILURES * 3, requests)
         assertEquals("断网只该留一条说明，不是三条一模一样的", 1, walk.gaps.size)
         assertTrue(walk.gaps.single().contains("提前结束"))
@@ -427,7 +482,7 @@ class CatalogueIndexTest {
     }
 
     @Test fun `a resumed walk requests only the pages it has not seen`() {
-        // The whole point of the bookmark: on a slow box the 68 requests outlast one session, so a
+        // The whole point of the bookmark: on a slow box the 102 requests outlast one session, so a
         // walk that restarts at page one can never finish and is never worth storing.
         val site = CountingCatalogue()
         val repo = site.repository()
@@ -436,18 +491,18 @@ class CatalogueIndexTest {
         assertFalse("被中断的走查不算完成", first.complete)
         assertEquals(6, pages)
 
-        val json = CatalogueIndexDisk.encode(first.shows, first.types, first.cursor, first.done, 1_000L)
+        val json = CatalogueIndexDisk.encode(first.shows, first.routes, first.cursor, first.done, 1_000L)
         val saved = CatalogueIndexDisk.decode(json, 2_000L)!!
         val beforeResume = site.requests
         val again = CatalogueBuilder(repo).build(resume = saved.cursor, done = saved.done)
 
         assertTrue("续建之后应该走到头", again.complete)
         assertTrue("续建不该重复抓已经拿到的页", again.shows.all { it.id !in first.shows.map { show -> show.id } })
-        // 第一趟走到 real-drama 第 5 页（收尾）+ comic-drama 第 1 页；续建只补 comic 剩下 4 页，
-        // 也就是 4 个请求、8 部。5 页 x 2 部 x 2 套目录 = 20 部全齐。
-        assertEquals(4, site.requests - beforeResume)
-        assertEquals(8, again.shows.size)
-        assertEquals(20, (first.shows + again.shows).map { it.id }.distinct().size)
+        // 第一趟走到 real-drama 第 5 页（收尾）+ comic-drama 第 1 页；续建只补 comic-drama 剩下
+        // 4 页，再把 AI 剧那 5 页走完，也就是 9 个请求、18 部。5 页 x 2 部 x 3 条货架 = 30 部全齐。
+        assertEquals(9, site.requests - beforeResume)
+        assertEquals(18, again.shows.size)
+        assertEquals(30, (first.shows + again.shows).map { it.id }.distinct().size)
     }
 
     @Test fun `a completed catalogue is never requested again`() {
@@ -457,11 +512,11 @@ class CatalogueIndexTest {
         assertTrue(first.complete)
         val requestsAfterFirst = site.requests
         val again = CatalogueBuilder(repo).build(resume = first.cursor, done = first.done)
-        assertEquals("两套目录都完成了，第二趟不该发一个请求", requestsAfterFirst, site.requests)
+        assertEquals("三条货架都完成了，第二趟不该发一个请求", requestsAfterFirst, site.requests)
         assertEquals(0, again.shows.size)
     }
 
-    /** A five-page-per-catalogue site whose ids identify the catalogue and page they came from. */
+    /** A five-page-per-route site whose ids identify the route and page they came from. */
     private class CountingCatalogue {
         var requests = 0
         val http = OkHttpClient.Builder().addInterceptor { chain ->
@@ -469,7 +524,7 @@ class CatalogueIndexTest {
             val request = chain.request()
             val slug = request.url.encodedPath.substringAfterLast('/')
             val page = request.url.queryParameter("page")?.toInt() ?: 1
-            val prefix = if (slug.startsWith("comic")) "9" else "1"
+            val prefix = when { slug.startsWith("comic") -> "9"; slug.startsWith("ai") -> "7"; else -> "1" }
             val rows = (1..2).map { i -> """{"series_id":"${prefix}${page}$i","series_name":"$slug p$page n$i"}""" }
             val body = """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[${rows.joinToString(",")}],"pagination":{"totalPages":5}}}};</script>"""
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK").body(body.toResponseBody()).build()
