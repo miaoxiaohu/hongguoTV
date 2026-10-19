@@ -18,7 +18,13 @@ object SearchHistory {
         (0 until rows.length()).mapNotNull { i ->
             val row=rows.optJSONObject(i) ?: return@mapNotNull null
             val query=row.optString("query").trim()
-            val type=ContentType.entries.firstOrNull { it.storedValue==row.optString("type") }
+            // 「ai」是 0.9.14 那个 AI 档的落盘值。那一档的剧现在都是漫剧，所以它落到漫剧 ——
+            // 而不是让这些搜索记录悄悄消失。备份恢复那边也是这么认的（见 ContentType.fromStored），
+            // 同一个值两处认法不一样，症状是升级之后搜索历史少了几条，却没有任何提示。
+            // 认不出来的值仍然丢掉：那不是旧档，是坏数据。
+            val stored=row.optString("type")
+            val type=ContentType.entries.firstOrNull { it.storedValue==stored }
+                ?: if(stored in ContentType.RETIRED_STORED_VALUES) ContentType.COMIC else null
             if(query.isEmpty() || query.length>80 || type==null) null else RecentSearch(query,type)
         }.distinct().take(20)
     }.getOrDefault(emptyList())

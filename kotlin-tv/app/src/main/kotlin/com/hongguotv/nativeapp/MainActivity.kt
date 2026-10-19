@@ -384,13 +384,23 @@ class MainActivity: Activity() {
         // 看结果再想办法回去改词。返回详情页时不走这里，焦点仍旧回到上次看的那张卡。
         showCatalog(load=(fetchesRemote(next) && catalog.isEmpty() && (next!=TAB_SEARCH || query.isNotBlank())),focusInput=(next==TAB_SEARCH))
     }
+    /**
+     * 换档之后，那几页缓存的页码和列表就都是另一套片库的了，全部丢掉。
+     *
+     * 首页、搜索页和排行榜页都跟着档走 —— 榜单是站方按货架分的榜，所以三页都要清。
+     * 这段逻辑原来在「按分类按钮」和「点搜索历史」两处各写了一份，其中一份只清了两页：
+     * 症状是排行榜还停着上一个档的榜，而页面上看不出任何异常（榜不会自己标出是哪一档）。
+     * 合成一处就不会再漂。
+     */
+    private fun dropShelfCachedPages() {
+        listOf(TAB_HOME,TAB_SEARCH,TAB_RANKING).forEach { tabState.remove(it); tabFocus.remove(it) }
+    }
     private fun switchContentType(type: ContentType) {
         if(library.contentType==type) return
         leaveCollection()
         (searchInput as? EditText)?.let { query=it.text.toString().trim() }
         library.contentType=type
-        // 分类一变，首页、搜索和排行榜三页缓存的页码和列表就都是另一套片库的了，全部丢掉。
-        listOf(TAB_HOME,TAB_SEARCH,TAB_RANKING).forEach { tabState.remove(it); tabFocus.remove(it) }
+        dropShelfCachedPages()
         releaseCatalogViews()
         page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""; homePosition=null
         // query 可能还是上一次搜索留下的。非空不等于现在在搜索页 —— 在首页上切分类，
@@ -1041,7 +1051,7 @@ class MainActivity: Activity() {
     private fun runSearch(value: String,type: ContentType=library.contentType) {
         val clean=value.trim(); if(clean.isEmpty() || clean.length>80) return
         (searchInput as? EditText)?.let { (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(it.windowToken,0) }
-        if(library.contentType!=type) { library.contentType=type; listOf(TAB_HOME,TAB_SEARCH).forEach { tabState.remove(it); tabFocus.remove(it) } }
+        if(library.contentType!=type) { library.contentType=type; dropShelfCachedPages() }
         library.rememberSearch(clean,type); query=clean
         // 切到搜索页之前先把当前 tab 的 page/catalog/catalogFocus 存下来，
         // 否则在详情页或其他 tab 触发的搜索会让 switchTab 回来时回到第 1 页。

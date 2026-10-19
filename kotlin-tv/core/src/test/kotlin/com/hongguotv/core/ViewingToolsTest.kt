@@ -26,4 +26,11 @@ class ViewingToolsTest {
         val rows=SearchHistory.decode("""[null,{"query":"","type":"comic"},{"query":"a","type":"unknown"},{"query":"a","type":"comic"},{"query":"a","type":"comic"}]""")
         assertEquals(listOf(RecentSearch("a",ContentType.COMIC)),rows)
     }
+    @Test fun `a search made under the retired AI shelf comes back as 漫剧`() {
+        // 「ai」是 0.9.14 那个 AI 档的落盘值。那一档的剧现在都是漫剧，所以这些搜索记录落到漫剧，
+        // 而不是无声无息地少掉几条。备份恢复那边也是这么认的 —— 同一个值两处认法不一样，
+        // 症状是升级之后搜索历史短了一截，却没有任何提示。
+        val rows=SearchHistory.decode("""[{"query":"都市","type":"ai"}]""")
+        assertEquals(listOf(RecentSearch("都市",ContentType.COMIC)),rows)
+    }
 }
