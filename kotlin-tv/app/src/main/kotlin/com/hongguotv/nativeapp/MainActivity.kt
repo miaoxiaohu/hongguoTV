@@ -828,16 +828,24 @@ class MainActivity: Activity() {
             rows+=built
         }
         val paging=row(); paging.gravity=Gravity.CENTER
-        var prev: View?=null; var next: View?=null
+        var prev: View?=null; var next: View?=null; var pageJump: View?=null
         if(tab<=TAB_RANKING || localCatalog()) {
             prev=addButton(paging,"上一页") { if(page>1) turnPage(page-1) }.apply { isEnabled=page>1; isFocusable=page>1; alpha=if(page>1) 1f else .4f }
-            paging.addView(text(pagingLabel(),14f,muted).apply { gravity=Gravity.CENTER },lp(dp(
+            // 页码本身是个按钮：翻到第几页不该一页一页按。
+            val jump=button(pagingLabel()) { }.apply { gravity=Gravity.CENTER; textSize=14f; setTextColor(muted) }
+            jump.setOnClickListener { showPagePicker(jump) }
+            pageJump=jump
+            paging.addView(jump,lp(dp(
                 when {
                     tab==TAB_RANKING -> 135
                     tab==TAB_SEARCH && searchTotal!=null -> 210
                     else -> 95
                 }),dp(44)))
             next=addButton(paging,"下一页") { if(hasMore) turnPage(page+1) }.apply { isEnabled=hasMore; isFocusable=hasMore; alpha=if(hasMore) 1f else .4f }
+            // 翻页这一行自己排成一条：上一页 → 页码 → 下一页。
+            prev?.let { it.nextFocusRightId=jump.id; jump.nextFocusLeftId=it.id }
+            jump.nextFocusRightId=next?.id ?: jump.id
+            next?.let { it.nextFocusLeftId=jump.id }
             if(collection=="hot" && !hasMore && collectionReturn?.hasMore==true) {
                 next=addButton(paging,"下一批热门") { collection=null; collectionReturn=null; page=2; catalogFocus=""; showCatalog(true) }
             }
@@ -853,7 +861,8 @@ class MainActivity: Activity() {
                 // 第一排海报的上方，在榜单页就是「刷新榜单」那一行：它就贴在海报上面，
                 // 上下键该是对称的，不该从海报一下跳到导航栏去。
                 card.nextFocusUpId=if(above==null) (rankRefresh?.id ?: searchInput?.id ?: collectionBack?.id ?: typeButtons[library.contentType]?.id ?: favoriteCheck?.id ?: historyManage?.id ?: resumeCards.getOrNull(minOf(columnIndex,2))?.id ?: nav[tab].id) else above[columnIndex.coerceAtMost(above.lastIndex)].id
-                card.nextFocusDownId=if(below==null) (next?.takeIf { it.isFocusable }?.id ?: prev?.takeIf { it.isFocusable }?.id ?: card.id) else below[columnIndex.coerceAtMost(below.lastIndex)].id
+                // 最后一排往下落到翻页那一行：上一页（第一页时不可选）→ 页码 → 下一页。
+                card.nextFocusDownId=if(below==null) (prev?.takeIf { it.isFocusable }?.id ?: pageJump?.id ?: next?.takeIf { it.isFocusable }?.id ?: card.id) else below[columnIndex.coerceAtMost(below.lastIndex)].id
             }
         }
         nav.forEach { it.nextFocusDownId=typeButtons[library.contentType]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
@@ -1130,13 +1139,27 @@ class MainActivity: Activity() {
 
     /** 「第 X / Y 页 · 共 N 部」；只有搜索知道命中总数，其它页维持原来的写法。 */
     private fun pagingLabel(): String = when {
-        localCatalog() -> "第 $page / ${maxOf(1,(catalog.size+pageSize-1)/pageSize)} 页"
-        tab==TAB_RANKING && ranking!=null -> "第 $page / ${ranking!!.totalPages} 页"
-        tab==TAB_SEARCH && (searchTotal ?: 0)>0 -> {
-            val pages=maxOf(1,((searchTotal ?: 0)+pageSize-1)/pageSize)
-            "第 $page / $pages 页 · 共 $searchTotal 部"
-        }
+        localCatalog() -> "第 $page / ${pageCount()} 页"
+        tab==TAB_RANKING && ranking!=null -> "第 $page / ${pageCount()} 页"
+        tab==TAB_SEARCH && (searchTotal ?: 0)>0 -> "第 $page / ${pageCount()} 页 · 共 $searchTotal 部"
         else -> "第 $page 页"
+    }
+    /** 这一页一共有几页。 */
+    private fun pageCount(): Int = when {
+        localCatalog() -> maxOf(1,(catalog.size+pageSize-1)/pageSize)
+        tab==TAB_RANKING && ranking!=null -> ranking!!.totalPages
+        tab==TAB_SEARCH && (searchTotal ?: 0)>0 -> maxOf(1,((searchTotal ?: 0)+pageSize-1)/pageSize)
+        else -> 1
+    }
+    /**
+     * 跳到第几页。
+     *
+     * 页数一多，一页一页按就是折磨，而页码就写在屏幕上 —— 它本来就该是能点的。
+     */
+    private fun showPagePicker(anchor: View?) {
+        val total=pageCount()
+        if(total<=1) { tvTools.info("翻页","只有一页，没有可跳的。",anchor); return }
+        tvTools.choose("跳到第几页",(1..total).map { "第 $it 页" },anchor,{ index -> turnPage(index+1) })
     }
     private fun runSearch(value: String,type: ContentType=library.contentType) {
         val clean=value.trim(); if(clean.isEmpty() || clean.length>80) return
