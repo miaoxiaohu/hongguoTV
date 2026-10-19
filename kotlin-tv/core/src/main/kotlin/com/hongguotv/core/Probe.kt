@@ -59,6 +59,38 @@ fun main(args: Array<String>) {
         return
     }
 
+    // Reproduces one keyword through the exact code path the TV app uses, with and without the
+    // local index. A user report of 「搜不到某剧」 is only decidable by running the real search():
+    // the site answers every keyword with ten rows, so "no results" and "the wrong ten rows" look
+    // identical on screen.
+    //
+    // --search=<keyword> prints, for the server alone and for server+index:
+    //   - what the local index holds for the word (this is the part that can silently miss a show
+    //     that the site itself lists in its search results but not in any browsable catalogue)
+    //   - whether the server's rows mention the word, and where the exact match lands in the page
+    if(args.any { it.startsWith("--search=") }) {
+        val keyword=args.first { it.startsWith("--search=") }.removePrefix("--search=")
+        try {
+            val server=repository.search(keyword)
+            println("关键词：$keyword")
+            println("仅服务端：${server.items.size} 条，matched=${server.matchedCount}，total=${server.totalHits}")
+            server.items.forEachIndexed { i,row -> println("  #${i+1} ${row.id} ${row.title}") }
+
+            val walk=CatalogueBuilder(repository).build()
+            val index=CatalogueIndex(walk.shows)
+            val (local,fuzzy)=index.searchAllowingTypo(keyword)
+            println("全库索引：${index.size} 部，本地命中=${local.size}（fuzzy=$fuzzy），目录页里有吗=${local.any { it.title.contains(keyword) }}")
+            val merged=repository.search(keyword,1,ContentType.SHORT,index)
+            println("合并后第1页：${merged.items.size} 条，hasMore=${merged.hasMore}，matched=${merged.matchedCount}，total=${merged.totalHits}")
+            merged.items.forEachIndexed { i,row -> println("  #${i+1} ${row.id} ${row.title}") }
+            val exact=merged.items.indexOfFirst { it.title.contains(keyword) }
+            println(if(exact>=0) "精确命中在第 ${exact+1} 条" else "精确命中不在第 1 页里")
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
+
     // End-to-end proof for the local catalogue index: walk everything, then search it. Prints the
     // size of the index on disk too, because the ceiling that matters on a low-end box is whether
     // the JSON still fits the preference file and the 7-day cache.
