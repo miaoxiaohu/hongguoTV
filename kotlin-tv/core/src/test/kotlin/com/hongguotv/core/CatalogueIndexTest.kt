@@ -242,15 +242,48 @@ class CatalogueIndexTest {
         assertEquals(emptySet<Route>(), decoded.done)
     }
 
-    @Test fun `a stale, corrupt or oversized index is dropped rather than surfaced`() {
+    @Test fun `a corrupt index is dropped, but an old one still reads and says it is old`() {
         val fresh = CatalogueIndexDisk.encode(listOf(show("1", "雾锁情迷")), 1_000L)
         val week = 7 * 24 * 60 * 60 * 1000L
         assertNotNull(CatalogueIndexDisk.decode(fresh, 1_000L + week - 1))
-        assertNull("过期索引不该被用", CatalogueIndexDisk.decode(fresh, 1_000L + week + 1))
+        // 过期不等于作废：它还是这个应用手上最好的一份答案。把它扔掉，正是「重建看得见」的
+        // 原因 —— 数字掉到 0，搜索退化成站方那十条，再花几分钟爬回来。
+        val old = CatalogueIndexDisk.decode(fresh, 1_000L + week + 1)
+        assertNotNull("过期索引不该被丢掉", old)
+        assertTrue("过期索引该被标记为该刷新了", old!!.isStale(1_000L + week + 1))
+        assertFalse("刚写的索引不该算过期", CatalogueIndexDisk.decode(fresh, 1_000L + week - 1)!!.isStale(1_000L + week - 1))
         assertNull("损坏数据不该抛异常", CatalogueIndexDisk.decode("{not json", 1_000L))
         assertNull(CatalogueIndexDisk.decode("""{"savedAt":1000,"count":0,"items":[]}""", 1_000L))
         // A clock that went backwards must not read as infinitely fresh.
         assertNull(CatalogueIndexDisk.decode(fresh, 999L))
+    }
+
+    @Test fun `a rewalk replaces the shows it saw again instead of doubling them`() {
+        // 走查器每趟都不记得上一趟，所以重走一遍会把同样的剧再返回一次 —— 这是必须的：
+        // 补标签那一趟要靠它把没标签的那份换掉。追加的话 2400 部会变成 4800 条，屏幕上的
+        // 数字跟着翻倍，存下去的行数又超过读的时候允许的上限，下一次启动索引被当成损坏扔掉。
+        val first = listOf(show("1", "真人剧甲"), show("2", "漫剧乙"))
+        val held = CatalogueEntries(first, listOf(Route.REAL_DRAMA, Route.COMIC_DRAMA))
+        held.add(first, Route.REAL_DRAMA)
+        assertEquals("同一部剧不该被记两遍", 2, held.size)
+        assertEquals(listOf("真人剧甲", "漫剧乙"), held.entries.map { it.title })
+        // 补上的标签要能覆盖原来那份没有的。
+        assertEquals(Route.REAL_DRAMA, held.routes[0])
+        assertEquals(Route.REAL_DRAMA, held.routes[1])
+    }
+
+    @Test fun `the count never dips while the index is being refreshed`() {
+        // 重建时旧的一份照常用着，数字只增不减：用户看不到「从 2400 掉到 0 再爬回来」。
+        val held = CatalogueEntries((1..2400).map { show(it.toString(), "第 $it 部") }, List(2400) { Route.REAL_DRAMA })
+        assertEquals(2400, held.size)
+        // 重走一遍：同样的两千四百部，外加站上新的一部。
+        held.add((1..2400).map { show(it.toString(), "第 $it 部") } + show("2401", "新剧"), Route.REAL_DRAMA)
+        assertEquals(2401, held.size)
+        assertEquals("第 1 部", held.entries.first().title)
+        assertEquals("新剧", held.entries.last().title)
+        // 而且存下去要还能读回来：行数超上限的索引读的时候会被判废，整个扔掉。
+        val json = CatalogueIndexDisk.encode(held.entries, held.routes, emptyMap(), emptySet(), 1_000L)
+        assertNotNull("合并后的索引必须还能读回来", CatalogueIndexDisk.decode(json, 1_000L))
     }
 
     @Test fun `browse keeps the two shelves apart so each filter starts at its own front page`() {

@@ -127,6 +127,14 @@ class Library(context: Context) {
     fun isCatalogueComplete() = catalogue?.complete == true
     /** Whether every indexed show records the catalogue it came from; until then 分开搜 cannot split. */
     fun isCatalogueLabelled() = catalogue?.labelled == true
+    /**
+     * True when the index is old enough that a rebuild is due.
+     *
+     * Old is not the same as broken. The index keeps serving - it is still thousands of shows the
+     * site has listed - and the rebuild runs behind it, so the number on screen never drops to
+     * zero on the way to a fresher number.
+     */
+    fun isCatalogueStale() = catalogue?.isStale(System.currentTimeMillis()) == true
 
     /**
      * Walks both catalogues in the background and publishes the result as it arrives.
@@ -150,14 +158,22 @@ class Library(context: Context) {
         // 标签只有抓的时候才知道，而游标记着「都到头了」，接着走一步都不会走。
         // 已收录的剧仍然留着 —— 丢掉两千多部重新抓，正是这个索引当初建不成的原因。
         val relabel = carried != null && carried.walkedToEnd && !carried.labelled
+        // 过期不等于作废。旧的索引照样能用，重建在它背后跑：数字不会掉到 0 再爬回来，
+        // 搜索也不会退化成站方那十条。重建出来的会跟旧的一路按 id 合并，数字只增不减。
+        val stale = carried != null && carried.isStale(System.currentTimeMillis())
         // Touched only on the build thread; the main thread ever sees the immutable snapshots.
-        val collected = (carried?.entries ?: emptyList()).toMutableList()
-        val kinds = (carried?.routes ?: emptyList()).toMutableList()
+        //
+        // 按 id 合并，不是追加：走查器每趟都不记得上一趟，所以重走一遍会把同样的两千多部再返回
+        // 一次。追加的话 2400 部会变成 4800 条 —— 屏幕上的数字跟着翻倍，存下去的行数又超过
+        // 读的时候允许的上限，下一次启动索引被当成损坏的文件整个扔掉。合并之后，重走只补上
+        // 站上新剧和补齐标签，数字始终是这部剧的个数。
+        val collected = CatalogueEntries(carried?.entries ?: emptyList(), carried?.routes ?: emptyList())
         // Forcing forgets the bookmark and rewalks from page one. The shows already held are kept
-        // and deduped by id, so the second pass adds nothing and only repairs the pages that failed
-        // the first time - which is what "retry the walk" has to mean once a pass has finished.
-        val resume = if (force || relabel) emptyMap() else carried?.cursor ?: emptyMap()
-        val done = if (force || relabel) emptySet() else carried?.done ?: emptySet()
+        // and merged by id, so the second pass only adds what is new and repairs the pages that
+        // failed the first time - which is what "retry the walk" has to mean once a pass has
+        // finished. A stale index is rewalked the same way, and keeps serving throughout.
+        val resume = if (force || relabel || stale) emptyMap() else carried?.cursor ?: emptyMap()
+        val done = if (force || relabel || stale) emptySet() else carried?.done ?: emptySet()
         var checkpointed = collected.size
         catalogueLoader.execute {
             val walk = CatalogueBuilder(repository).build(
@@ -165,14 +181,13 @@ class Library(context: Context) {
                 done = done,
                 isCancelled = { closed },
                 onPage = { step ->
-                    collected += step.fresh
-                    repeat(step.fresh.size) { kinds += step.route }
-                    val snapshot = collected.toList()
-                    val snapshotKinds = kinds.toList()
+                    collected.add(step.fresh, step.route)
+                    val snapshot = collected.entries
+                    val snapshotKinds = collected.routes
                     val total = snapshot.size
                     // WalkStep.total counts this pass only; a resumed build carries a thousand shows
                     // it never re-fetched, and the number the user reads has to include them.
-                    main.post { if (!closed) { catalogue = CatalogueSnapshot(snapshot, snapshotKinds, step.cursor, step.done); onProgress(total) } }
+                    main.post { if (!closed) { catalogue = CatalogueSnapshot(snapshot, snapshotKinds, step.cursor, step.done, System.currentTimeMillis()); onProgress(total) } }
                     // Checkpointing on every page would re-encode the whole library 102 times on a
                     // box that can barely parse one of them.
                     if (total - checkpointed >= CHECKPOINT_EVERY) {
@@ -181,7 +196,7 @@ class Library(context: Context) {
                     }
                 }
             )
-            checkpoint(collected, kinds, walk.cursor, walk.done)
+            checkpoint(collected.entries, collected.routes, walk.cursor, walk.done)
             main.post { if (!closed) catalogueBuilding = false }
             Log.i(
                 "HongguoTV",
@@ -198,7 +213,7 @@ class Library(context: Context) {
         val now = System.currentTimeMillis()
         catalogueWrites.submit(mapOf("index" to { CatalogueIndexDisk.encode(snapshot, snapshotKinds, cursor, done, now) }))
     }
-    /** Drops a stale index so the next build starts from a clean file rather than a merged one. */
+    /** Throws the index away so the next build starts from an empty file rather than a merged one. */
     fun clearCatalogue() { catalogue = null; catalogueWrites.submit(mapOf("index" to { null })) }
     private fun persist(vararg keys: String) {
         val state = state()

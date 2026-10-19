@@ -220,18 +220,30 @@ class CatalogueIndex(entries: List<Series>, routes: List<Route?> = emptyList()) 
  * @property entries the shows themselves, so a build can append to them without refetching.
  * @property cursor route -> last page already folded in.
  * @property done routes that reached their final page.
+ * @property savedAt when this snapshot was written, so its age can be judged.
  */
 data class CatalogueSnapshot(
     val entries: List<Series>,
     /** Which route each entry in [entries] came from, parallel list; null where unrecorded. */
     val routes: List<Route?>,
     val cursor: Map<Route, Int>,
-    val done: Set<Route>
+    val done: Set<Route>,
+    val savedAt: Long = 0L
 ) {
     val index: CatalogueIndex by lazy { CatalogueIndex(entries, routes) }
     val size get() = entries.size
     /** True when the walk reached the end of every route. */
     val walkedToEnd get() = done.size == Route.entries.size
+    /**
+     * True when this index is old enough to be worth rebuilding.
+     *
+     * Old does not mean useless. It means the site may have listed shows this index has never
+     * heard of, so a rebuild is due - not that the index should be thrown away. Throwing it away
+     * is what makes a rebuild visible: the count drops to zero and search falls back to the ten
+     * rows the site renders until the walk catches up. A stale index keeps serving, and the
+     * rebuild runs behind it.
+     */
+    fun isStale(now: Long) = now - savedAt > CatalogueIndexDisk.MAX_AGE
     /**
      * True when every show records the route it came from.
      *
@@ -264,7 +276,13 @@ data class CatalogueSnapshot(
  * cursor, which costs one extra full walk and then writes the new shape.
  */
 object CatalogueIndexDisk {
-    private const val MAX_AGE = 7 * 24 * 60 * 60 * 1000L
+    /**
+     * How long an index is served before a rebuild is due.
+     *
+     * A week is a guess, and the point of the number is not the exact value: the site lists shows
+     * that come and go, so an index that never refreshes stops finding the new ones.
+     */
+    const val MAX_AGE = 7 * 24 * 60 * 60 * 1000L
     private const val MAX_CHARS = 1_500_000
 
     fun encode(entries: List<Series>, now: Long): String =
@@ -291,11 +309,21 @@ object CatalogueIndexDisk {
         }))
         .toString()
 
-    /** Returns null for anything unreadable, oversized, expired or empty - a stale index is not worth failing over. */
+    /**
+     * Returns null for anything unreadable, oversized or empty - a corrupt index is not worth
+     * failing over.
+     *
+     * An expired index is *not* dropped. It is still the best answer the app has, and throwing it
+     * away is precisely what makes a rebuild visible: the count drops to zero and search falls
+     * back to the ten rows the site renders until the walk catches up. So the age is carried in
+     * the snapshot instead, and [CatalogueSnapshot.isStale] says when a rebuild is due.
+     */
     fun decode(value: String, now: Long): CatalogueSnapshot? = runCatching {
         require(value.length <= MAX_CHARS)
         val o = JSONObject(value)
-        require(now - o.getLong("savedAt") in 0..MAX_AGE)
+        val savedAt = o.getLong("savedAt")
+        // A clock that went backwards must not read as infinitely fresh.
+        require(now >= savedAt)
         val rows = o.getJSONArray("items")
         require(rows.length() in 1..4000)
         require(rows.length() == o.getInt("count"))
@@ -334,6 +362,6 @@ object CatalogueIndexDisk {
                 Route.fromStored(stored.optString(position))
             }
         }.orEmpty().toSet()
-        CatalogueSnapshot(entries, routes, cursor, done)
+        CatalogueSnapshot(entries, routes, cursor, done, savedAt)
     }.getOrNull()
 }

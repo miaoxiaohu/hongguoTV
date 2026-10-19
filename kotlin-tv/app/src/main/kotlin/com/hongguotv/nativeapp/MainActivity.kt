@@ -274,7 +274,11 @@ class MainActivity: Activity() {
     private fun startCatalogueBuild(force: Boolean=false) {
         // A finished index is already on disk. Re-walking 102 serial pages on every launch would buy
         // nothing and keep hammering an endpoint that is already sensitive to call rate.
-        if(library.isBuildingCatalogue() || (!force && library.isCatalogueComplete())) return
+        //
+        // 一份建完又放了一周的索引该重建了：站方不断上新，旧索引搜不到没见过的剧。
+        // 但过期不等于作废 —— 重建期间旧的那份照常用着，数字不会掉到 0 再爬回来。
+        if(library.isBuildingCatalogue()) return
+        if(!force && library.isCatalogueComplete() && !library.isCatalogueStale()) return
         library.buildCatalogue(repository,force) { total ->
             // The walk reports ~68 times. Repainting on every one would rebuild the whole grid on
             // a low-end box, so the notice steps in every 400 shows instead.
@@ -516,10 +520,16 @@ class MainActivity: Activity() {
             // The walk is normally invisible and automatic, so this only appears once it has fallen
             // behind. Without a lever here the only thing a user can do is restart the app, which is
             // exactly what they did, repeatedly, with no way to tell anything from it.
-            if(!library.isBuildingCatalogue() && !library.isCatalogueComplete()) {
+            if(!library.isBuildingCatalogue() && (!library.isCatalogueComplete() || library.isCatalogueStale())) {
                 lateinit var rebuild: TextView
-                rebuild=addButton(searchRow,"续建索引") {
-                    tvTools.info("续建全库索引","将从上次中断的页面继续抓取，途中可以照常使用应用。",rebuild)
+                // 索引没建完是「接着上次」，建完但过期是「重新抓一遍」—— 两件事的代价差很多，
+                // 说清楚用户才知道按下去会发生什么。
+                val unfinished=!library.isCatalogueComplete()
+                rebuild=addButton(searchRow,if(unfinished) "续建索引" else "更新索引") {
+                    tvTools.info(if(unfinished) "续建全库索引" else "更新全库索引",
+                        if(unfinished) "将从上次中断的页面继续抓取，途中可以照常使用应用。"
+                        else "将重新抓一遍全部目录，补上站上新剧。途中可以照常使用应用，搜索照旧可用。",
+                        rebuild)
                     startCatalogueBuild(true)
                 }; rebuild.nextFocusUpId=input.nextFocusUpId
                 searchActions.add(rebuild)
@@ -653,6 +663,9 @@ class MainActivity: Activity() {
             val building=library.isBuildingCatalogue()
             val complete=library.isCatalogueComplete()
             val status=when {
+                // 索引里已经有东西的时候，重建是在更新它，不是在从零建：数字不会掉到 0 再爬回来
+                // —— 这正是「无感」要保住的东西。空的那次才叫「建立」。
+                building && indexed>0 -> "正在更新全库索引 · 已收录 $indexed 部"
                 building -> "正在建立全库索引 · 已收录 $indexed 部"
                 complete -> "已搜索全库 $indexed 部"
                 // 走完了但还没记下每部属于哪套目录：分类按钮此刻按下去是不分档的。与其让用户以为
