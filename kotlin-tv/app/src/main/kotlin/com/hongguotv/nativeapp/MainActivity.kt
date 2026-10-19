@@ -86,6 +86,13 @@ class MainActivity: Activity() {
      * 余 2，于是每一页都是「三整行加两张」，右边的空档比偶尔出现的还频繁。18 = 6 x 3，三行整。
      */
     private val pageSize=GRID_COLUMNS*3
+    /**
+     * 榜单一页 36 部：六行六列。
+     *
+     * 榜单是一屏一屏地看的，比浏览列表的三行多 —— 之前一页 40 张（站方一页给多少就画多少），
+     * 18 张显得太少。而且 36 是 6 的整数倍，网格不会收尾在半排上。
+     */
+    private val rankingPageSize=GRID_COLUMNS*6
     private var catalogScroll: ScrollView?=null
     private var catalogBody: LinearLayout?=null
     private var homePosition: HomeScreen.Position?=null
@@ -554,18 +561,23 @@ class MainActivity: Activity() {
                     .apply { isSelected=library.contentType==type; nextFocusUpId=nav[tab].id }
             }
             placeCatalogueRow(top,container,types)
-            val heading=row().apply { setPadding(0,dp(8),0,dp(6)) }
-            heading.addView(text("${library.contentType.label}热播榜",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
-            rankRefresh=addButton(heading,"刷新榜单") {
+            // 「XX热播榜」那行大字去掉了：这一页已经用分类按钮说明了是哪一档，标题只是占地方。
+            // 刷新按钮和站方的更新说明并排一行，省下的是一整行。
+            val info=row().apply { setPadding(0,dp(4),0,dp(6)) }
+            val source="来源：红果${library.contentType.label}热播榜"
+            rankSubtitle=text(if(load) "正在读取最新榜单…" else ranking?.updatedText?.ifBlank { source } ?: source,13f,muted)
+                .apply { layoutParams=lp(0,dp(30)).apply { weight=1f } }
+            info.addView(rankSubtitle)
+            rankRefresh=addButton(info,"刷新榜单") {
                 // 整份榜单是取回来才排得出一个顺序的，所以它在内存里留着；刷新就是把它丢掉重取。
                 repository.clearRankingCache()
                 page=1; catalogFocus=""; showCatalog(true)
-            }.apply { nextFocusUpId=nav[tab].id }
-            container.addView(heading)
-            val source="来源：红果${library.contentType.label}热播榜"
-            rankSubtitle=text(if(load) "正在读取最新榜单…" else ranking?.updatedText?.ifBlank { source } ?: source,13f,muted)
-                .apply { setPadding(0,0,0,dp(8)) }
-            container.addView(rankSubtitle)
+            }.apply {
+                nextFocusUpId=typeButtons[library.contentType]?.id ?: nav[tab].id
+                // 跟导航栏里那排分类按钮一样的大小：它是个次要动作，不该占一整行。
+                textSize=12f; minHeight=dp(34); setPadding(dp(12),dp(7),dp(12),dp(7))
+            }
+            container.addView(info)
             nav.forEach { it.nextFocusDownId=typeButtons[library.contentType]?.id ?: rankRefresh!!.id }
         } else if(tab>TAB_RANKING) {
             val heading=row().apply { setPadding(0,dp(14),0,dp(6)) }
@@ -595,7 +607,7 @@ class MainActivity: Activity() {
             else { message(body,"正在加载…"); if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
             val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType
             work({
-                val result=when(requestTab) { TAB_HOME -> repository.home(requestPage,requestType); TAB_RANKING -> repository.ranking(requestPage,requestType,pageSize); else -> repository.search(requestQuery,requestPage,requestType,library.catalogue()) }
+                val result=when(requestTab) { TAB_HOME -> repository.home(requestPage,requestType); TAB_RANKING -> repository.ranking(requestPage,requestType,rankingPageSize); else -> repository.search(requestQuery,requestPage,requestType,library.catalogue()) }
                 result
             }, { result ->
                 if(requestTab==TAB_HOME && requestPage==1) library.cacheHome(requestType,result.items,result.hasMore)
@@ -768,7 +780,9 @@ class MainActivity: Activity() {
             rowCards.forEachIndexed { columnIndex,card ->
                 card.nextFocusLeftId=if(columnIndex==0) card.id else rowCards[columnIndex-1].id
                 card.nextFocusRightId=if(columnIndex==rowCards.lastIndex) card.id else rowCards[columnIndex+1].id
-                card.nextFocusUpId=if(above==null) (searchInput?.id ?: collectionBack?.id ?: typeButtons[library.contentType]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: resumeCards.getOrNull(minOf(columnIndex,2))?.id ?: nav[tab].id) else above[columnIndex.coerceAtMost(above.lastIndex)].id
+                // 第一排海报的上方，在榜单页就是「刷新榜单」那一行：它就贴在海报上面，
+                // 上下键该是对称的，不该从海报一下跳到导航栏去。
+                card.nextFocusUpId=if(above==null) (rankRefresh?.id ?: searchInput?.id ?: collectionBack?.id ?: typeButtons[library.contentType]?.id ?: favoriteCheck?.id ?: historyManage?.id ?: resumeCards.getOrNull(minOf(columnIndex,2))?.id ?: nav[tab].id) else above[columnIndex.coerceAtMost(above.lastIndex)].id
                 card.nextFocusDownId=if(below==null) (next?.takeIf { it.isFocusable }?.id ?: prev?.takeIf { it.isFocusable }?.id ?: card.id) else below[columnIndex.coerceAtMost(below.lastIndex)].id
             }
         }
@@ -781,7 +795,9 @@ class MainActivity: Activity() {
         val firstRow=cards.take(maxColumns)
         if(resumeCards.isNotEmpty()) firstRow.forEachIndexed { index,v -> v.nextFocusUpId=resumeCards[minOf(index,resumeCards.lastIndex)].id }
         else homeUpdates?.let { updates -> updates.nextFocusUpId=typeButtons[library.contentType]?.id ?: nav[TAB_HOME].id; updates.nextFocusDownId=cards.first().id; firstRow.forEach { it.nextFocusUpId=updates.id } }
-        typeButtons.values.forEach { it.nextFocusDownId=searchInput?.id ?: collectionBack?.id ?: resumeCards.firstOrNull()?.id ?: homeUpdates?.id ?: cards.first().id }
+        // 分类按钮往下要经过榜单页的「刷新榜单」才轮到海报：把它漏掉，那个按钮就选不中
+        // （导航往下先落在分类按钮，分类按钮又直接接到第一张海报，中间的按钮被跳过去了）。
+        typeButtons.values.forEach { it.nextFocusDownId=searchInput?.id ?: collectionBack?.id ?: resumeCards.firstOrNull()?.id ?: homeUpdates?.id ?: rankRefresh?.id ?: cards.first().id }
         // 上一行把导航往下接到了分类按钮，这一行再把最后一排接回海报。
         // 少了它 Android 会按几何位置乱找，遥控器从分类按钮直接落到导航栏，网格就选不中。
         // 搜索页没有分类按钮，searchInput 自己往下走一跳。
@@ -1500,6 +1516,9 @@ class MainActivity: Activity() {
                 }
             })
         }.apply { tag="playback-settings" }
+        // 「剧集详情」：回到这部剧的详情页接着挑集。forceDetail 是因为直接从「接着看」进播放的话
+        // 本来就没有详情页可回，但既然是用户明确点的，就该把详情页画出来。
+        addButton(options,"剧集详情") { returnToDetail(true) }
         play.requestFocus()
     }
     private fun showSpeedPicker(anchor: TextView,inPlayer: Boolean=true) {
