@@ -197,7 +197,14 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         // 「只看漫剧」；索引还欠着标签时（刚装上、或正在补建），硬过滤会把服务端的补位行全判成
         // 「不属于真人剧」而丢掉，搜什么都不出东西 —— 一个看起来生效、实际把人全筛没了的开关，
         // 比没有这个开关更糟。所以这里退回不过滤，界面上另有交代。
-        val scoped = if(type==null || local?.labelled!=true) serverRows else serverRows.filter { local.kindOf(it.id)==type }
+        //
+        // 索引里根本没有的那些行同样不能丢。站方搜索能搜到的剧，比本机走查得到的多：走查只覆盖
+        // 三条分类目录共 2400 部，而《回到心跳开始时》在站方搜索里是第一行，在这 2400 部里一部
+        // 都没有（2026-10-19 实测）。这类剧只有站方搜索这一条路，索引永远装不下它；把它按
+        // 「不属于当前分类」筛掉，等于让这部剧从此搜不到 —— 恰恰是过滤最不该做的事。
+        // 索引判不出来的行一律留下：分类过滤只筛索引能分类的行，判不出来的就别替它下结论。
+        // （type 是非空的，所以这里没有 type==null 这一说；编译器本来就在报它恒为 false。）
+        val scoped = if(local?.labelled!=true) serverRows else serverRows.filter { row -> local.kindOf(row.id)?.let { it==type } ?: true }
         val known = localRows.mapTo(HashSet()) { it.id }
         val unseen = scoped.filterNot { it.id in known }
         // A local hit has to stay alone: 搜「雾锁情迷」finds exactly one show, and topping the page
