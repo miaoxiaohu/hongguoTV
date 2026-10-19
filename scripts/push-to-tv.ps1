@@ -1,4 +1,4 @@
-# Pushes a built APK to the XGIMI TV's local push-install service and asks it to install.
+﻿# Pushes a built APK to the XGIMI TV's local push-install service and asks it to install.
 #
 # The service lives on the TV itself (192.168.1.26:10000) and holds a key; /api/upload takes the
 # APK bytes, /api/install asks for the install. Measured 2026-10-19: with autoInstall on, the
