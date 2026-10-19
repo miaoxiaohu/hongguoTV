@@ -58,11 +58,19 @@ enum class ContentType(val storedValue: String, val label: String) {
  * The id namespace is the route's, and it deliberately reuses the ids the old per-type cursor used
  * ("short", "comic") so an index written before AI dramas were folded in keeps its bookmark: the
  * two routes it already walked stay walked, and only `ai-drama` is left to fetch.
+ *
+ * [rankKey] is the site's own name for this route's hot board. It is not the same string as
+ * [categorySlug] and it is not derivable from it - the site calls `/category/real-drama`'s board
+ * "real", `/category/comic-drama`'s "comic" and `/category/ai-drama`'s "ai" - so it is written
+ * down here rather than guessed at request time.
  */
-enum class Route(val storedValue: String, val label: String, val categorySlug: String, val type: ContentType) {
-    REAL_DRAMA("short","真人剧","real-drama",ContentType.SHORT),
-    COMIC_DRAMA("comic","漫剧","comic-drama",ContentType.COMIC),
-    AI_DRAMA("ai","AI剧","ai-drama",ContentType.COMIC);
+enum class Route(val storedValue: String, val label: String, val categorySlug: String, val rankKey: String, val type: ContentType) {
+    REAL_DRAMA("short","真人剧","real-drama","real",ContentType.SHORT),
+    COMIC_DRAMA("comic","漫剧","comic-drama","comic",ContentType.COMIC),
+    AI_DRAMA("ai","AI剧","ai-drama","ai",ContentType.COMIC);
+
+    /** The board this route's hot list is served at. */
+    val rankPath get() = "hot-$categorySlug"
 
     companion object {
         /** The route a stored id refers to, or null when the id names a route this build dropped. */

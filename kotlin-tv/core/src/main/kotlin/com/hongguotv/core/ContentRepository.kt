@@ -89,7 +89,7 @@ internal fun mentions(title: String, keyword: String): Boolean {
     return needle.isNotEmpty() && needle in normalizeForSearch(title)
 }
 data class RankPosition(val rank: Int?, val heat: String)
-data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
+data class HotRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
 /**
  * [matchedCount] is how many of [items] the keyword actually found, [totalHits] how many exist in
  * total across pages, and [fuzzy] whether that came from the one-character typo fallback. All three
@@ -98,7 +98,7 @@ data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages:
 data class CatalogPage(
     val items: List<Series>,
     val hasMore: Boolean,
-    val ranking: ComicRanking? = null,
+    val ranking: HotRanking? = null,
     val matchedCount: Int? = null,
     val totalHits: Int? = null,
     val fuzzy: Boolean = false
@@ -134,9 +134,26 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return Series(o.str("series_id"),o.str("series_name").ifEmpty { o.str("series_title").ifEmpty { item.str("name") } },cleanUrl(o.str("series_cover")),o.str("series_intro"),o.str("episode_right_text").ifEmpty { if(count>0) "全 ${count} 集" else "" },(0 until minOf(tags.length(),5)).joinToString(" · ") { tags.optJSONObject(it)?.str("name") ?: tags.optString(it) })
     }
     private fun valid(rows: List<Series>) = rows.filter { it.id.matches(Regex("[0-9]{1,30}")) && it.title.isNotBlank() }.distinctBy { it.id }
-    fun comicRanking(page: Int = 1): CatalogPage {
+    /**
+     * The hot board of one shelf.
+     *
+     * The site serves a board per route and one overall board; a shelf is covered by the boards of
+     * its routes, merged into one list. 真人剧 is one board; 漫剧 is two - comic-drama and
+     * ai-drama - and their heat values are comparable, so the two make one 漫剧 list. See
+     * [HotRank.merge] for why that is true and what it costs.
+     *
+     * A board that fails does not take the whole tab down: the other one still lists, and the
+     * shelf's hot list is shorter rather than missing. Only every board failing is a failure.
+     */
+    fun ranking(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(page in 1..100)
-        return ComicRank.parse(text("$site/rank/hot-comic-drama?page=$page"),page)
+        var failure: Exception?=null
+        val boards=type.routes.mapNotNull { route ->
+            try { HotRank.parse(text("$site/rank/${route.rankPath}?page=$page"),page,route) }
+            catch(e: Exception) { if(failure==null) failure=e; null }
+        }
+        if(boards.isEmpty()) throw failure ?: IOException("热播榜暂不可用")
+        return HotRank.merge(page,boards)
     }
     /**
      * One route's page, exactly as the site serves it.
@@ -166,8 +183,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      * rather than interleaved — the first shelf's own "hot" list stays the first thing on screen, and
      * the second shelf follows it on the same page instead of 34 pages later.
      *
-     * The comic hot board deliberately no longer hangs off this function: it is reached through
-     * [comicRanking] alone, so browsing a category and reading a ranking stay separate views
+     * The hot board deliberately no longer hangs off this function: it is reached through
+     * [ranking] alone, so browsing a category and reading a ranking stay separate views
      * instead of one silently replacing the other.
      */
     fun home(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {

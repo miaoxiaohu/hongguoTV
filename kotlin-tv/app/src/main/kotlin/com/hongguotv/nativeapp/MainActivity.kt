@@ -175,8 +175,8 @@ class MainActivity: Activity() {
     private var episodeViews: List<View> = emptyList()
     /** 当前详情页里承载「同系列剧」结果的容器；异步回调用它确认自己没画到别的剧上。 */
     private var seasonsHolder: LinearLayout?=null
-    private data class CatalogState(val page: Int,val items: List<Series>,val hasMore: Boolean,val ranking: ComicRanking?)
-    private var ranking: ComicRanking?=null
+    private data class CatalogState(val page: Int,val items: List<Series>,val hasMore: Boolean,val ranking: HotRanking?)
+    private var ranking: HotRanking?=null
     private var rankRefresh: View?=null
     private var rankSubtitle: TextView?=null
     private val tabState=mutableMapOf<Int,CatalogState>()
@@ -389,13 +389,13 @@ class MainActivity: Activity() {
         leaveCollection()
         (searchInput as? EditText)?.let { query=it.text.toString().trim() }
         library.contentType=type
-        // 分类一变，首页和搜索两页缓存的页码和列表就都是另一套片库的了，全部丢掉。
-        listOf(TAB_HOME,TAB_SEARCH).forEach { tabState.remove(it); tabFocus.remove(it) }
+        // 分类一变，首页、搜索和排行榜三页缓存的页码和列表就都是另一套片库的了，全部丢掉。
+        listOf(TAB_HOME,TAB_SEARCH,TAB_RANKING).forEach { tabState.remove(it); tabFocus.remove(it) }
         releaseCatalogViews()
         page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""; homePosition=null
         // query 可能还是上一次搜索留下的。非空不等于现在在搜索页 —— 在首页上切分类，
         // 按 query 非空去发请求会把搜索结果画到首页上。
-        showCatalog(load=(tab==TAB_HOME || (tab==TAB_SEARCH && query.isNotBlank())),focusType=true)
+        showCatalog(load=(tab==TAB_HOME || tab==TAB_RANKING || (tab==TAB_SEARCH && query.isNotBlank())),focusType=true)
     }
     private fun leaveCollection() {
         if(collection==null) return
@@ -413,7 +413,7 @@ class MainActivity: Activity() {
      * 条件写在首页这一处，是为了让「看真人剧还是漫剧」这个开关在首页和搜索页长得一模一样 ——
      * 它是导航的一部分，不是页内的一个控件。
      */
-    private fun inlineCatalogueFilters()=(tab==TAB_HOME || tab==TAB_SEARCH) && resources.configuration.fontScale<=1.2f && widthDp()>=900
+    private fun inlineCatalogueFilters()=(tab==TAB_HOME || tab==TAB_SEARCH || tab==TAB_RANKING) && resources.configuration.fontScale<=1.2f && widthDp()>=900
     /**
      * 把「片库」那一行摆到该去的地方，宽屏就并进导航栏右端，窄屏就自己占一行。
      *
@@ -478,10 +478,9 @@ class MainActivity: Activity() {
             val scroll=ScrollView(this); val body=column(); scroll.addView(body); container.addView(scroll,lp(-1,0).apply { weight=1f })
             settings(body); if(focusNav) nav[tab].requestFocus(); return
         }
-        // 分类按钮只画在首页。搜索那边画过，纯属骗人：ContentRepository.search 忽略它的 type
-        // 参数，而站点也没有任何办法给搜索加条件（tab/category/categoryId/type/filter/sort_type
-        // 全部无效），列表项、详情页和搜索结果里都没有分类字段，拿本地目录在客户端过滤只能剩下
-        // 十条里的 0.2 到 2.1 条。搜索页于是只留一个输入框。
+        // 分类按钮画在首页、搜索页和排行榜页 —— 三页都是「看哪一档」有意义的地方：
+        // 首页的热门、搜索的结果、榜单的内容都跟着档走。收藏和历史读的是本机记录，分不分档
+        // 没有意义，所以那两页不画。
         if(tab==TAB_HOME) {
             val types=row().apply { setPadding(0,dp(8),0,dp(6)) }
             if(!inlineCatalogueFilters()) types.addView(text("片库",12f,muted),lp(dp(42),-2))
@@ -493,7 +492,7 @@ class MainActivity: Activity() {
             nav.forEach { it.nextFocusDownId=typeButtons.getValue(library.contentType).id }
         }
         if(tab==TAB_SEARCH) {
-            val searchRow=row(); val input=EditText(this).apply { id=View.generateViewId(); hint="输入剧名或关键词（全片库）"; setText(query); textSize=16f; setTextColor(white); setHintTextColor(muted); isSingleLine=true; maxLines=1; filters=arrayOf(android.text.InputFilter.LengthFilter(80)); imeOptions=android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH }
+            val searchRow=row(); val input=EditText(this).apply { id=View.generateViewId(); hint="输入剧名或关键词（当前片库全量）"; setText(query); textSize=16f; setTextColor(white); setHintTextColor(muted); isSingleLine=true; maxLines=1; filters=arrayOf(android.text.InputFilter.LengthFilter(80)); imeOptions=android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH }
             searchRow.addView(input,lp(0,dp(45)).apply { weight=1f; rightMargin=dp(10) })
             fun search() { val next=input.text.toString().trim(); if(next.isBlank()) { input.requestFocus(); return }; runSearch(next) }
             searchInput=input; searchButton=addButton(searchRow,"搜索") { search() }
@@ -536,14 +535,24 @@ class MainActivity: Activity() {
             }
             input.setOnEditorActionListener { _,_,_-> search(); true }; container.addView(searchRow)
         } else if(tab==TAB_RANKING) {
+            // 榜单跟着片库分档。站方有真人剧榜、漫剧榜和 AI 剧榜，混在一起给等于没分：
+            // 用户在真人剧档里翻到的却是漫剧的榜，说的还是「热播榜」三个字。
+            val types=row().apply { setPadding(0,dp(8),0,dp(6)) }
+            if(!inlineCatalogueFilters()) types.addView(text("片库",12f,muted),lp(dp(42),-2))
+            ContentType.entries.forEach { type ->
+                typeButtons[type]=addButton(types,type.label,library.contentType==type) { switchContentType(type) }
+                    .apply { isSelected=library.contentType==type; nextFocusUpId=nav[tab].id }
+            }
+            placeCatalogueRow(top,container,types)
             val heading=row().apply { setPadding(0,dp(8),0,dp(6)) }
-            heading.addView(text("漫剧热播榜",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
+            heading.addView(text("${library.contentType.label}热播榜",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
             rankRefresh=addButton(heading,"刷新榜单") { page=1; catalogFocus=""; showCatalog(true) }.apply { nextFocusUpId=nav[tab].id }
             container.addView(heading)
-            rankSubtitle=text(if(load) "正在读取最新榜单…" else ranking?.updatedText?.ifBlank { "来源：红果漫剧热播榜" } ?: "来源：红果漫剧热播榜",13f,muted)
+            val source="来源：红果${library.contentType.label}热播榜"
+            rankSubtitle=text(if(load) "正在读取最新榜单…" else ranking?.updatedText?.ifBlank { source } ?: source,13f,muted)
                 .apply { setPadding(0,0,0,dp(8)) }
             container.addView(rankSubtitle)
-            nav.forEach { it.nextFocusDownId=rankRefresh!!.id }
+            nav.forEach { it.nextFocusDownId=typeButtons[library.contentType]?.id ?: rankRefresh!!.id }
         } else if(tab>TAB_RANKING) {
             val heading=row().apply { setPadding(0,dp(14),0,dp(6)) }
             heading.addView(text(if(tab==TAB_FAVORITES) "我的收藏" else "接着上次看",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
@@ -572,7 +581,7 @@ class MainActivity: Activity() {
             else { message(body,"正在加载…"); if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
             val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType
             work({
-                val result=when(requestTab) { TAB_HOME -> repository.home(requestPage,requestType); TAB_RANKING -> repository.comicRanking(requestPage); else -> repository.search(requestQuery,requestPage,requestType,library.catalogue()) }
+                val result=when(requestTab) { TAB_HOME -> repository.home(requestPage,requestType); TAB_RANKING -> repository.ranking(requestPage,requestType); else -> repository.search(requestQuery,requestPage,requestType,library.catalogue()) }
                 result
             }, { result ->
                 if(requestTab==TAB_HOME && requestPage==1) library.cacheHome(requestType,result.items,result.hasMore)
@@ -583,7 +592,7 @@ class MainActivity: Activity() {
                     catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
                     searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy
                     val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }
-                    rankSubtitle?.text=ranking?.updatedText?.ifBlank { "来源：红果漫剧热播榜" } ?: "来源：红果漫剧热播榜"
+                    rankSubtitle?.text=ranking?.updatedText?.ifBlank { "来源：红果${requestType.label}热播榜" } ?: "来源：红果${requestType.label}热播榜"
                     body.removeAllViews()
                     // keptFocusAnchor 优先：用户在加载期间用 D-pad 把焦点挪到「历史/手机输入/续建索引」
                     // 上时，加载回来不能被 focusInput/focusNav 等默认值挤掉，否则焦点会跳走。

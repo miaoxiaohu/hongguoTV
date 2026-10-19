@@ -207,20 +207,25 @@ private fun run(args: Array<String>, report: ProbeReport) {
 
     if(args.contains("--ranking")) {
         try {
-            val first=repository.comicRanking()
-            val metadata=checkNotNull(first.ranking)
-            check(first.items.isNotEmpty())
-            val seen=mutableSetOf<String>()
-            for(pageNumber in listOf(1,2,metadata.totalPages).distinct().filter { it<=metadata.totalPages }) {
-                val result=if(pageNumber==1) first else repository.comicRanking(pageNumber)
-                val ranking=checkNotNull(result.ranking)
-                check(result.items.isNotEmpty() && result.items.none { it.id in seen })
-                seen.addAll(result.items.map { it.id })
-                val ranks=result.items.map { checkNotNull(ranking.positions[it.id]).rank }
-                check(ranks.all { it!=null && it>0 } && ranks.filterNotNull().zipWithNext().all { (a,b) -> a<b })
-                check(result.items.all { ranking.positions[it.id]!!.heat.isNotBlank() })
-                check(result.hasMore==(pageNumber<ranking.totalPages))
-                say("rankingPage=$pageNumber/${ranking.totalPages}; items=${result.items.size}; ranks=${ranks.first()}..${ranks.last()}; firstHeat=${ranking.positions[result.items.first().id]!!.heat}; updated=${ranking.updatedText}")
+            // 两档都量：真人剧档一个榜，漫剧档两个榜合成一张。名次必须连续且递增 ——
+            // 合成后的名次是这一档自己的热度序，不是两个榜各自的第几名。
+            for(type in ContentType.entries) {
+                val first=repository.ranking(1,type)
+                val metadata=checkNotNull(first.ranking)
+                check(first.items.isNotEmpty())
+                val seen=mutableSetOf<String>()
+                for(pageNumber in listOf(1,2,metadata.totalPages).distinct().filter { it<=metadata.totalPages }) {
+                    val result=if(pageNumber==1) first else repository.ranking(pageNumber,type)
+                    val ranking=checkNotNull(result.ranking)
+                    check(result.items.isNotEmpty() && result.items.none { it.id in seen })
+                    seen.addAll(result.items.map { it.id })
+                    val ranks=result.items.map { checkNotNull(ranking.positions[it.id]).rank }
+                    check(ranks.all { it!=null && it>0 } && ranks.filterNotNull().zipWithNext().all { (a,b) -> a<b })
+                    check(result.items.all { ranking.positions[it.id]!!.heat.isNotBlank() })
+                    check(result.hasMore==(pageNumber<ranking.totalPages))
+                    val heats=result.items.map { HotRank.heatValue(ranking.positions[it.id]!!.heat) }
+                    say("${type.label}榜 page=$pageNumber/${ranking.totalPages}; items=${result.items.size}; ranks=${ranks.first()}..${ranks.last()}; heat=${heats.filterNotNull().firstOrNull()}..${heats.filterNotNull().lastOrNull()}; first=${result.items.first().title}; updated=${ranking.updatedText}")
+                }
             }
         } finally {
             repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()

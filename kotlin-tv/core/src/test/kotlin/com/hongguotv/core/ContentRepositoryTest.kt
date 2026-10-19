@@ -182,114 +182,154 @@ class ContentRepositoryTest {
         }.build()
     )
 
-    private fun rankPayload(page: Int = 1, totalPages: Int = 2) = JSONObject()
+    private fun rankPayload(page: Int = 1, totalPages: Int = 2, id: String = "123", title: String = "测试漫剧", rank: Int? = null, heat: String = "") = JSONObject()
         .put("isSuccess",true)
-        .put("rankList",JSONArray().put(JSONObject().put("seriesId","123").put("title","测试漫剧")
+        .put("rankList",JSONArray().put(JSONObject().put("seriesId",id).put("title",title)
             .put("cover","https:\\u002F\\u002Fexample.com\\u002Fcover.jpg")
-            .put("episodeCount",12).put("tags",JSONArray().put("玄幻"))))
+            .put("episodeCount",12).put("tags",JSONArray().put("玄幻"))
+            .apply { if(rank!=null) put("rank",rank); if(heat.isNotEmpty()) put("heatText",heat) }))
         .put("pagination",JSONObject().put("pageNum",page).put("totalPages",totalPages))
 
     private fun script(name: String, args: JSONArray) =
         "<script data-fn-name=\"$name\" data-fn-args=\"${args.toString().replace("&","&amp;").replace("\"","&quot;")}\"></script>"
 
-    private fun currentRank(payload: JSONObject) = script("mergeLoaderData",JSONArray()
-        .put("rank_hot-comic-drama/page").put(JSONArray().put(JSONObject().put("key","content")
+    private fun currentRank(payload: JSONObject, route: Route = Route.COMIC_DRAMA) = script("mergeLoaderData",JSONArray()
+        .put(HotRank.routeKey(route)).put(JSONArray().put(JSONObject().put("key","content")
             .put("routerDataFnName","p").put("routerDataFnArgs",JSONArray().put(payload.toString())))))
 
-    @Test fun comicRankingPreservesSourceRankHeatAndUpdateRatherThanRenumbering() {
-        val payload=rankPayload(2,5)
-        payload.getJSONArray("rankList").getJSONObject(0).put("rank",23).put("heatText","5746万热度")
-        val repo=repository { request ->
-            assertEquals("/rank/hot-comic-drama",request.url.encodedPath)
-            assertEquals("2",request.url.queryParameter("page"))
-            """<script>_ROUTER_DATA={"loaderData":{"rank_hot-comic-drama/page":{"rankKey":"comic","pageNum":2,"updatedText":"9月22日已更新"}}};</script>"""+currentRank(payload)
-        }
-        val result=repo.comicRanking(2)
-        assertNotNull(result.ranking)
-        assertEquals(RankPosition(23,"5746万热度"),result.ranking!!.positions["123"])
-        assertEquals(5,result.ranking.totalPages)
-        assertEquals("9月22日已更新",result.ranking.updatedText)
-        assertTrue(result.hasMore)
-        assertFalse(result.items.single().toJson().has("rank"))
+    /** A board as the site serves it: the router data says which board it is, then the payload. */
+    private fun boardPage(route: Route, payload: JSONObject, page: Int = 1, updated: String = "") =
+        """<script>_ROUTER_DATA={"loaderData":{"${HotRank.routeKey(route)}":{"rankKey":"${route.rankKey}","pageNum":$page${if(updated.isEmpty()) "" else ",\"updatedText\":\"$updated\""}}}};</script>"""+currentRank(payload,route)
+
+    @Test fun theBoardKeepsItsSourceRankHeatAndUpdate() {
+        val payload=rankPayload(2,5,rank=23,heat="5746万热度")
+        val board=HotRank.parse(boardPage(Route.COMIC_DRAMA,payload,2,"9月22日已更新"),2,Route.COMIC_DRAMA)
+        assertEquals(RankPosition(23,"5746万热度"),board.positions["123"])
+        assertEquals(5,board.totalPages)
+        assertEquals("9月22日已更新",board.updatedText)
     }
 
-    @Test fun missingRankIsNotInventedAndLastPageStops() {
-        val result=repository { currentRank(rankPayload(5,5)) }.comicRanking(5)
-        assertNotNull(result.ranking)
-        assertEquals(RankPosition(null,""),result.ranking!!.positions["123"])
-        assertFalse(result.hasMore)
+    @Test fun missingRankIsNotInvented() {
+        val board=HotRank.parse(boardPage(Route.COMIC_DRAMA,rankPayload(5,5)),5,Route.COMIC_DRAMA)
+        assertEquals(RankPosition(null,""),board.positions["123"])
     }
 
     @Test fun renderedRankingPreservesPageTwoRankAndHeat() {
-        val repo=repository {
-            """<script>_ROUTER_DATA={"loaderData":{"rank_hot-comic-drama/page":{"rankKey":"comic","pageNum":2,"updatedText":"今日已更新"}}};</script>
+        val html="""<script>_ROUTER_DATA={"loaderData":{"rank_hot-comic-drama/page":{"rankKey":"comic","pageNum":2,"updatedText":"今日已更新"}}};</script>
                 <article aria-labelledby="rank-title-123"><span class="pc-badge-number-example">21</span>
                 <h2 id="rank-title-123">漫剧</h2><p class="pc-metrics-example"><span>5746万热度</span></p></article>
                 <nav aria-label="榜单分页"><a href="/rank/hot-comic-drama">1</a><span aria-current="page">2</span><a href="/rank/hot-comic-drama?page=5">5</a></nav>"""
-        }
-        val result=repo.comicRanking(2)
-        assertNotNull(result.ranking)
-        assertEquals(RankPosition(21,"5746万热度"),result.ranking!!.positions["123"])
-        assertEquals(5,result.ranking.totalPages)
-        assertEquals("今日已更新",result.ranking.updatedText)
+        val board=HotRank.parse(html,2,Route.COMIC_DRAMA)
+        assertEquals(RankPosition(21,"5746万热度"),board.positions["123"])
+        assertEquals(5,board.totalPages)
+        assertEquals("今日已更新",board.updatedText)
     }
 
     @Test fun rankingRejectsUnexpectedPageInsteadOfShowingWrongRanks() {
-        val repo=repository { currentRank(rankPayload(1,5)) }
-        assertThrows(IOException::class.java) { repo.comicRanking(2) }
-        assertThrows(IllegalArgumentException::class.java) { repo.comicRanking(0) }
+        assertThrows(IOException::class.java) {
+            HotRank.parse(boardPage(Route.COMIC_DRAMA,rankPayload(1,5)),2,Route.COMIC_DRAMA)
+        }
     }
 
     @Test fun renderedLastPageCountsCurrentPageWithoutAnAnchor() {
-        val repo=repository {
-            """<script>_ROUTER_DATA={"loaderData":{"rank_hot-comic-drama/page":{"rankKey":"comic","pageNum":5}}};</script>
+        val html="""<script>_ROUTER_DATA={"loaderData":{"rank_hot-comic-drama/page":{"rankKey":"comic","pageNum":5}}};</script>
                 <article aria-labelledby="rank-title-123"><span class="pc-badge-number-example">81</span><h2 id="rank-title-123">漫剧</h2></article>
                 <nav aria-label="榜单分页"><a href="/rank/hot-comic-drama?page=4">4</a><span aria-current="page">5</span></nav>"""
-        }
-        val result=repo.comicRanking(5)
-        assertEquals(5,result.ranking!!.totalPages)
-        assertFalse(result.hasMore)
+        val board=HotRank.parse(html,5,Route.COMIC_DRAMA)
+        assertEquals(5,board.totalPages)
     }
 
-    @Test fun comicRankingIsReachedDirectlyRatherThanThroughBrowsing() {
+    @Test fun legacyRankIsStillSupported() {
+        val html=script("r",JSONArray().put("rank_hot-comic-drama/page").put("content").put(rankPayload()))
+        assertTrue(HotRank.parse(html,1,Route.COMIC_DRAMA).items.isNotEmpty())
+    }
+
+    @Test fun aBoardOfAnotherRouteIsNotReadAsThisOne() {
+        val html=script("r",JSONArray().put("rank_hot-real-drama/page").put("content").put(rankPayload()))
+        assertThrows(IOException::class.java) { HotRank.parse(html,1,Route.COMIC_DRAMA) }
+    }
+
+    @Test fun aRejectedBoardRemainsAnError() {
+        val html=boardPage(Route.COMIC_DRAMA,rankPayload().put("isSuccess",false))
+        assertThrows(IOException::class.java) { HotRank.parse(html,1,Route.COMIC_DRAMA) }
+    }
+
+    @Test fun renderedBoardWorksWhenStreamedPayloadIsMissing() {
+        val html="""<script>_ROUTER_DATA={"loaderData":{"rank_hot-comic-drama/page":{"rankKey":"comic","pageNum":2}}};</script>
+                <article aria-labelledby="rank-title-123"><a href="/detail?series_id=123"><img src="https://example.com/a.jpg"></a>
+                <h2 id="rank-title-123">测试 &amp; 漫剧</h2><p class="pc-description-example">简介</p><p class="pc-metrics-example">123万热度</p></article>
+                <nav aria-label="榜单分页"><a href="/rank/hot-comic-drama?page=1">1</a><span aria-current="page">2</span><a href="/rank/hot-comic-drama?page=3">3</a></nav>"""
+        val board=HotRank.parse(html,2,Route.COMIC_DRAMA)
+        assertEquals("测试 & 漫剧",board.items.single().title)
+        assertEquals("https://example.com/a.jpg",board.items.single().cover)
+        assertEquals(3,board.totalPages)
+    }
+
+    @Test fun theRealBoardIsReachedAtItsOwnPath() {
         val repo=repository { request ->
-            assertEquals("/rank/hot-comic-drama",request.url.encodedPath)
+            assertEquals("/rank/hot-real-drama",request.url.encodedPath)
             assertEquals("2",request.url.queryParameter("page"))
-            currentRank(rankPayload(2,2))
+            boardPage(Route.REAL_DRAMA,rankPayload(2,2,"123","测试真人剧"))
         }
-        val page=repo.comicRanking(2)
-        assertEquals("测试漫剧",page.items.single().title)
+        val page=repo.ranking(2,ContentType.SHORT)
+        assertEquals("测试真人剧",page.items.single().title)
         assertEquals("https://example.com/cover.jpg",page.items.single().cover)
         assertEquals("全 12 集",page.items.single().badge)
         assertFalse(page.hasMore)
     }
 
-    @Test fun legacyRankIsStillSupported() {
-        val repo=repository { script("r",JSONArray().put("rank_hot-comic-drama/page").put("content").put(rankPayload())) }
-        assertTrue(repo.comicRanking(1).hasMore)
-    }
-
-    @Test fun comicHomeDoesNotUseUnrelatedRankData() {
-        val repo=repository { script("r",JSONArray().put("rank_hot-real-drama/page").put("content").put(rankPayload())) }
-        assertThrows(IOException::class.java) { repo.comicRanking(1) }
-    }
-
-    @Test fun rejectedComicRankRemainsAnError() {
-        val repo=repository { currentRank(rankPayload().put("isSuccess",false)) }
-        assertThrows(IOException::class.java) { repo.comicRanking(1) }
-    }
-
-    @Test fun renderedComicRankWorksWhenStreamedPayloadIsMissing() {
-        val repo=repository {
-            """<script>_ROUTER_DATA={"loaderData":{"rank_hot-comic-drama/page":{"rankKey":"comic","pageNum":2}}};</script>
-                <article aria-labelledby="rank-title-123"><a href="/detail?series_id=123"><img src="https://example.com/a.jpg"></a>
-                <h2 id="rank-title-123">测试 &amp; 漫剧</h2><p class="pc-description-example">简介</p><p class="pc-metrics-example">123万热度</p></article>
-                <nav aria-label="榜单分页"><a href="/rank/hot-comic-drama?page=1">1</a><span aria-current="page">2</span><a href="/rank/hot-comic-drama?page=3">3</a></nav>"""
+    @Test fun theComicShelfBoardIsItsTwoBoardsMergedByHeat() {
+        // 漫剧是两条货架，站方没有把它们合成一张榜 —— 但热度是跨榜可比的（同一个剧在总榜和
+        // 分类榜上是同一个数字），所以两张榜能合成一张：最热的漫剧在前。
+        val comic=rankPayload(1,5,"1","漫剧甲",rank=1,heat="5000万热度")
+        comic.getJSONArray("rankList").put(JSONObject().put("seriesId","2").put("title","漫剧乙")
+            .put("cover","https://example.com/2.jpg").put("episodeCount",10).put("rank",2).put("heatText","3000万热度"))
+        val ai=rankPayload(1,5,"3","AI剧甲",rank=1,heat="7000万热度")
+        ai.getJSONArray("rankList").put(JSONObject().put("seriesId","4").put("title","AI剧乙")
+            .put("cover","https://example.com/4.jpg").put("episodeCount",10).put("rank",2).put("heatText","1000万热度"))
+        val repo=repository { request ->
+            when(request.url.encodedPath) {
+                "/rank/hot-comic-drama" -> boardPage(Route.COMIC_DRAMA,comic)
+                "/rank/hot-ai-drama" -> boardPage(Route.AI_DRAMA,ai)
+                else -> throw AssertionError("unexpected path "+request.url.encodedPath)
+            }
         }
-        val page=repo.comicRanking(2)
-        assertEquals("测试 & 漫剧",page.items.single().title)
-        assertEquals("https://example.com/a.jpg",page.items.single().cover)
-        assertTrue(page.hasMore)
+        val page=repo.ranking(1,ContentType.COMIC)
+        assertEquals(listOf("AI剧甲","漫剧甲","漫剧乙","AI剧乙"),page.items.map { it.title })
+        // 名次按合并后的热度重排，不留两个「第 1 名」。
+        assertEquals(1,page.ranking!!.positions["3"]!!.rank)
+        assertEquals(2,page.ranking!!.positions["1"]!!.rank)
+        assertEquals(3,page.ranking!!.positions["2"]!!.rank)
+        assertEquals(4,page.ranking!!.positions["4"]!!.rank)
+        assertEquals("7000万热度",page.ranking!!.positions["3"]!!.heat)
+    }
+
+    @Test fun aHeatTheSiteBrokeIsStillRead() {
+        // 站方偶尔在数字里塞一个控制字符（实测：「5997 万热度」）。读不出来的话这一行
+        // 就排不进去 —— 榜单是按热度排的，排不进去等于把它扔了。
+        assertEquals(59970000L,HotRank.heatValue("5997 万热度"))
+        assertEquals(83700000L,HotRank.heatValue("8370万热度"))
+        assertEquals(120000000L,HotRank.heatValue("1.2亿热度"))
+        assertEquals(null,HotRank.heatValue("热度暂无"))
+        assertEquals(null,HotRank.heatValue(null))
+    }
+
+    @Test fun aBoardThatFailsDoesNotTakeTheWholeTabDown() {
+        // 漫剧这一档有两个榜，一个挂了不该让整页空白：另一个照旧能看。
+        val repo=repository { request ->
+            when(request.url.encodedPath) {
+                "/rank/hot-comic-drama" -> boardPage(Route.COMIC_DRAMA,rankPayload(1,5,"1","漫剧甲",rank=1,heat="5000万热度"))
+                "/rank/hot-ai-drama" -> throw IOException("boom")
+                else -> throw AssertionError("unexpected path "+request.url.encodedPath)
+            }
+        }
+        val page=repo.ranking(1,ContentType.COMIC)
+        assertEquals(listOf("漫剧甲"),page.items.map { it.title })
+    }
+
+    @Test fun aShelfWithNoWorkingBoardAtAllFails() {
+        val repo=repository { throw IOException("boom") }
+        assertThrows(IOException::class.java) { repo.ranking(1,ContentType.COMIC) }
     }
 
     private fun searchPage(vararg rows: String) =
