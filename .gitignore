@@ -48,6 +48,7 @@ keystore.properties
 /upstream/
 
 # 测量脚本的产物：每次跑都重新生成，不是源码
+/search-ceiling.json
 /kotlin-tv/core/probe-report.txt
 /out-probe-index.txt
 /out-build.txt
