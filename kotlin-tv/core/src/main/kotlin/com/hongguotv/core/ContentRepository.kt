@@ -109,9 +109,20 @@ class SearchSessionExpiredException: IOException("搜索结果已过期，请从
 /** Carries the status code so callers can explain a 404 instead of showing a bare error. */
 class HttpStatusException(val code: Int): IOException("内容请求失败（HTTP $code）")
 
+/**
+ * How many board pages one shelf may have.
+ *
+ * The site publishes five for every board and answers 404 on the sixth - measured 2026-10-19 for
+ * all four boards. The bound is a safety net rather than a known number: a board that suddenly
+ * grew must not turn into an endless walk.
+ */
+private const val MAX_RANK_PAGES = 50
+
 class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis) {
     private val signer = Signer()
     private val site = "https://hongguoduanju.com"
+    /** The boards already fetched, per shelf, so turning the page costs nothing. */
+    private val rankingCache=mutableMapOf<ContentType,HotRank.HotList>()
     private fun text(url: String, signed: Signer.Request? = null): String {
         val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
         signed?.headers?.forEach { (k,v) -> request.header(k,v) }
@@ -135,25 +146,59 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     private fun valid(rows: List<Series>) = rows.filter { it.id.matches(Regex("[0-9]{1,30}")) && it.title.isNotBlank() }.distinctBy { it.id }
     /**
-     * The hot board of one shelf.
+     * The hot list of one shelf, one app page at a time.
      *
-     * The site serves a board per route and one overall board; a shelf is covered by the boards of
-     * its routes, merged into one list. 真人剧 is one board; 漫剧 is two - comic-drama and
-     * ai-drama - and their heat values are comparable, so the two make one 漫剧 list. See
-     * [HotRank.merge] for why that is true and what it costs.
+     * The board serves twenty rows a page and has no page-size parameter to change that - measured
+     * 2026-10-19, ten spellings (pageSize, page_size, size, limit, rows, count, per_page, num and
+     * combinations), all twenty. Twenty is not a multiple of the app's six columns, so a page
+     * drawn straight from the board always ends with a short row - the thing the rest of the app
+     * avoids by making its own pages a multiple of the row width.
      *
-     * A board that fails does not take the whole tab down: the other one still lists, and the
-     * shelf's hot list is shorter rather than missing. Only every board failing is a failure.
+     * So the app's page is the unit instead: [HotRank.PAGE_SIZE] cards, cut out of the shelf's
+     * list. The list itself is every board of the shelf's routes, merged into one heat order,
+     * because the heat is a per-show number that reads the same on every board. Merging the
+     * whole list is also what makes the ranks mean anything: the comic board's number 21 is
+     * hotter than the AI board's number 30, so without one order the 「第 41 名」 on the second
+     * screen can be hotter than the 「第 40 名」 on the first - measured 2026-10-19, 5437万 on
+     * the first screen's last card against 5500万 on the second screen's first.
+     *
+     * The whole shelf is fetched on the first request, which is the only way to get one order out
+     * of it: five requests for 真人剧, ten for 漫剧 (two boards). They are held for the session, so
+     * turning the page costs nothing more, and [clearRankingCache] throws them away when the user
+     * asks for the list to be fetched again.
+     *
+     * A board that fails does not take the whole tab down: the rest still lists, and the shelf's
+     * hot list is shorter rather than missing. Only every board failing is a failure.
      */
-    fun ranking(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
+    fun ranking(page: Int = 1, type: ContentType = ContentType.SHORT, pageSize: Int = HotRank.DEFAULT_PAGE_SIZE): CatalogPage {
         require(page in 1..100)
+        require(pageSize>0)
+        val list=rankingList(type)
+        val items=list.items.drop((page-1)*pageSize).take(pageSize)
+        val totalPages=maxOf(1,(list.items.size+pageSize-1)/pageSize)
+        return CatalogPage(items,items.isNotEmpty() && page<totalPages,HotRanking(list.positions,totalPages,list.updatedText))
+    }
+    /** Throws the fetched boards away, so the next request goes to the site again. */
+    fun clearRankingCache() { rankingCache.clear() }
+    private fun rankingList(type: ContentType): HotRank.HotList {
+        rankingCache[type]?.let { return it }
         var failure: Exception?=null
-        val boards=type.routes.mapNotNull { route ->
-            try { HotRank.parse(text("$site/rank/${route.rankPath}?page=$page"),page,route) }
-            catch(e: Exception) { if(failure==null) failure=e; null }
+        val boards=mutableListOf<HotRank.Board>()
+        for(route in type.routes) {
+            var page=1
+            while(page<=MAX_RANK_PAGES) {
+                val board=try { HotRank.parse(text("$site/rank/${route.rankPath}?page=$page"),page,route) }
+                catch(e: Exception) { if(failure==null) failure=e; break }
+                if(board.items.isEmpty()) break
+                boards+=board
+                if(page>=board.totalPages) break
+                page++
+            }
         }
         if(boards.isEmpty()) throw failure ?: IOException("热播榜暂不可用")
-        return HotRank.merge(page,boards)
+        val list=HotRank.combine(boards)
+        rankingCache[type]=list
+        return list
     }
     /**
      * One route's page, exactly as the site serves it.

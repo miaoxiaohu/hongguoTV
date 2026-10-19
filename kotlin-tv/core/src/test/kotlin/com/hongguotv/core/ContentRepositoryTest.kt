@@ -268,40 +268,69 @@ class ContentRepositoryTest {
     @Test fun theRealBoardIsReachedAtItsOwnPath() {
         val repo=repository { request ->
             assertEquals("/rank/hot-real-drama",request.url.encodedPath)
-            assertEquals("2",request.url.queryParameter("page"))
-            boardPage(Route.REAL_DRAMA,rankPayload(2,2,"123","测试真人剧"))
+            val page=request.url.queryParameter("page")?.toInt() ?: 1
+            boardPage(Route.REAL_DRAMA,boardRows(page,20,9000-(page-1)*20,1+(page-1)*20))
         }
-        val page=repo.ranking(2,ContentType.SHORT)
-        assertEquals("测试真人剧",page.items.single().title)
-        assertEquals("https://example.com/cover.jpg",page.items.single().cover)
-        assertEquals("全 12 集",page.items.single().badge)
-        assertFalse(page.hasMore)
+        val page=repo.ranking(1,ContentType.SHORT)
+        assertEquals("第 1 部",page.items.first().title)
+        assertEquals("https://example.com/1.jpg",page.items.first().cover)
+        assertEquals("全 10 集",page.items.first().badge)
+        assertTrue("还有下一页",page.hasMore)
     }
 
-    @Test fun theComicShelfBoardIsItsTwoBoardsMergedByHeat() {
-        // 漫剧是两条货架，站方没有把它们合成一张榜 —— 但热度是跨榜可比的（同一个剧在总榜和
-        // 分类榜上是同一个数字），所以两张榜能合成一张：最热的漫剧在前。
-        val comic=rankPayload(1,5,"1","漫剧甲",rank=1,heat="5000万热度")
-        comic.getJSONArray("rankList").put(JSONObject().put("seriesId","2").put("title","漫剧乙")
-            .put("cover","https://example.com/2.jpg").put("episodeCount",10).put("rank",2).put("heatText","3000万热度"))
-        val ai=rankPayload(1,5,"3","AI剧甲",rank=1,heat="7000万热度")
-        ai.getJSONArray("rankList").put(JSONObject().put("seriesId","4").put("title","AI剧乙")
-            .put("cover","https://example.com/4.jpg").put("episodeCount",10).put("rank",2).put("heatText","1000万热度"))
+    /** A board page with [rows] shows, their heats falling from [topHeat] 万 one by one. */
+    private fun boardRows(page: Int, rows: Int, topHeat: Int, idBase: Int, totalPages: Int = 5) = JSONObject()
+        .put("isSuccess",true)
+        .put("rankList",JSONArray((0 until rows).map { i ->
+            JSONObject().put("seriesId",(idBase+i).toString()).put("title","第 ${idBase+i} 部")
+                .put("cover","https://example.com/${idBase+i}.jpg").put("episodeCount",10)
+                .put("rank",(page-1)*rows+i+1).put("heatText","${topHeat-i}万热度")
+        }))
+        .put("pagination",JSONObject().put("pageNum",page).put("totalPages",totalPages))
+
+    @Test fun theShelfBoardIsFetchedFromTheSitesOwnPathsAndEveryPageOfIt() {
+        val requested=mutableListOf<String>()
         val repo=repository { request ->
+            val page=request.url.queryParameter("page")?.toInt() ?: 1
+            requested += "${request.url.encodedPath}?$page"
+            boardPage(Route.REAL_DRAMA,boardRows(page,20,9000-(page-1)*20,page*100))
+        }
+        val page=repo.ranking(1,ContentType.SHORT)
+        // 整份榜单是取回来才排得出一个顺序的，所以它的每一页都要取。
+        assertEquals(listOf("/rank/hot-real-drama?1","/rank/hot-real-drama?2","/rank/hot-real-drama?3","/rank/hot-real-drama?4","/rank/hot-real-drama?5"),requested)
+        assertEquals(18,page.items.size)
+        assertEquals("第 100 部",page.items.first().title)
+    }
+
+    @Test fun theComicShelfBoardIsItsTwoBoardsMergedIntoOneHeatOrder() {
+        // 漫剧这一档是两条货架，站方没有把它们合成一张榜 —— 但热度是每部剧的数字，在每张榜上
+        // 读到的都一样，所以两张榜能合成一个顺序。而且必须合成整份：分榜看是错的（漫剧榜的第 21 名
+        // 比 AI 榜的第 30 名还热，分开排就把它排到后面去了）。
+        val repo=repository { request ->
+            val page=request.url.queryParameter("page")?.toInt() ?: 1
             when(request.url.encodedPath) {
-                "/rank/hot-comic-drama" -> boardPage(Route.COMIC_DRAMA,comic)
-                "/rank/hot-ai-drama" -> boardPage(Route.AI_DRAMA,ai)
+                "/rank/hot-comic-drama" -> boardPage(Route.COMIC_DRAMA,boardRows(page,20,9000-(page-1)*20,1+(page-1)*20))
+                "/rank/hot-ai-drama" -> boardPage(Route.AI_DRAMA,boardRows(page,20,8000-(page-1)*20,1001+(page-1)*20))
                 else -> throw AssertionError("unexpected path "+request.url.encodedPath)
             }
         }
         val page=repo.ranking(1,ContentType.COMIC)
-        assertEquals(listOf("AI剧甲","漫剧甲","漫剧乙","AI剧乙"),page.items.map { it.title })
-        // 名次按合并后的热度重排，不留两个「第 1 名」。
-        assertEquals(1,page.ranking!!.positions["3"]!!.rank)
-        assertEquals(2,page.ranking!!.positions["1"]!!.rank)
-        assertEquals(3,page.ranking!!.positions["2"]!!.rank)
-        assertEquals(4,page.ranking!!.positions["4"]!!.rank)
-        assertEquals("7000万热度",page.ranking!!.positions["3"]!!.heat)
+        // 一页 18 张，正好三行六列 —— 网格永远不缺最后一行。
+        assertEquals(18,page.items.size)
+        assertEquals(0,page.items.size%6)
+        // 一页之内热度递减。
+        val heats=page.items.map { HotRank.heatValue(page.ranking!!.positions[it.id]!!.heat)!! }
+        assertTrue(heats.zipWithNext().all { (a,b) -> a>b })
+        // 名次是这一档里的连续名次。
+        assertEquals(1,page.ranking!!.positions[page.items.first().id]!!.rank)
+        assertEquals(18,page.ranking!!.positions[page.items.last().id]!!.rank)
+        // 第二页接着 19，不重置 —— 名次是一个顺序，不是一页一页的。
+        val second=repo.ranking(2,ContentType.COMIC)
+        assertEquals(19,second.ranking!!.positions[second.items.first().id]!!.rank)
+        // 合成的是整份榜单：AI 榜最热的那部排在漫剧榜 100 部之后，而不是排在前面。
+        val all=repo.ranking(1,ContentType.COMIC,200)
+        assertEquals(200,all.items.size)
+        assertEquals(101,all.ranking!!.positions["1001"]!!.rank)
     }
 
     @Test fun aHeatTheSiteBrokeIsStillRead() {
@@ -317,14 +346,16 @@ class ContentRepositoryTest {
     @Test fun aBoardThatFailsDoesNotTakeTheWholeTabDown() {
         // 漫剧这一档有两个榜，一个挂了不该让整页空白：另一个照旧能看。
         val repo=repository { request ->
+            val page=request.url.queryParameter("page")?.toInt() ?: 1
             when(request.url.encodedPath) {
-                "/rank/hot-comic-drama" -> boardPage(Route.COMIC_DRAMA,rankPayload(1,5,"1","漫剧甲",rank=1,heat="5000万热度"))
+                "/rank/hot-comic-drama" -> boardPage(Route.COMIC_DRAMA,boardRows(page,20,9000-(page-1)*20,1+(page-1)*20))
                 "/rank/hot-ai-drama" -> throw IOException("boom")
                 else -> throw AssertionError("unexpected path "+request.url.encodedPath)
             }
         }
         val page=repo.ranking(1,ContentType.COMIC)
-        assertEquals(listOf("漫剧甲"),page.items.map { it.title })
+        assertEquals(18,page.items.size)
+        assertEquals("第 1 部",page.items.first().title)
     }
 
     @Test fun aShelfWithNoWorkingBoardAtAllFails() {

@@ -556,7 +556,11 @@ class MainActivity: Activity() {
             placeCatalogueRow(top,container,types)
             val heading=row().apply { setPadding(0,dp(8),0,dp(6)) }
             heading.addView(text("${library.contentType.label}热播榜",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
-            rankRefresh=addButton(heading,"刷新榜单") { page=1; catalogFocus=""; showCatalog(true) }.apply { nextFocusUpId=nav[tab].id }
+            rankRefresh=addButton(heading,"刷新榜单") {
+                // 整份榜单是取回来才排得出一个顺序的，所以它在内存里留着；刷新就是把它丢掉重取。
+                repository.clearRankingCache()
+                page=1; catalogFocus=""; showCatalog(true)
+            }.apply { nextFocusUpId=nav[tab].id }
             container.addView(heading)
             val source="来源：红果${library.contentType.label}热播榜"
             rankSubtitle=text(if(load) "正在读取最新榜单…" else ranking?.updatedText?.ifBlank { source } ?: source,13f,muted)
@@ -591,7 +595,7 @@ class MainActivity: Activity() {
             else { message(body,"正在加载…"); if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
             val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType
             work({
-                val result=when(requestTab) { TAB_HOME -> repository.home(requestPage,requestType); TAB_RANKING -> repository.ranking(requestPage,requestType); else -> repository.search(requestQuery,requestPage,requestType,library.catalogue()) }
+                val result=when(requestTab) { TAB_HOME -> repository.home(requestPage,requestType); TAB_RANKING -> repository.ranking(requestPage,requestType,pageSize); else -> repository.search(requestQuery,requestPage,requestType,library.catalogue()) }
                 result
             }, { result ->
                 if(requestTab==TAB_HOME && requestPage==1) library.cacheHome(requestType,result.items,result.hasMore)

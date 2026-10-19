@@ -123,21 +123,45 @@ internal object HotRank {
      * cannot be read is put last rather than guessed at: one row out of place is a small thing,
      * and inventing a number for it would be a lie in the place the user reads a ranking.
      */
-    fun merge(page: Int, boards: List<Board>): CatalogPage {
-        val rows = boards.flatMap { board -> board.items.map { series -> board.positions[series.id]?.heat to series } }
-        val ordered = rows.sortedByDescending { heatValue(it.first) ?: Long.MIN_VALUE }
-        // The site's own ranks are per route but continuous across pages - measured: page 2 of a
-        // board starts at 21, not at 1 - so the merged list starts where the site says this page
-        // starts, once per board. With one board that reproduces the site's numbering exactly; with
-        // two it is the shelf's own numbering, which is the thing the site does not publish.
-        val siteFirst = boards.mapNotNull { board -> board.positions.values.mapNotNull { it.rank }.minOrNull() }.minOrNull()
-        val base = if (siteFirst != null) (siteFirst - 1) * boards.size else (page - 1) * ordered.size
+    /**
+     * The cards of one app page, when the caller does not say.
+     *
+     * The app's grid is six columns wide, and a page whose size is not a multiple of six ends
+     * with a short row - the one thing the rest of the app is careful never to do. Eighteen is
+     * three full rows, which is the page size the app's browse lists use. The app passes its own
+     * size in, because the row width is the app's business and the two must not drift apart.
+     */
+    const val DEFAULT_PAGE_SIZE = 18
+
+    /** A shelf's hot list: every show it holds, in one order, with the place each one holds. */
+    class HotList(val items: List<Series>, val positions: Map<String, RankPosition>, val updatedText: String)
+
+    /**
+     * Puts the boards of a shelf into one list, in one heat order.
+     *
+     * The heat is a per-show number and reads the same on every board a show appears on, so the
+     * boards can be put in one order. That order is the whole point: sorting one board at a time
+     * would put the comic board's number 21 - hotter than the AI board's number 30 - after it, and
+     * the rank shown on screen would not be a rank at all. Measured 2026-10-19 on the 漫剧 shelf:
+     * the first screen's last card reads 5437万 and the second screen's first card reads 5500万.
+     *
+     * The ranks here are the place in that one order, counted from the hottest show of the shelf.
+     * A heat that cannot be read is put last rather than guessed at: one row out of place is a
+     * small thing, and inventing a number for it would be a lie in the place the user reads a
+     * ranking.
+     */
+    fun combine(boards: List<Board>): HotList {
+        val rows = boards.flatMap { board -> board.items.map { series -> board.positions[series.id] to series } }
+        // The same show can be on two boards - the site's overall board holds the hottest shows of
+        // every route, and a route's own board can repeat one. The hotter copy is the first one
+        // in heat order, so the id is kept once.
+        val seen = HashSet<String>()
+        val ordered = rows.filter { seen.add(it.second.id) }
+            .sortedByDescending { heatValue(it.first?.heat) ?: Long.MIN_VALUE }
         val positions = LinkedHashMap<String, RankPosition>()
-        ordered.forEachIndexed { index, (heat, series) -> positions[series.id] = RankPosition(base + index + 1, heat.orEmpty()) }
-        val items = ordered.map { it.second }
-        val totalPages = boards.minOfOrNull { it.totalPages } ?: 1
+        ordered.forEachIndexed { index, (position, series) -> positions[series.id] = RankPosition(index + 1, position?.heat.orEmpty()) }
         val updated = boards.firstOrNull { it.updatedText.isNotBlank() }?.updatedText.orEmpty()
-        return CatalogPage(items, items.isNotEmpty() && page < totalPages, HotRanking(positions, totalPages, updated))
+        return HotList(ordered.map { it.second }, positions, updated)
     }
 
     /**
