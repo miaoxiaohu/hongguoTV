@@ -12,12 +12,21 @@ visible as a one-line diff instead of a mystery.
 
 Usage: python diff-apk-strings.py <old.apk> <new.apk> [--cjk-only] [--min N]
        python diff-apk-strings.py <old-dir> <new-dir>   (directories of classes*.dex)
+
+The report is written as UTF-8. On a Chinese Windows console the default code page would turn
+every line into mojibake, and a diff nobody can read is not a diff.
 Exit 0 always - this is a report, not a gate. Use check-apk-version.py to gate a release.
 """
 import re
 import sys
 import zipfile
 from pathlib import Path
+
+# The report is Chinese more often than not, and the console on a Chinese Windows box is a
+# code page that cannot hold it. Write UTF-8 explicitly rather than letting the code page
+# decide what a diff looks like.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # A run of CJK text is user-facing copy; a run of ASCII identifiers is code.
 CJK = re.compile(r"[一-鿿　-〿＀-￯][一-鿿　-〿＀-￯ -~]{3,120}")
@@ -45,12 +54,29 @@ def strings_of(blobs: list[bytes], cjk_only: bool) -> set[str]:
 
 
 def main() -> int:
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    cjk_only = "--cjk-only" in sys.argv
+    # The option values have to be taken off the argument list themselves. Filtering out
+    # everything that starts with "--" would leave "--min 8" with a stray "8" looking like a
+    # third path, and the script would answer with its usage instead of the diff.
+    args: list[str] = []
+    cjk_only = False
     min_len = 0
-    for arg in sys.argv[1:]:
-        if arg.startswith("--min"):
-            min_len = int(arg.split("=", 1)[1]) if "=" in arg else 8
+    rest = sys.argv[1:]
+    index = 0
+    while index < len(rest):
+        arg = rest[index]
+        if arg == "--cjk-only":
+            cjk_only = True
+        elif arg == "--min":
+            index += 1
+            if index < len(rest) and rest[index].isdigit():
+                min_len = int(rest[index])
+            else:
+                min_len = 8
+        elif arg.startswith("--min="):
+            min_len = int(arg.split("=", 1)[1]) if arg.split("=", 1)[1].isdigit() else 8
+        elif not arg.startswith("-"):
+            args.append(arg)
+        index += 1
     if len(args) != 2:
         print(__doc__)
         return 2
