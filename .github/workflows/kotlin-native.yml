@@ -4,8 +4,19 @@ name: Verify Kotlin standalone APK
 on:
   push:
     branches: ['main']
+  # The release scripts run in release.yml, and that workflow only starts once a tag is
+  # pushed - by then the APK is built and signed. Listing them here gives a pull request a
+  # chance to catch a broken version calculation, certificate check or asset upload before
+  # it can reach a release.
   pull_request:
-    paths: ['kotlin-tv/**', 'scripts/build-kotlin.sh', '.github/workflows/kotlin-native.yml']
+    paths:
+      - 'kotlin-tv/**'
+      - 'scripts/build-kotlin.sh'
+      - 'scripts/publish-tv-update.py'
+      - 'scripts/check-apk-version.py'
+      - 'scripts/diff-apk-strings.py'
+      - '.github/workflows/kotlin-native.yml'
+      - '.github/workflows/release.yml'
   workflow_dispatch:
 permissions:
   contents: read
@@ -15,6 +26,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Release scripts parse
+        run: python3 -m py_compile scripts/publish-tv-update.py scripts/check-apk-version.py scripts/diff-apk-strings.py
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin

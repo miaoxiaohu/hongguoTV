@@ -336,9 +336,9 @@ class ContentRepositoryTest {
     }
 
     @Test fun aHeatTheSiteBrokeIsStillRead() {
-        // 站方偶尔在数字里塞一个控制字符（实测：「5997 万热度」）。读不出来的话这一行
+        // 站方偶尔在数字里塞一个控制字符（实测：「5997\u0000万热度」）。读不出来的话这一行
         // 就排不进去 —— 榜单是按热度排的，排不进去等于把它扔了。
-        assertEquals(59970000L,HotRank.heatValue("5997 万热度"))
+        assertEquals(59970000L,HotRank.heatValue("5997\u0000万热度"))
         assertEquals(83700000L,HotRank.heatValue("8370万热度"))
         assertEquals(120000000L,HotRank.heatValue("1.2亿热度"))
         assertEquals(null,HotRank.heatValue("热度暂无"))

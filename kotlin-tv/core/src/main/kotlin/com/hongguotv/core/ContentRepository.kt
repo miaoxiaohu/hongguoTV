@@ -193,8 +193,14 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         rankingCache[type]=list
         return list
     }
-    /** Throws the fetched boards away, so the next request goes to the site again. */
-    fun clearRankingCache() { rankingCache.clear() }
+    /**
+     * Throws the fetched boards away, so the next request goes to the site again.
+     *
+     * Synchronized for the same reason [rankingList] is: it empties the very map that method
+     * reads and writes, and a plain [LinkedHashMap] being emptied while another thread walks it
+     * is not a safe thing to do.
+     */
+    @Synchronized fun clearRankingCache() { rankingCache.clear() }
     /**
      * One route's page, exactly as the site serves it.
      *
@@ -271,6 +277,12 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
         var fuzzy=false
         val localRows = if(local==null) emptyList() else local.searchAllowingTypo(keyword,SEARCH_LOCAL_LIMIT,type).let { (rows,relaxed) -> fuzzy=relaxed; rows }
+        // 命中的总数要单独数一遍，不能从手上这份列表数出来。列表是给一页用的，总数是给
+        // 「第 X/Y 页 · 共 N 部」用的，两者的口径必须一致 —— 之前总数是列表长度，而列表被
+        // 截断过，于是「都市」明明命中 1042 部却写成「共 400 部」，翻过 13 页之后剩下的
+        // 600 多部再也走不到，翻页还会撞上一张「没有找到相关剧」的空白页。
+        // 命中为零时走的是错字容错，那份列表才是用户看到的，所以总数就取它。
+        val localTotal=if(local==null) 0 else if(fuzzy) localRows.size else local.count(keyword,type)
         // The server is asked on page one only. Its ten rows merely top up a page that the local
         // index has not filled, so re-asking on page two would spend a request to return rows that
         // are already merged in - and with no index at all it would spend one to answer nothing.
@@ -305,14 +317,14 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                 slice
             }
         }
-        val hasMore = localRows.size > page*SEARCH_PAGE_SIZE
+        val hasMore = localTotal > page*SEARCH_PAGE_SIZE
         // A local hit counts even when the word is only in the tags — 《雾锁情迷》 carries a
         // 「总裁」 tag — otherwise the tab would claim 「站内没有《总裁》」 while listing exactly
         // the shows that matched it.
-        val matched = localRows.size + filler.count { mentions(it.title,keyword) }
+        val matched = localTotal + filler.count { mentions(it.title,keyword) }
         // What paging will walk in total. Server filler is counted only on page one, where it is
         // actually merged in, so the number does not change as the user turns pages.
-        val total = localRows.size + if(page==1) filler.size else 0
+        val total = localTotal + if(page==1) filler.size else 0
         return CatalogPage(window.distinctBy { it.id },hasMore,null,matched,total,fuzzy)
     }
     private fun publicSearch(keyword: String): List<Series> {
@@ -429,8 +441,19 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         const val VIDEO_MODEL_API = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/video_model/v1/"
         /** One screen of search results, matching the 30 rows the list renders. */
         const val SEARCH_PAGE_SIZE = 30
-        /** Upper bound on local matches per search, so one keystroke cannot re-rank 2400 rows. */
-        private const val SEARCH_LOCAL_LIMIT = 400
+        /**
+         * How many local matches a search keeps.
+         *
+         * The site carries 2400 shows, so this is a ceiling no index can reach; it is here so a
+         * future one cannot make a keystroke hand back an unbounded list.
+         *
+         * It does **not** bound the work: [CatalogueIndex.search] sorts every match before it
+         * takes any of them, so a smaller cap cost exactly the same time and did one thing
+         * besides — it hid the rest of the library. The page counter and the 「共 N 部」 line
+         * were then computed from what was left, so both under-reported and the pages past the
+         * cap came up empty for a search that plainly had more.
+         */
+        const val SEARCH_LOCAL_LIMIT = 5000
         fun extractRouter(html: String): JSONObject {
             val marker=html.indexOf("_ROUTER_DATA"); if(marker<0) throw IOException("页面没有内容数据")
             val first=html.indexOf('{',marker); if(first<0) throw IOException("页面数据格式错误")

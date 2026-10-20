@@ -6,7 +6,9 @@ services:
     environment:
       BRIDGE_HOST: 0.0.0.0
       PORT: 8787
-      BRIDGE_TOKEN: ${BRIDGE_TOKEN:-}
+      # 对外监听必须带口令：服务会完成 CENC 密钥派生并返回已解密 MP4，
+      # 没有口令的开放监听等于把整站内容开放给同网段任意主机。
+      BRIDGE_TOKEN: ${BRIDGE_TOKEN:?BRIDGE_TOKEN is required for LAN exposure / 对外监听必须设置 BRIDGE_TOKEN}
     restart: unless-stopped
     init: true
     read_only: true

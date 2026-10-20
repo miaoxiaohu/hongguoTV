@@ -6,6 +6,7 @@ import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * The site's hot boards.
@@ -249,7 +250,7 @@ object HotRank {
      * "8370万热度" -> 837000000.
      *
      * The site's number is occasionally broken by a stray control character inside it - measured on
-     * the real board: 「5997 万热度」 - so the text is stripped down to the digits and the unit
+     * the real board: 「5997\u0000万热度」 - so the text is stripped down to the digits and the unit
      * before it is read. A heat that is not there at all reads as null, and the caller decides
      * what to do with a row it cannot place.
      */
@@ -275,7 +276,18 @@ object HotRank {
      * even fetched, because the cached list answered for it and was younger than a day.
      */
     class Cache {
-        private val lists=mutableMapOf<ContentType,HotList>()
+        /**
+         * The lists, one per shelf.
+         *
+         * A list is fetched on a worker thread and handed to the main thread, and the main
+         * thread reads the list it already holds while that fetch is still running - so this map
+         * is written and read at the same time from two threads. A plain LinkedHashMap is not
+         * safe for that: a read that lands in the middle of a write can see a broken map and
+         * hand back nothing, or worse. The map is concurrent instead, and each shelf's list is a
+         * single immutable value, so a reader sees either the old list or the new one and never
+         * a half-written one.
+         */
+        private val lists=ConcurrentHashMap<ContentType,HotList>()
 
         /** The list held for [type], whatever its age. */
         fun get(type: ContentType): HotList? = lists[type]

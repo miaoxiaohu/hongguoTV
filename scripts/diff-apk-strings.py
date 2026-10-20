@@ -67,13 +67,23 @@ def main() -> int:
         if arg == "--cjk-only":
             cjk_only = True
         elif arg == "--min":
-            index += 1
-            if index < len(rest) and rest[index].isdigit():
-                min_len = int(rest[index])
+            # The number belongs to --min. When it is not there, the next argument is a path
+            # and must not be eaten: swallowing it left one path behind, and the script
+            # answered with a usage message that read like "there is no difference".
+            if index + 1 < len(rest) and rest[index + 1].isdecimal():
+                min_len = int(rest[index + 1])
+                index += 1
             else:
-                min_len = 8
+                print("--min needs a number after it")
+                print(__doc__)
+                return 2
         elif arg.startswith("--min="):
-            min_len = int(arg.split("=", 1)[1]) if arg.split("=", 1)[1].isdigit() else 8
+            value = arg.split("=", 1)[1]
+            if not value.isdecimal():
+                print(f"--min needs a number, got {value!r}")
+                print(__doc__)
+                return 2
+            min_len = int(value)
         elif not arg.startswith("-"):
             args.append(arg)
         index += 1

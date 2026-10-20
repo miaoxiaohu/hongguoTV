@@ -1,5 +1,7 @@
 # React Native 与多平台方案
 
+> **本文描述的是 2026-09-21 首版 RN 客户端的方案，已不是当前产品的架构。** 现在交付的是 `kotlin-tv/` 里的 Kotlin + Android 原生独立版：单 APK 直连内容站点，不部署 Node 服务。方案与现状见 [kotlin-tv/README.md](../kotlin-tv/README.md)。本文保留下来，是因为旧 RN 客户端和 `server/` 仍在仓库里、仍可部署。
+
 更新日期：2026-09-21。状态：已按本方案实现首版 RN TV 客户端和独立 Node 服务；具体构建、媒体与设备验证证据见 [交付说明](FIRST_RELEASE.md)。
 
 ## 已确认的约束

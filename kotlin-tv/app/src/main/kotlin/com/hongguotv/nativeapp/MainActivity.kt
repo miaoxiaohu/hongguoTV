@@ -86,6 +86,14 @@ class MainActivity: Activity() {
      */
     private val pageSize=GRID_COLUMNS*3
     /**
+     * 这一页有多少张。
+     *
+     * 搜索页的页长是 core 给的 —— [ContentRepository.SEARCH_PAGE_SIZE]，一页 30 条；别的页是
+     * 网格自己定的 18。之前页数器、翻页时还原焦点的那段、还有「下一页」的门各按各的算，搜索页
+     * 于是翻到第 14 页以后就再也翻不动，而页码选择器还能跳到 35 页 —— 跳过去是一张空白页。
+     */
+    private fun pageSizeFor(which: Int)=if(which==TAB_SEARCH) ContentRepository.SEARCH_PAGE_SIZE else pageSize
+    /**
      * 榜单一页 36 部：六行六列。
      *
      * 榜单是一屏一屏地看的，比浏览列表的三行多 —— 之前一页 40 张（站方一页给多少就画多少），
@@ -151,6 +159,15 @@ class MainActivity: Activity() {
     }
     private lateinit var root: FrameLayout
     private var generation=0
+    /**
+     * 让 work 的回调作废的凭据。
+     *
+     * work() 原来拿 generation 当「我还是当前那个吗」的凭据，可 cancelWork() 并不动 generation ——
+     * 于是被取消的那次请求照样把「请求已取消」当成失败报上来：搜索页被清空、换成一张
+     * 「暂时无法加载」的错误页，再被下一次请求换回来。取消是 work 自己的事，用自己的编号；
+     * generation 留给播放器和选集面板，那两处的 ticket 是在 invalidatePage() 之后取的。
+     */
+    private val workTicket=WorkTicket()
     private var screen="catalog"
     private var tab=0
     private var page=1
@@ -170,6 +187,14 @@ class MainActivity: Activity() {
     /** 上次重绘索引进度时已收录的部数，用于把 68 次回调压成每 400 部一次。 */
     private var cataloguePaintMark=0
     private var catalogFocus=""
+    /**
+     * 当前这一页里焦点卡片的序号（第几张，从 0 起）。
+     *
+     * 翻页之后卡片 id 会变，但人的眼睛停在同一格。原来靠「按页长切片再取下标」来还原，而
+     * 搜索页的页长是 30、这里算的是 18，切出来的下标对第 19 张以后的卡片全是错的 —— 翻页必
+     * 丢焦点，而且算出来的新页也是旧页里的。直接记序号就跟页长无关了。
+     */
+    private var focusColumn:Int?=null
     /**
      * 异步加载期间用户可能用 D-pad 把焦点从 nav/typeButtons 移到 searchRow 里的搜索/历史/手机输入/
      * 续建索引这些按钮。releaseCatalogViews 之后这些 view 引用会清，加载回调拿不回当时焦点，
@@ -330,6 +355,8 @@ class MainActivity: Activity() {
         artwork.load(view,url,if(focused) ArtworkLoader.PRIORITY_FOCUSED else ArtworkLoader.PRIORITY_VISIBLE)
     }
     private fun cancelWork() {
+        // 作废上一次 work 的回调：被取消的请求不是失败，不该把「请求已取消」端到页面上。
+        workTicket.cancel()
         deferredWork?.discard?.invoke(); deferredWork=null
         workScope?.cancel(); workScope=null
         workJob?.cancel(true); workJob=null
@@ -351,19 +378,19 @@ class MainActivity: Activity() {
     }
     private fun <T> work(action: ()->T,done: (T)->Unit,failed: (Throwable)->Unit) {
         cancelWork()
-        val ticket=generation; val scope=RequestScope(); workScope=scope
+        val ticket=workTicket.next(); val scope=RequestScope(); workScope=scope
         workJob=io.submit {
             try {
                 val result=scope.run(action)
                 main.post {
                     val discard={ if(result is RemoteVideo) result.close(); Unit }
-                    if(isDestroyed || generation!=ticket) discard()
+                    if(isDestroyed || !workTicket.isCurrent(ticket)) discard()
                     else if(foreground) done(result)
                     else { deferredWork?.discard?.invoke(); deferredWork=DeferredUi({ done(result) },discard) }
                 }
             } catch(e: Exception) {
                 main.post {
-                    if(!isDestroyed && generation==ticket) {
+                    if(!isDestroyed && workTicket.isCurrent(ticket)) {
                         if(foreground) failed(e) else deferredWork=DeferredUi({ failed(e) })
                     }
                 }
@@ -384,7 +411,7 @@ class MainActivity: Activity() {
     private fun switchTab(next: Int) {
         leaveCollection()
         tabState[tab]=CatalogState(page,catalog,hasMore,ranking); tabFocus[tab]=catalogFocus
-        tab=next; val saved=tabState[next]; page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; catalogFocus=tabFocus[next].orEmpty()
+        tab=next; val saved=tabState[next]; page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; catalogFocus=tabFocus[next].orEmpty(); focusColumn=null
         // 搜索页只有真的放过一个词才去请求；空着的搜索框配一张空网格，什么也没说。
         // 从导航按「搜索」进来时焦点交给输入框：那才是这一页要做的事，跳到结果卡片等于让人先
         // 看结果再想办法回去改词。返回详情页时不走这里，焦点仍旧回到上次看的那张卡。
@@ -408,7 +435,7 @@ class MainActivity: Activity() {
         library.contentType=type
         dropShelfCachedPages()
         releaseCatalogViews()
-        page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""; homePosition=null
+        page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""; focusColumn=null; homePosition=null
         // query 可能还是上一次搜索留下的。非空不等于现在在搜索页 —— 在首页上切分类，
         // 按 query 非空去发请求会把搜索结果画到首页上。
         showCatalog(load=(tab==TAB_HOME || tab==TAB_RANKING || (tab==TAB_SEARCH && query.isNotBlank())),focusType=true)
@@ -421,7 +448,7 @@ class MainActivity: Activity() {
     }
     private fun showCollection(kind: String) {
         collectionReturn=CatalogState(page,catalog,hasMore,ranking); collectionFocus=catalogFocus
-        collection=kind; page=1; catalogFocus=""; showCatalog()
+        collection=kind; page=1; catalogFocus=""; focusColumn=null; showCatalog()
     }
     /**
      * 片库按钮能不能塞进导航栏那一行的右上角。
@@ -584,7 +611,7 @@ class MainActivity: Activity() {
         }
         val body=column(); catalogBody=body; container.addView(body,lp(-1,0).apply { weight=1f })
         if(localCatalog()) {
-            catalog=localItems(); ranking=null; searchMatched=null; searchTotal=null; searchFuzzy=false; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=page*pageSize<catalog.size
+            catalog=localItems(); ranking=null; searchMatched=null; searchTotal=null; searchFuzzy=false; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSizeFor(tab)-1)/pageSizeFor(tab))); hasMore=page*pageSizeFor(tab)<catalog.size
         }
         if(load) {
             if(tab==TAB_RANKING) {
@@ -713,10 +740,10 @@ class MainActivity: Activity() {
         // 榜单的一页有多少行就画多少行：真人剧档 20 行，漫剧档是两张榜合成后的 40 行。
         // 那个 take(30) 是搜索页的一页（30 条搜索结果），套到榜单上会把第 31 到 40 行永远
         // 藏起来 —— 名次是连续的，看得见的和看不见的之间会凭空少掉一截。
-        val displayed=if(localCatalog()) catalog.drop((page-1)*pageSize).take(pageSize)
+        val displayed=if(localCatalog()) catalog.drop((page-1)*pageSizeFor(tab)).take(pageSizeFor(tab))
             else if(tab==TAB_HOME) catalog.filterNot { it.id in library.hidden() }
             else if(tab==TAB_RANKING) catalog
-            else catalog.take(30)
+            else catalog.take(ContentRepository.SEARCH_PAGE_SIZE)
         if(displayed.isEmpty()) {
             message(list,if(loading) "正在加载推荐…" else when(tab) { TAB_SEARCH -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关剧，换个关键词试试"; TAB_FAVORITES -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; TAB_HISTORY -> "播放过的剧集会自动保存在这里"; else -> "本页没有更多内容" })
             // 没结果可跳时，searchInput / searchButton / searchActions 的 ↓ 不能再指 cards.first()，
@@ -782,6 +809,9 @@ class MainActivity: Activity() {
             val line=row().apply { gravity=Gravity.TOP }
             val built=mutableListOf<View>()
             items.forEachIndexed { columnIndex,item ->
+                // 这一页里的序号。翻页后靠它把焦点放回同一格 —— 与页长无关，所以搜索页
+                // （core 给 30 条一页）和别的页（18）用的是同一套算法。
+                val pageIndex=cards.size
                 val card=column(); card.setPadding(dp(4),dp(4),dp(4),dp(9)); focusStyle(card); card.contentDescription=item.title; card.tag=item.id; catalogCards[item.id]=card
                 val position=if(tab==TAB_RANKING) ranking?.positions?.get(item.id) else null
                 val artwork=FrameLayout(this); card.addView(artwork,lp(-1,((cardWidth-dp(8))/TvStyle.POSTER_ASPECT).toInt()))
@@ -798,7 +828,7 @@ class MainActivity: Activity() {
                 card.setOnClickListener { catalogFocus=item.id; openDetail(item,tab==TAB_HISTORY || collection=="resume" || collection=="updates") }
                 card.setOnLongClickListener { catalogFocus=item.id; quickActions(item,card); true }
                 card.setOnKeyListener { _,key,event -> if(key==KeyEvent.KEYCODE_MENU) { if(event.action==KeyEvent.ACTION_UP) { catalogFocus=item.id; quickActions(item,card) }; true } else false }
-                card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) { catalogFocus=item.id; loadCover(image,item.cover); preview?.show(item,selectionStatus(item)); if(!restoringScroll) scroll.post { scroll.smoothScrollTo(0,when { line.top<scroll.scrollY -> line.top; line.bottom>scroll.scrollY+scroll.height -> (line.bottom-scroll.height).coerceAtLeast(0); else -> scroll.scrollY }) } } }
+                card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) { catalogFocus=item.id; focusColumn=pageIndex; loadCover(image,item.cover); preview?.show(item,selectionStatus(item)); if(!restoringScroll) scroll.post { scroll.smoothScrollTo(0,when { line.top<scroll.scrollY -> line.top; line.bottom>scroll.scrollY+scroll.height -> (line.bottom-scroll.height).coerceAtLeast(0); else -> scroll.scrollY }) } } }
                 // The row measures its tallest card, then stretches siblings to keep badges aligned.
                 line.addView(card,lp(cardWidth,-1).apply { if(columnIndex<columns-1) rightMargin=gap }); built+=card; cards+=card
             }
@@ -866,7 +896,13 @@ class MainActivity: Activity() {
         if(anchorView!=null) anchorView.requestFocus()
         else if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else if(focusNav) nav[tab].requestFocus()
         else if(resumeCards.isNotEmpty() && (catalogFocus.isEmpty() || catalogFocus.startsWith("resume:"))) (resumeCards.firstOrNull { it.tag==catalogFocus } ?: resumeCards.first()).requestFocus()
-        else cards[displayed.indexOfFirst { it.id==catalogFocus }.coerceAtLeast(0)].requestFocus()
+        else {
+            // 还记得是那张卡就还在那张卡上；那张卡这一页没有了（翻页、换词）就退到同一格 ——
+            // 那一格是翻页前记下的序号，与页长无关，所以搜索页不会再每翻一页就丢一次焦点。
+            val index=catalogFocus.takeIf { it.isNotEmpty() }?.let { id -> displayed.indexOfFirst { it.id==id } }?.takeIf { it>=0 }
+                ?: focusColumn?.takeIf { it<displayed.size }
+            cards[index ?: 0].requestFocus()
+        }
         val savedScroll=scrollPositions[catalogPageKey]
         scroll.post {
             if(catalogScroll!==scroll) return@post
@@ -948,9 +984,9 @@ class MainActivity: Activity() {
         if(removed && (localCatalog() || tab==TAB_HOME)) {
             val oldIds=catalogCards.keys.toList(); val index=oldIds.indexOf(changedId).coerceAtLeast(0)
             if(localCatalog()) {
-                catalog=localItems(); page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=page*pageSize<catalog.size
+                catalog=localItems(); page=page.coerceIn(1,maxOf(1,(catalog.size+pageSizeFor(tab)-1)/pageSizeFor(tab))); hasMore=page*pageSizeFor(tab)<catalog.size
             }
-            val remaining=if(localCatalog()) catalog.drop((page-1)*pageSize).take(pageSize) else catalog.filterNot { it.id in library.hidden() }
+            val remaining=if(localCatalog()) catalog.drop((page-1)*pageSizeFor(tab)).take(pageSizeFor(tab)) else catalog.filterNot { it.id in library.hidden() }
             catalogFocus=remaining.getOrNull(index.coerceAtMost((remaining.size-1).coerceAtLeast(0)))?.id.orEmpty()
             val y=catalogScroll?.scrollY ?: 0; scrollPositions[catalogPageKey]=y
             artwork.cancelPage(); favoriteBadges.clear()
@@ -1067,25 +1103,20 @@ class MainActivity: Activity() {
      * 「正在加载…」再立刻跳走，那一下闪烁比等待本身更让人以为卡住了。回到第 1 页仍然要发请求，
      * 因为只有那一页会用服务端那十行补位，所以那一次仍旧走异步。
      *
-     * 翻页前先按列号把 catalogFocus 重新映射到新页的同一位置上。原本直接 catalogFocus=""
-     * 导致翻页后焦点总是跳回第 1 张，体验差。
+     * 翻页后焦点回到新页的同一格。那一格由 [focusColumn] 记着 —— 翻页前那张卡在它自己那一页
+     * 里的序号。原先是「按页长切片再取下标」重算 catalogFocus，而切片用的页长和搜索页真正的
+     * 页长不是一个数，下标对第 19 张以后的卡片全是错的，于是每翻一页焦点就跳回第 1 张。
      */
     private fun turnPage(target: Int) {
-        val previousFocus=catalogFocus
-        val previousPage=page
         page=target
-        if(tab==TAB_SEARCH && previousFocus.isNotEmpty() && previousPage!=target) {
-            val oldPage=catalog.drop((previousPage-1)*pageSize).take(pageSize)
-            val oldIdx=oldPage.indexOfFirst { it.id==previousFocus }
-            if(oldIdx>=0) {
-                val newPage=catalog.drop((target-1)*pageSize).take(pageSize)
-                catalogFocus=newPage.getOrNull(oldIdx.coerceAtMost(newPage.lastIndex))?.id.orEmpty()
-            } else {
-                catalogFocus=""
-            }
-        } else {
-            catalogFocus=""
-        }
+        // 旧页上那张卡这一页没有了，焦点得重新放。放哪一格由 focusColumn 记着 —— 那是翻页前
+        // 那张卡在它自己那一页里的序号，与页长无关，所以搜索页不会再每翻一页就丢一次焦点。
+        // catalogFocus 先清掉：旧页的 id 在新页里找不到时，不能再被当成「还记得的卡」而挡住
+        // 同一格的还原。
+        //
+        // 原来这段是「按页长切片再取下标」，而切片用的页长（18）和搜索页真正的页长（30）不是
+        // 一个数，于是第 19 张以后的卡片下标全是错的，新页也是从旧页里切出来的。
+        catalogFocus=""
         if(localCatalog()) { showCatalog(false); return }
         val local=library.catalogue()
         if(tab!=TAB_SEARCH || local==null) { showCatalog(true); return }
@@ -1122,9 +1153,9 @@ class MainActivity: Activity() {
     }
     /** 这一页一共有几页。 */
     private fun pageCount(): Int = when {
-        localCatalog() -> maxOf(1,(catalog.size+pageSize-1)/pageSize)
+        localCatalog() -> maxOf(1,(catalog.size+pageSizeFor(tab)-1)/pageSizeFor(tab))
         tab==TAB_RANKING && ranking!=null -> ranking!!.totalPages
-        tab==TAB_SEARCH && (searchTotal ?: 0)>0 -> maxOf(1,((searchTotal ?: 0)+pageSize-1)/pageSize)
+        tab==TAB_SEARCH && (searchTotal ?: 0)>0 -> maxOf(1,((searchTotal ?: 0)+pageSizeFor(tab)-1)/pageSizeFor(tab))
         else -> 1
     }
     /**
@@ -1151,7 +1182,7 @@ class MainActivity: Activity() {
             page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking
             catalogFocus=tabFocus[TAB_SEARCH].orEmpty()
         }
-        page=1; catalogFocus=""
+        page=1; catalogFocus=""; focusColumn=null
         searchMatched=null; searchTotal=null; searchFuzzy=false; showCatalog(true)
     }
     private fun showSearchHistory(anchor: View) {
@@ -1246,9 +1277,10 @@ class MainActivity: Activity() {
     }
 
     /**
-     * 查询同系列其它季度并渲染；查过就按剧缓存，进其它剧再回来不必重发。
+     * 查询同系列其它季度并渲染。
      *
-     * 缓存命中时静默返回：详情页每次重建都会调它，放一句「正在查找…」会让整块反复闪一下。
+     * **不缓存**：每次都重新查，避免进别的剧再回来时看到的是上次那份快照。详情页每次重建
+     * 都会调它，所以缓存命中时也不写「正在查找…」—— 那一行每闪一次都是一次视觉噪音。
      */
     private fun loadSeasons(data: Detail) {
         val holder=seasonsHolder ?: return

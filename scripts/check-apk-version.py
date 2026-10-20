@@ -21,11 +21,12 @@ asserts it is gone, which is the actual failure signature - a stale build
 carries the old string even when the manifest is right.
 
 Usage: python check-apk-version.py <apk> <versionName> <versionCode> [previousVersionName]
-Exit 0 when the dex carries the version, 1 when it does not.
+Exit 0 when the dex carries the version, 1 when it does not, 2 when the arguments are wrong.
 """
 import struct
 import sys
 import zipfile
+from pathlib import Path
 
 
 def _dex_blobs(apk: str):
@@ -61,8 +62,21 @@ def main() -> int:
     if len(sys.argv) not in (4, 5):
         print(__doc__)
         return 2
-    apk, version_name, version_code = sys.argv[1], sys.argv[2], int(sys.argv[3])
+    apk, version_name, version_code_text = sys.argv[1], sys.argv[2], sys.argv[3]
     previous = sys.argv[4] if len(sys.argv) == 5 else None
+    # This is the last gate before a release, so a wrong version code has to produce a
+    # verdict, not a traceback. The code has to be a plain non-negative integer: "0.1.1" in
+    # the versionCode slot means the name and the code were put in the wrong order.
+    # isdecimal() and not isdigit(): the latter accepts "²", which int() then refuses.
+    if not version_code_text.isdecimal():
+        print(f"FAIL versionCode must be a non-negative integer, got {version_code_text!r}")
+        print("\nThe arguments are <apk> <versionName> <versionCode> [previousVersionName].")
+        print("A version name in the versionCode slot means the two were swapped.")
+        return 2
+    version_code = int(version_code_text)
+    if not Path(apk).is_file():
+        print(f"FAIL APK not found: {apk}")
+        return 2
     blobs = _dex_blobs(apk)
     if not blobs:
         print("FAIL no classes.dex in the APK")

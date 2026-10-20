@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useReducer, useRef } from "react";
-import { ContentProvider, mergePage, Series } from "../domain/model";
+import { ContentProvider, hasMorePages, mergePage, Series } from "../domain/model";
 
 type Page = {
   items: Series[];
@@ -48,7 +48,10 @@ export function useCatalog(
       Object.assign(next, {
         items: replace ? rows : mergePage(previous.items, rows),
         page,
-        more: rows.length > 0,
+        // The site answers every page with the same rows, so a page that brings
+        // nothing new means the list is complete and "加载更多" must become
+        // "已经到底了" instead of inviting another identical click.
+        more: hasMorePages(previous.items, rows, replace),
       });
     } catch (e) {
       next.error = e instanceof Error ? e.message : "内容加载失败";

@@ -16,11 +16,55 @@ data class BackupData(val favorites: List<Series>,val history: List<BackupProgre
 object LibraryBackup {
     const val MAX_BYTES=2*1024*1024
     private val idPattern=Regex("[0-9]{1,30}")
+
+    /**
+     * The names that only ever mean something inside a network.
+     *
+     * A cover URL is fetched by the app, and a backup reaches the TV over a QR code - so the URL
+     * in it is untrusted input that ends up as an outgoing request. These suffixes are the ones
+     * reserved for names that resolve inside a network: `metadata.google.internal` is the
+     * metadata service of a cloud host, `home.arpa` is the home network, and the rest are the
+     * private-use names a site may use to point at itself.
+     */
+    private val reservedSuffixes=listOf(".internal",".intranet",".private",".corp",".home",".local",".localhost",".lan",".home.arpa",".test",".example",".invalid")
+    /** A host name: two or more labels of letters, digits and dashes, and nothing else. */
+    private val hostPattern=Regex("[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+")
+    /** An address in any of the notations a URL may use, not only the dotted decimal one. */
+    private fun isAddress(host: String): Boolean {
+        val labels=host.split('.')
+        // A name of nothing but digits is an address in one of its forms: 127.0.0.1, 127.1,
+        // 2130706433 - all of them are read as an address by the resolver.
+        if(labels.all { it.isNotEmpty() && it.all { c -> c.isDigit() } }) return true
+        if(labels.size==4 && labels.all { label ->
+            val value=when {
+                label.startsWith("0x")->label.removePrefix("0x").toLongOrNull(16)
+                label.length>1 && label.startsWith("0")->label.removePrefix("0").toLongOrNull(8)
+                else->label.toLongOrNull(10)
+            }
+            value!=null && value in 0..255
+        }) return true
+        return labels.size==1 && labels[0].startsWith("0x")
+    }
+    /**
+     * True when the URL may be fetched.
+     *
+     * The rules keep a request out of the network it sits in: an address in any notation is
+     * refused, a name that is reserved for private use is refused, and a name that is not a
+     * host name at all - one label, an underscore, an empty label - is refused. What is left is
+     * a name that has to be resolved before it can be fetched, and a name that resolves to a
+     * private address cannot be recognised without asking DNS - which a decode may not do, and
+     * which would be decided once here and once again when the request is made. The fetch path
+     * is the place for that check; this one refuses everything that can be refused without it.
+     */
+    fun isPublicCoverUrl(value: String): Boolean {
+        val uri=runCatching { URI(value) }.getOrNull() ?: return false
+        val host=uri.host?.lowercase().orEmpty()
+        return value.length<=2048 && uri.scheme=="https" && uri.userInfo==null && host.isNotEmpty() &&
+            !host.contains(':') && !isAddress(host) && hostPattern.matches(host) &&
+            reservedSuffixes.none { host==it.removePrefix(".") || host.endsWith(it) } && value.none(Char::isISOControl)
+    }
+    private fun cleanCover(value: String): String=if(isPublicCoverUrl(value)) value else ""
     private fun id(value: String)=value.also { require(idPattern.matches(it)) { "剧集标识无效" } }
-    private fun cleanCover(value: String): String=runCatching {
-        val uri=URI(value); val host=uri.host.orEmpty().lowercase()
-        value.takeIf { it.length<=2048 && uri.scheme=="https" && uri.userInfo==null && host.isNotEmpty() && !host.contains(':') && !host.matches(Regex("[0-9.]+")) && host!="localhost" && !host.endsWith(".local") && !host.endsWith(".lan") && value.none(Char::isISOControl) }.orEmpty()
-    }.getOrDefault("")
     private fun cleanText(value: String,max: Int)=value.map { if(it.isISOControl()) ' ' else it }.joinToString("").take(max)
     fun seriesJson(series: Series)=series.copy(title=cleanText(series.title,200),cover=cleanCover(series.cover),description="",badge=cleanText(series.badge,100),tags=cleanText(series.tags,200)).toJson()
     fun encode(data: BackupData): String {

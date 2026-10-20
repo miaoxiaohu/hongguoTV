@@ -308,6 +308,11 @@ export default function App() {
           <Text style={s.muted}>剧集详情 · 返回键回到列表</Text>
         )}
       </View>
+      {!!message && (
+        <Text accessibilityLiveRegion="polite" style={[s.feedback, s.banner]}>
+          {message}
+        </Text>
+      )}
       {detailId ? (
         busy ? (
           <Notice message="正在加载剧集…" busy />
@@ -387,11 +392,6 @@ export default function App() {
               }
             />
           </View>
-          {!!message && (
-            <Text accessibilityLiveRegion="polite" style={s.feedback}>
-              {message}
-            </Text>
-          )}
           <Text style={s.note}>
             测试播放器使用 Blender 的 Big Buck Bunny
             公开样片。此测试不代表红果内容可用。{"\n"}
@@ -522,5 +522,6 @@ const s = StyleSheet.create({
   row: { flexDirection: "row", gap: 12, flexWrap: "wrap" },
   search: { flexDirection: "row", gap: 12, marginBottom: 12 },
   feedback: { color: palette.accent, fontSize: 17 },
+  banner: { marginBottom: 10 },
   note: { color: palette.muted, fontSize: 15, lineHeight: 24, marginTop: 8 },
 });

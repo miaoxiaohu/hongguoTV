@@ -21,7 +21,7 @@
 |---|---|---|
 | `core/.../AppUpdates.kt:21` `REPOSITORY` | `miaoxiaohu/hongguoTV` | ✅ 已公开，匿名 200 |
 | `core/.../AppUpdatesTest.kt:52`（注释） | 同上 | ✅ |
-| `scripts/sync-kotlin-public.py:11,29` | `N3urda/hongguoTV-updates` | ❌ 该仓库零 release，脚本目标已过时 |
+| `scripts/sync-kotlin-public.py` | `N3urda/hongguoTV-updates` | ❌ 该仓库零 release，脚本目标已过时；脚本已停用并加了护栏 |
 | `kotlin-tv/README.md:10`（下载链接） | 已改指本仓库 | ✅ |
 
 这里有两个先后踩的坑，值得记下来：
@@ -127,9 +127,17 @@ git push origin main kotlin-v0.9.10
 `release.yml` 被 tag 触发后依次做：
 
 1. 校验 tag 形如 `kotlin-vX.Y.Z`，并从 tag 派生 `versionName` 与 `versionCode`。
-2. **单调性护栏**：新版本必须严格高于当前 latest，同名或倒退直接失败退出。
+2. **单调性护栏**：新版本必须严格高于**所有已发布 `kotlin-v` 版本里的最高那个**，同名或倒退直接失败退出。
    这道闸很关键——`AppUpdates.kt:16` 只认 `versionCode > installed`，
    一旦发布出比线上更低的版本号，电视会永远收不到后续更新，而且没有任何报错。
+   比较对象是**全部已发布标签**，不是「当前 latest 那一个」：本仓库同时存在 RN 版的
+   `v0.1.0` / `v0.1.1` 标签，latest 指针一旦落在它们身上，拿 latest 当基准的检查
+   就会整段跳过，一个更旧的 `kotlin-v` 能被发布出去并**抢占 latest 标记** ——
+   而电视读的就是 `releases/latest/download/update.json`，未升级的电视就此停在旧版。
+   拿不到已发布标签列表时一律拒绝发布，不当作「无从比较，放行」。
+   （`publish-tv-update.py` 同理：它现在也会拒绝接管 latest，理由写在脚本的报错里。
+   代价是一个**从未发布过** kotlin-v 的仓库，其首个版本需要手工发 —— 本仓库已有二十多个，
+   不会触发。）
 3. 从 Actions Secrets 恢复签名密钥到 runner 临时目录（`umask 077`）。
 4. 跑 `:core:test`、`:app:lintRelease`、`:app:assembleRelease`——测试不过就不会发布。
 5. `scripts/publish-tv-update.py` 校验证书、包名、versionCode/versionName、minSdk 后，
@@ -181,8 +189,9 @@ CI 每次都是全新 checkout、不存在增量缓存，所以云端构建不�
 
 - `.github/workflows/kotlin-public-sync.yml` — 改为只保留 `workflow_dispatch`，
   手动触发会直接报错并指向 `release.yml`。文件保留以便回退。
-- `scripts/sync-kotlin-public.py` — 逻辑原样保留，仅在文件头注明已停用。
-  其 `line 11` 的白名单仍写着 `N3urda/hongguoTV-updates`，**启用前必须改**。
+- `scripts/sync-kotlin-public.py` — 已停用，并**加了护栏**：默认拒绝执行，必须显式
+  `--force`；`--dry-run` 只打印计划不改任何东西；目标仓库必须在白名单里、不能是本仓库、
+  必须是 git 仓库。启用前仍须把白名单改成新的公开更新仓库。
 
 若将来要把源码改回私有：另建一个**公开**的 release-only 仓库，改白名单，
 把 `AppUpdates.REPOSITORY` 指过去，并配置 `TV_UPDATES_DEPLOY_KEY` 与 `TV_UPDATES_ENABLED`。

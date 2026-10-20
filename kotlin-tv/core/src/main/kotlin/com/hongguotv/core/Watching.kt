@@ -31,14 +31,31 @@ object ResumePlayback {
 /** Seen count is a high-water mark, so temporary catalog shrinkage is not a new update. */
 data class FavoriteUpdate(val total: Int,val seen: Int,val checkedAt: Long) {
     val added get()=(total-seen).coerceAtLeast(0)
+    /**
+     * A show with no episodes has nothing to compare, so the count is refused and the last known
+     * state stands.
+     *
+     * The old rule was `require(count>0)`, which throws an IllegalArgumentException - and the
+     * callers are on the main thread, so one show with no episodes took the whole check down
+     * with it. Refusing is the safe answer: an empty episode list is not evidence that the show
+     * lost episodes, and overwriting the last known count with a meaningless one would invent
+     * an update the user never had.
+     */
     fun observe(count: Int,now: Long,acknowledge: Boolean=false): FavoriteUpdate {
-        require(count>0)
+        if(count<=0) return this
         if(now<checkedAt) return this
         return FavoriteUpdate(count,if(acknowledge) maxOf(seen,count) else seen,now)
     }
     fun json()=JSONObject().put("total",total).put("seen",seen).put("checkedAt",checkedAt)
     companion object {
-        fun first(count: Int,now: Long): FavoriteUpdate { require(count>0); return FavoriteUpdate(count,count,now) }
+        /**
+         * The first look at a show.
+         *
+         * A show with no episodes has no baseline to speak of, so the count is empty rather
+         * than an exception. [LibraryIndex.observeFavorite] refuses such a count before it gets
+         * here, so this only matters to a caller that asks for a baseline directly.
+         */
+        fun first(count: Int,now: Long): FavoriteUpdate { val total=count.coerceAtLeast(0); return FavoriteUpdate(total,total,now) }
         fun decode(value: JSONObject?)=runCatching {
             require(value!=null)
             val total=value.getInt("total"); val seen=value.getInt("seen"); val time=value.getLong("checkedAt")

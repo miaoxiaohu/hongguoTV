@@ -19,11 +19,11 @@ docker compose --env-file .env -f server/compose.yaml ps
 ```dotenv
 BRIDGE_BIND_IP=0.0.0.0
 BRIDGE_PORT=8787
-BRIDGE_TOKEN=
+BRIDGE_TOKEN=请填一个自己的口令
 HONGGUOTV_VERSION=0.1.1
 ```
 
-`BRIDGE_TOKEN` 留空表示不启用口令，填入值后电视端也应填写相同口令；不要提交实际 `.env`。`BRIDGE_BIND_IP` 控制宿主机监听网卡，默认开放宿主机各网卡；可填宿主机家庭网络地址。`BRIDGE_PORT` 是电视访问的宿主机端口，容器内始终为 8787。`HONGGUOTV_VERSION` 仅供下面的预构建镜像模式使用。
+`BRIDGE_TOKEN` 是**对外监听的必备项**：服务会在本机完成 CENC 密钥派生并返回已解密的 MP4，没有口令的开放监听等于把整站内容开放给同网段任意主机。监听地址不是回环地址（`--lan`、`BRIDGE_HOST=0.0.0.0`）而口令为空时，**服务拒绝启动并给出提示**；只有默认的本机自用（`127.0.0.1`）才允许不带口令。填入口令后电视端也要填写相同值；不要提交实际 `.env`。`BRIDGE_BIND_IP` 控制宿主机监听网卡，默认开放宿主机各网卡；可填宿主机家庭网络地址。`BRIDGE_PORT` 是电视访问的宿主机端口，容器内始终为 8787。`HONGGUOTV_VERSION` 仅供下面的预构建镜像模式使用。
 
 ## 使用 GitHub 预构建镜像
 
@@ -44,14 +44,14 @@ docker compose --env-file .env ps
 
 在电视「设置」中填入 `http://宿主机局域网IP:8787`，例如 `http://192.168.1.10:8787`。不要填容器内部的 `172.x` 地址或电视自身的 `127.0.0.1`。如果修改了 `BRIDGE_PORT`，这里也使用新端口。服务设备保持开机，防火墙允许家庭网络访问该端口。
 
-无口令时可以在宿主机检查：
+在宿主机检查（口令取自 `.env`）：
 
 ```sh
-curl --fail http://127.0.0.1:8787/health
+curl --fail -H "Authorization: Bearer $BRIDGE_TOKEN" http://127.0.0.1:8787/health
 docker compose -f server/compose.yaml logs --tail=100
 ```
 
-如果绑定了指定网卡，curl 使用对应宿主机地址。配置口令后，无认证 curl 返回 401 属于预期；容器内置健康检查会使用配置的口令。`healthy` 只说明服务进程与认证正常，真实内容需要在电视打开剧集验证，或在开发环境运行 `npm run probe`。
+如果绑定了指定网卡，curl 使用对应宿主机地址。不带口令的 curl 返回 401 属于预期；容器内置健康检查会使用配置的口令。`healthy` 只说明服务进程与认证正常，真实内容需要在电视打开剧集验证，或在开发环境运行 `npm run probe`。
 
 容器以非 root 用户、只读文件系统运行，配置自动重启和日志轮转。更改 `.env` 后重新执行对应的 `up -d`；停止服务使用对应的 `down`，电视本地收藏不受影响。需要公网访问或跨家庭访问时，应另行设计网络和访问控制。
 

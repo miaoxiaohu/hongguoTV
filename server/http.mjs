@@ -1,6 +1,20 @@
 import http from "node:http";
 import { timingSafeEqual } from "node:crypto";
 
+// The service derives the CENC key and decrypts media for whoever can reach it, so an
+// exposed listener without a token is refused instead of serving plain MP4 to the LAN.
+export function bridgeExposureError(host, token) {
+  const target = String(host || "").trim();
+  if (!target) return null;
+  const loopback =
+    target === "localhost" ||
+    target === "::1" ||
+    target === "[::1]" ||
+    /^127\./.test(target);
+  if (loopback || token) return null;
+  return `拒绝启动：监听地址 ${target} 不是回环地址，必须设置 BRIDGE_TOKEN（客户端用 Authorization: Bearer <口令> 携带）。本机自用请保持默认监听 127.0.0.1。`;
+}
+
 export function byteRange(value, total) {
   if (!value) return [0, total - 1];
   const m = /^bytes=(\d*)-(\d*)$/.exec(value);
@@ -20,13 +34,18 @@ export function byteRange(value, total) {
     : null;
 }
 
-export function createServer(provider, token = "") {
+export function createServer(provider, token = "", options = {}) {
   let activeStreams = 0;
+  // A client that fills the socket buffer and then stops reading must not pin a slot
+  // forever: the wait for drain/close is bounded and the response is destroyed on timeout.
+  const backpressureTimeout = Number(options.backpressureTimeout ?? 30000);
+  const maxStreams = Number(options.maxStreams ?? 4);
   return http.createServer(async (req, res) => {
-    const json = (status, value) => {
+    const json = (status, value, headers = {}) => {
       res.writeHead(status, {
         "Content-Type": "application/json; charset=utf-8",
         "Cache-Control": "no-store",
+        ...headers,
       });
       res.end(JSON.stringify(value));
     };
@@ -41,7 +60,7 @@ export function createServer(provider, token = "") {
         return json(401, { error: "服务访问口令不正确" });
     }
     if (!["GET", "HEAD"].includes(req.method))
-      return json(405, { error: "Method not allowed" });
+      return json(405, { error: "Method not allowed" }, { Allow: "GET, HEAD" });
     try {
       if (url.pathname === "/health")
         return json(200, {
@@ -73,18 +92,21 @@ export function createServer(provider, token = "") {
         url.pathname
       );
       if (!play) return json(404, { error: "接口不存在" });
-      if (play[2] === "play") {
-        await provider.stream(play[1], url.searchParams.get("fresh") === "1");
-        return json(200, {
-          path: `/api/episodes/${play[1]}/stream`,
-          contentType: "video/mp4",
-        });
-      }
-      if (activeStreams >= 4)
+      // /play does the expensive part (resolve the stream and build the CENC index), so
+      // it takes the same quota as /stream instead of running for free.
+      if (activeStreams >= maxStreams)
         return json(503, { error: "同时播放数已达上限，请稍后重试" });
       activeStreams++;
       try {
-        const stream = await provider.stream(play[1]);
+        const fresh = url.searchParams.get("fresh") === "1";
+        if (play[2] === "play") {
+          await provider.stream(play[1], fresh);
+          return json(200, {
+            path: `/api/episodes/${play[1]}/stream`,
+            contentType: "video/mp4",
+          });
+        }
+        const stream = await provider.stream(play[1], fresh);
         const range = byteRange(req.headers.range, stream.total);
         if (!range) {
           res.writeHead(416, { "Content-Range": `bytes */${stream.total}` });
@@ -121,14 +143,24 @@ export function createServer(provider, token = "") {
                 );
           if (res.destroyed) break;
           if (!res.write(chunk)) {
-            await new Promise((resolve) => {
-              const done = () => {
-                res.off("drain", done);
-                res.off("close", done);
-                resolve();
+            await new Promise((resolve, reject) => {
+              const settle = (error) => {
+                clearTimeout(timer);
+                res.off("drain", onDrain);
+                res.off("close", onClose);
+                if (error) reject(error);
+                else resolve();
               };
-              res.once("drain", done);
-              res.once("close", done);
+              const onDrain = () => settle();
+              const onClose = () => settle();
+              const timer = setTimeout(() => {
+                const error = new Error("客户端长时间未读取，已断开连接");
+                error.code = "CLIENT_BACKPRESSURE_TIMEOUT";
+                settle(error);
+                res.destroy();
+              }, backpressureTimeout);
+              res.once("drain", onDrain);
+              res.once("close", onClose);
             });
           }
         }

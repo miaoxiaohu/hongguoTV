@@ -78,13 +78,17 @@ export const TVGrid = forwardRef<
     }
   }
   useEffect(() => {
-    if (pageStart.current !== undefined && items.length > pageStart.current) {
-      focusIndex.current = pageStart.current;
+    // The list itself is the signal, not its length: the site answers every page
+    // with the same rows, so a page that repeats what is already on screen
+    // changes nothing and must not be mistaken for a new row to focus.
+    const start = pageStart.current;
+    if (start !== undefined && items.length > start) {
+      focusIndex.current = start;
       pageStart.current = undefined;
       restoring.current = true;
       requestAnimationFrame(restoreFocus);
     }
-  }, [items.length]);
+  }, [items]);
   useImperativeHandle(ref, () => ({
     top: () => list.current?.scrollToOffset({ offset: 0, animated: false }),
   }));

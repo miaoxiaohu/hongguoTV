@@ -56,14 +56,30 @@ jobs:
           code=$(( 10#$major * 1000000 + 10#$minor * 1000 + 10#$patch ))
 
           # The TV client only offers an update when versionCode is strictly greater than the
-          # installed one, so a tag that is not newer than the current latest must never ship.
-          latest_tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName 2>/dev/null || echo '')"
-          latest_version="${latest_tag#kotlin-v}"
-          if [[ "$latest_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            if [[ "$version" == "$latest_version" ]]; then
+          # installed one, so a tag that is not newer than the newest published kotlin-v
+          # release must never ship. The comparison is against *every* published kotlin-v
+          # release, not against the one that happens to hold the `latest` pointer: that
+          # pointer also serves the non-kotlin v* releases of the RN client, and a tag
+          # published while it points at one of those used to skip this guard completely.
+          if ! published_tags="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isDraft --jq '.[] | select(.isDraft == false) | .tagName')"; then
+            echo "::error::could not list the published releases; refusing to publish without a version comparison"; exit 1
+          fi
+          published_versions=""
+          while IFS= read -r published_tag; do
+            [[ -n "$published_tag" ]] || continue
+            case "$published_tag" in
+              kotlin-v*) published_version="${published_tag#kotlin-v}" ;;
+              *) continue ;;
+            esac
+            [[ "$published_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+            published_versions+="$published_version"$'\n'
+          done <<< "$published_tags"
+          newest_published="$(printf '%s' "$published_versions" | sort -V | tail -n1)"
+          if [[ -n "$newest_published" ]]; then
+            if [[ "$version" == "$newest_published" ]]; then
               echo "::error::kotlin-v$version already exists; publish a higher version"; exit 1
-            elif [[ "$(printf '%s\n%s\n' "$latest_version" "$version" | sort -V | head -n1)" != "$latest_version" ]]; then
-              echo "::error::kotlin-v$version is not newer than the current latest kotlin-v$latest_version"; exit 1
+            elif [[ "$(printf '%s\n%s\n' "$newest_published" "$version" | sort -V | head -n1)" != "$newest_published" ]]; then
+              echo "::error::kotlin-v$version is not newer than the newest published kotlin-v$newest_published"; exit 1
             fi
           fi
 

@@ -48,8 +48,14 @@ class Library(context: Context) {
     private val homes = mutableMapOf<ContentType, CatalogPage>()
     private val homeSavedAt = mutableMapOf<ContentType, Long>()
     private var catalogue: CatalogueSnapshot? = null
-    /** The hot lists, one per shelf, kept on disk so the next launch has something to show. */
-    private var rankingCache = HotRank.Cache()
+    /**
+     * The hot lists, one per shelf, kept on disk so the next launch has something to show.
+     *
+     * It is replaced when the library is loaded, on the main thread, and read from a worker
+     * thread while a list is being fetched - so the reference itself has to be visible to the
+     * reader, and the cache it points at is safe to read and write at the same time.
+     */
+    @Volatile private var rankingCache = HotRank.Cache()
     private var catalogueBuilding = false
     private var loading = false
     private var closed = false

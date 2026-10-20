@@ -7,6 +7,16 @@ import org.json.JSONObject
 data class RecentSearch(val query: String, val type: ContentType)
 
 object SearchHistory {
+    /**
+     * One keyword, remembered once per shelf.
+     *
+     * The key is the whole entry - the keyword and the shelf it was searched in - and it is the
+     * same key in memory and on disk: [remember] drops an earlier entry that is equal to the
+     * new one, and [decode] drops rows that are equal to each other, and equality of a
+     * [RecentSearch] covers both the keyword and the shelf. So the same word searched in 真人剧
+     * and in 漫剧 is two entries, and it is two entries after a restart as well - the list
+     * looks the same before and after, which is the only thing that matters here.
+     */
     fun remember(existing: List<RecentSearch>, query: String, type: ContentType): List<RecentSearch> {
         val clean=query.trim()
         if(clean.isEmpty() || clean.length>80) return existing

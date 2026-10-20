@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package com.hongguotv.core
 
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
@@ -16,7 +17,25 @@ internal fun hex(value: String): ByteArray {
     return ByteArray(value.length / 2) { value.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
 }
 internal fun ByteArray.hex() = joinToString("") { "%02x".format(it.u()) }
-internal fun decode64(s: String): ByteArray = Base64.getDecoder().decode(s.replace('-', '+').replace('_', '/'))
+/**
+ * Decodes base64, tolerating a missing padding and a url-safe alphabet.
+ *
+ * The basic decoder refuses a length that is not a multiple of four when the padding is
+ * missing, and it refuses it with an IllegalArgumentException - an unchecked exception that
+ * takes down whatever asked for the bytes. A key or a seed that arrives without its padding is
+ * a normal thing to find, so the padding is added here and a body that is not base64 at all
+ * becomes an IOException like every other bad input.
+ */
+internal fun decode64(s: String): ByteArray {
+    val normalized=s.replace('-','+').replace('_','/')
+    val padded=when(normalized.length%4) {
+        0->normalized
+        2->normalized+"=="
+        3->normalized+"="
+        else->throw IOException("Base64 长度无效")
+    }
+    return try { Base64.getDecoder().decode(padded) } catch(e: IllegalArgumentException) { throw IOException("Base64 解码失败",e) }
+}
 internal fun ByteArray.base64(): String = Base64.getEncoder().encodeToString(this)
 internal fun le32(n: Int) = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(n).array()
 internal fun be32(n: Int) = ByteBuffer.allocate(4).putInt(n).array()

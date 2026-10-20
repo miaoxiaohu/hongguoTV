@@ -8,7 +8,8 @@
 // 用法：node server/make-update-json.mjs <apk 路径> <tag> <versionCode> <versionName> [notes]
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const [, , apkPath, tag, versionCode, versionName, ...rest] = process.argv;
 if (!apkPath || !tag || !versionCode || !versionName) {
@@ -39,5 +40,7 @@ const doc = {
 
 const out = JSON.stringify(doc, null, 2);
 console.log(out);
-writeFileSync('update.json', out + '\n', 'utf8');
-console.error('\nwrote update.json');
+// 写到脚本旁边，不要写到当前工作目录：从仓库根跑会把文件落在仓库根下。
+const outFile = join(fileURLToPath(new URL('.', import.meta.url)), 'update.json');
+writeFileSync(outFile, out + '\n', 'utf8');
+console.error('\nwrote ' + outFile);

@@ -96,11 +96,18 @@ class CatalogueIndex(entries: List<Series>, routes: List<Route?> = emptyList()) 
     /** Which route [id] was filed under, or null when the index never recorded it. */
     fun routeOf(id: String): Route? = ordered.firstOrNull { it.series.id == id }?.route
 
-    /** How many entries match, ignoring [CatalogueIndex.search]'s cap. */
-    fun count(keyword: String): Int {
+    /**
+     * How many entries match, ignoring [CatalogueIndex.search]'s cap.
+     *
+     * [type] narrows the same way [search] does, so a count and the list it describes are
+     * about the same catalogue. Counting the whole pool is what makes the number honest:
+     * a count read off a capped list is a count of what was kept, not of what exists.
+     */
+    fun count(keyword: String, type: ContentType? = null): Int {
         val needle = normalizeForSearch(keyword)
         if (needle.isEmpty()) return 0
-        return ordered.count { rank(it, needle) != null }
+        val pool = if (type == null) ordered else ordered.filter { it.route == null || it.route.type == type }
+        return pool.count { rank(it, needle) != null }
     }
 
     /** The number of shows this index holds, for the settings line and the build progress. */

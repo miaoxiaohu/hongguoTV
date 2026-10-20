@@ -1,0 +1,19 @@
+# Line endings are fixed per file type. Without this, an editor on a Windows box with
+# core.autocrlf=false can commit CRLF into a shell script, and bash then dies on
+# `set -euo pipefail\r` with an "invalid option" that names nothing near the real cause.
+*.sh text eol=lf
+
+# PowerShell 5.1 reads CRLF natively. The UTF-8 BOM these files carry is left alone -
+# the `text` attribute normalizes line endings, it does not touch a byte order mark.
+*.ps1 text eol=crlf
+
+*.py text eol=lf
+*.mjs text eol=lf
+*.js text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+.gitattributes text eol=lf

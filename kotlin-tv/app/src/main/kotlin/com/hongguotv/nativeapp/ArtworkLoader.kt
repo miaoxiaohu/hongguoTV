@@ -13,17 +13,43 @@ import android.util.LruCache
 import android.view.View
 import android.widget.ImageView
 import okhttp3.Call
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.lang.ref.WeakReference
+import java.net.InetAddress
+import java.net.UnknownHostException
 import java.util.PriorityQueue
 import java.util.WeakHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
 import kotlin.math.min
+
+/**
+ * 只把公网地址交出去。
+ *
+ * 海报地址有两处来路：站方的 CDN，和手机传过来的备份。后者是不可信的输入，而一个域名在
+ * 检查时解析成公网、在连接时又解析成内网，正是这类检查最容易被绕过的方式 —— 所以拦住它的
+ * 地方不是「检查」，而是**解析器本身**：连接用的就是这里解析出来的那个地址，解析到内网
+ * 就直接失败，中间没有第二次解释的机会。
+ *
+ * 站方的 CDN 都是公网地址，这条不影响正常取图。
+ */
+private object PublicDns : Dns {
+    override fun lookup(hostname: String): List<InetAddress> {
+        val addresses = Dns.SYSTEM.lookup(hostname)
+        if (addresses.isEmpty()) throw UnknownHostException("没有解析到地址：$hostname")
+        val public = addresses.filterNot {
+            it.isAnyLocalAddress || it.isLoopbackAddress || it.isSiteLocalAddress ||
+                it.isLinkLocalAddress || it.isMulticastAddress
+        }
+        if (public.isEmpty()) throw UnknownHostException("只解析到内网地址，已拒绝：$hostname")
+        return public
+    }
+}
 
 /** Page-owned artwork requests. Public methods are called on the UI thread; decoding stays on workers. */
 class ArtworkLoader(context: Context) {
@@ -60,7 +86,7 @@ class ArtworkLoader(context: Context) {
     private val disk = ArtworkCache(File(context.applicationContext.cacheDir, "artwork-v1"))
     // This client owns its dispatcher and pool; cancelling artwork never cancels video or catalog calls.
     private val http = OkHttpClient.Builder().connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS).callTimeout(12, TimeUnit.SECONDS).build()
+        .readTimeout(8, TimeUnit.SECONDS).callTimeout(12, TimeUnit.SECONDS).dns(PublicDns).build()
     private val workers = Executors.newFixedThreadPool(if (lowRam) 1 else 2) { runnable ->
         Thread(runnable, "hongguotv-artwork").apply { priority = Thread.NORM_PRIORITY - 1 }
     }

@@ -23,18 +23,18 @@
 
 | 版本 | 内容 |
 |---|---|
-| **kotlin-v0.9.9** | 最新。修海报缩略图空白，去掉「同系列剧」需要点一下才展开 |
-| kotlin-v0.9.8 | 「同系列剧」由卡片网格改为左图右文字列表 |
-| kotlin-v0.9.7 | 「同系列剧」卡片缩小到原尺寸约三分之一 |
-| kotlin-v0.9.6 | 修正更新检查指向的仓库地址 |
-| kotlin-v0.9.5 | 详情页「同系列剧」按钮移到「完整简介」右边，遥控器可选中 |
+| **kotlin-v0.9.46** | 最新已发布。修「一个片库的榜画在另一个片库的标题下」 |
+| kotlin-v0.9.45 | 播放时提前准备下一集，自动连播不再等片尾 |
+| kotlin-v0.9.44 | 修首页从此不再发请求（第二页会永远空着） |
+| kotlin-v0.9.43 | 榜单页去掉多余控件，页码本身可点 |
+| kotlin-v0.9.42 | 榜单一页 36 部，名次是一个连续的真顺序 |
 | kotlin-v0.9.3 | 播放接口修复，恢复全集 1080p HEVC |
 
-下载：**[kotlin-v0.9.9](https://github.com/miaoxiaohu/hongguoTV/releases/tag/kotlin-v0.9.9)**
+下载：**[最新发布页](https://github.com/miaoxiaohu/hongguoTV/releases/latest)**（每个 release 都带 APK、源码 ZIP、`update.json` 和 `SHA256SUMS`）
 
 （`kotlin-v0.9.4` 已删除：那一版的「同系列剧」按钮放在独立区块里，不在任何焦点链上，遥控器走不到。）
 
-以上 release 附带的 `update.json` 里 `versionCode` 为 0.9.6→15、0.9.7→16、0.9.8→17、0.9.9→18；0.9.3 和 0.9.5 没有该附件。
+版本号由 `kotlin-vX.Y.Z` tag 派生，`versionCode = major×1000000 + minor×1000 + patch`。0.9.14 起按此派生（0.9.46 → 9046）；0.9.9 及更早用的是旧的一串连号（0.9.9 → 18），其中 0.9.3 和 0.9.5 没有 `update.json` 附件。发版与自动更新的完整说明见 [自动更新与发布链路](kotlin-tv/AUTO_UPDATES.md)。
 
 ### 安装注意
 
@@ -64,8 +64,9 @@
   永远拿不到。0.9.6 的「修自动更新通道」只改了地址，没解决可见性。
 - 转公开后实测：`update.json` 与 APK 附件匿名访问均返回 200，且线上 manifest 逐条通过
   `AppUpdates.parse()` 的格式断言。**从 GitHub 下载安装的用户，现在可以正常收到更新提示。**
-- `scripts/sync-kotlin-public.py` 仍把从未发布过任何 release 的 `N3urda/hongguoTV-updates`
-  当作唯一同步目标，CI 发布链路本身也还没启用；现有 release 都是手工上传的。
+- **CI 发布链路已启用**：`kotlin-v0.9.43` 起的 release 由 GitHub Actions 打 tag 后自动签名构建并上传，
+  每个都带 APK、源码 ZIP、`update.json` 和 `SHA256SUMS` 四个附件（此前是手工上传的）。
+  双仓库同步模式（`N3urda/hongguoTV-updates`）已停用，脚本也加了护栏，不再是发布路径。
 
 ⚠️ **版本号已于 2026-10-17 统一**：tag `kotlin-vX.Y.Z` 里的版本号就是 `versionName`，
 `versionCode` 由它派生（`major×1000000 + minor×1000 + patch`，例：`0.9.10` → `9010`），
@@ -103,7 +104,8 @@ v0.1.1 改善 TV 焦点滚动、返回恢复、遥控器播放按键、安全边
 
    ```sh
    npm ci
-   npm run bridge -- --lan
+   # 对外监听必须带口令：不设 BRIDGE_TOKEN 时服务拒绝启动
+   BRIDGE_TOKEN=你的口令 npm run bridge -- --lan
    ```
 
 2. 从 Release 下载 APK，拷贝到电视安装。本地构建产物为 `outputs/hongguotv-0.1.1-android8.apk`，也可以通过已连接的 ADB 安装：
@@ -117,7 +119,7 @@ v0.1.1 改善 TV 焦点滚动、返回恢复、遥控器播放按键、安全边
 
 首次启动默认没有内容服务地址，也不会用测试数据冒充真实内容。「测试播放器」仅播放明确标注的 Big Buck Bunny 公开样片。
 
-服务默认仅监听 `127.0.0.1`；`--lan` 显式开放家庭网络访问。可通过 `BRIDGE_TOKEN` 设置访问口令，并在电视端填入相同值。此服务按家庭网络使用设计，未实现公网部署所需的完整访问控制。手机 / 浏览器不要假定可直接使用原生端的媒体和请求头配置。
+服务默认仅监听 `127.0.0.1`；`--lan` 显式开放家庭网络访问，**此时必须设置 `BRIDGE_TOKEN`**：服务在本机完成 CENC 密钥派生并返回已解密的 MP4，没有口令的开放监听等于把整站内容开放给同网段任意主机，所以监听地址不是回环地址而口令为空时服务拒绝启动。电视端要填入相同口令。此服务按家庭网络使用设计，未实现公网部署所需的完整访问控制。手机 / 浏览器不要假定可直接使用原生端的媒体和请求头配置。
 
 ## 独立服务部署
 
@@ -125,7 +127,7 @@ v0.1.1 改善 TV 焦点滚动、返回恢复、遥控器播放按键、安全边
 
 ```sh
 npm ci --prefix server
-node server/index.mjs --lan
+BRIDGE_TOKEN=你的口令 node server/index.mjs --lan
 ```
 
 电脑 / NAS 可使用 Docker，从源码或 Release 的 Docker 部署包根目录执行：

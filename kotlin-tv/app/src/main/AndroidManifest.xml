@@ -4,7 +4,15 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <uses-feature android:name="android.software.leanback" android:required="false"/>
     <uses-feature android:name="android.hardware.touchscreen" android:required="false"/>
-    <application android:label="红果TV+" android:theme="@style/AppTheme" android:icon="@mipmap/ic_launcher" android:banner="@mipmap/ic_tv_banner" android:roundIcon="@mipmap/ic_launcher" android:allowBackup="false" android:enableOnBackInvokedCallback="false" android:usesCleartextTraffic="true" android:networkSecurityConfig="@xml/network_security_config" android:supportsRtl="true">
+    <!--
+        No android:usesCleartextTraffic here. That attribute is ignored from API 24 on whenever a
+        network security config is present, and this app has had one since before minSdk 26 - so
+        it said "cleartext everywhere" while the config in fact allowed cleartext only for the
+        three CDN domains (douyinvod.com, byteicdn.com, byteimg.com) and nowhere else. The
+        config is what decides; a second, contradictory copy of the same decision only invites
+        the two to drift apart.
+    -->
+    <application android:label="红果TV+" android:theme="@style/AppTheme" android:icon="@mipmap/ic_launcher" android:banner="@mipmap/ic_tv_banner" android:roundIcon="@mipmap/ic_launcher" android:allowBackup="false" android:enableOnBackInvokedCallback="false" android:networkSecurityConfig="@xml/network_security_config" android:supportsRtl="true">
         <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.updates" android:exported="false" android:grantUriPermissions="true">
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/update_paths"/>
         </provider>

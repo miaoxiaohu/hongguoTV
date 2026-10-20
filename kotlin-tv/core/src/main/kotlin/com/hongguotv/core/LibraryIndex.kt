@@ -73,6 +73,11 @@ class LibraryIndex(data: BackupData, updates: Map<String, FavoriteUpdate> = empt
     fun clearHistory() { historyRows = emptyList(); progressById.clear(); watchedIds = emptySet() }
     fun observeFavorite(id: String, count: Int, now: Long, acknowledge: Boolean): Boolean {
         if (!favorite(id)) return false
+        // No episodes is not an update: an empty episode list says nothing about how many there
+        // are, and refusing it keeps the last known count instead of replacing it with a number
+        // that means nothing. The old code let it through and crashed the main thread further
+        // down, on an unchecked exception, for a show that simply has no episode list yet.
+        if (count<=0) return false
         val previous = updateRows[id]
         val next = previous?.observe(count, now, acknowledge) ?: FavoriteUpdate.first(count, now)
         if (previous == next) return false

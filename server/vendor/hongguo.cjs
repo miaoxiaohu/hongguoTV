@@ -622,18 +622,27 @@ function buildSamples(data, tracks) {
     return samples.sort((a, b) => a.start - b.start);
 }
 
-function replaceFourcc(data, from, to) {
-    let offset = 0; const source = Buffer.from(from);
-    while ((offset = data.indexOf(source, offset)) >= 0) { data.write(to, offset, 'ascii'); offset += source.length; }
-}
-
-function replaceSinf(data) {
+// CENC 把原始 sample entry 格式留在 sinf 的 frma box 里；加密标记必须按 frma 还原成原始 fourcc
+// （avc1/hvc1/…），硬编码 hvc1 会把 H.264 码流当 HEVC 播，播放器花屏。只有取不到 frma 时才退回 hvc1。
+function restoreSampleEntry(data) {
     let offset = 0;
     while ((offset = data.indexOf(Buffer.from('sinf'), offset)) >= 0) {
         if (offset < 4) { offset += 4; continue; }
         const size = data.readUInt32BE(offset - 4); const end = offset - 4 + size;
-        if (size >= 8 && size < 50000 && end <= data.length) { data.write('free', offset, 'ascii'); data.fill(0, offset + 4, end); offset = end; }
-        else offset += 4;
+        if (size < 8 || size >= 50000 || end > data.length) { offset += 4; continue; }
+        let original = 'hvc1';
+        const frma = findBox(data, 'frma', offset + 4);
+        if (frma && frma.bodyStart + 4 <= frma.offset + frma.size) {
+            const candidate = data.toString('ascii', frma.bodyStart, frma.bodyStart + 4);
+            if (/^[\x21-\x7e]{4}$/.test(candidate)) original = candidate;
+        }
+        let at = offset - 5;
+        while (at >= 0) {
+            const type = data.toString('ascii', at, at + 4);
+            if (type === 'encv' || type === 'enca') { data.write(original, at, 'ascii'); break; }
+            at -= 1;
+        }
+        data.write('free', offset, 'ascii'); data.fill(0, offset + 4, end); offset = end;
     }
 }
 
@@ -645,7 +654,7 @@ function prepareCencHeader(data, key) {
     const parsed = tracks.map((track) => parseTrack(moovBody, track)).filter(Boolean);
     const samples = key ? buildSamples(data, parsed) : [];
     const header = Buffer.from(data.subarray(0, moov.offset + moov.size));
-    replaceFourcc(header, 'encv', 'hvc1'); replaceFourcc(header, 'enca', 'mp4a'); replaceSinf(header);
+    restoreSampleEntry(header);
     return { header, samples };
 }
 
@@ -683,15 +692,23 @@ async function resolveStream(vid, quality) {
     streamCache.set(cacheKey, { time: Date.now(), value: result }); return result;
 }
 
+// Content-Range 的总长解析必须宽容：上游可能写成 "bytes 0-262143/*"、"bytes 0-262143 / 52428800"
+// 或大小写变体。取不到总长时返回 0（未知），由调用方明确失败，绝不拿 head.length 冒充总长。
+function parseContentTotal(headers) {
+    const raw = String(headers?.['content-range'] ?? headers?.['Content-Range'] ?? '');
+    const match = raw.match(/\/\s*(\d+)\s*$/i);
+    return match ? Number(match[1]) : 0;
+}
+
 async function remoteRange(stream, start, end) {
     const resp = await axios(stream.url, {
         headers: { 'User-Agent': VIDEO_UA, Referer: 'https://novel.snssdk.com/', Range: `bytes=${start}-${end}` },
         timeout: 30000, responseType: 'arraybuffer',
     });
     let data = Buffer.from(resp.data);
-    let total = Number(String(resp.headers['content-range'] || '').match(/\/(\d+)$/)?.[1] || 0);
+    let total = parseContentTotal(resp.headers);
     if (resp.status === 200) {
-        total ||= Number(resp.headers['content-length'] || data.length);
+        total ||= Number(resp.headers['content-length'] || 0);
         data = data.subarray(start, end + 1);
     }
     const expected = end - start + 1;
@@ -704,7 +721,7 @@ async function prepareHeader(stream) {
     if (stream.prepared) return stream.prepared;
     if (!stream.preparePromise) stream.preparePromise = (async () => {
         const firstEnd = 256 * 1024 - 1; const first = await remoteRange(stream, 0, firstEnd); let head = first.data;
-        const total = first.total || head.length; if (head.length < 16) throw new Error('MP4 头过短');
+        const total = first.total; if (!total) throw new Error('媒体总长度无法确定'); if (head.length < 16) throw new Error('MP4 头过短');
         const ftypSize = head.readUInt32BE(0); if (ftypSize < 8 || ftypSize + 8 > head.length) throw new Error('MP4 ftyp 异常');
         if (head.toString('ascii', 4, 8) !== 'ftyp' || head.toString('ascii', ftypSize + 4, ftypSize + 8) !== 'moov') throw new Error('MP4 moov 不在 ftyp 后');
         const moovSize = head.readUInt32BE(ftypSize); const moovEnd = ftypSize + moovSize;

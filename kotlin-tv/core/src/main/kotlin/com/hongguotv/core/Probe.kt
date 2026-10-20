@@ -3,7 +3,33 @@ package com.hongguotv.core
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
+import java.io.IOException
 import java.io.PrintWriter
+
+/**
+ * The largest response a probe reads.
+ *
+ * A probe is a diagnostic: it must not be the thing that dies. [okhttp3.ResponseBody.bytes]
+ * reads the whole body into memory, so a body of any size takes the process with it.
+ */
+private const val MAX_PROBE_BODY=16L*1024*1024
+
+/**
+ * Reads a response body, refusing one that is too large.
+ *
+ * The length is checked while reading, so a body that does not announce its size is caught too.
+ */
+private fun readBody(response: okhttp3.Response): ByteArray {
+    val body=response.body ?: return ByteArray(0)
+    if(body.contentLength()>MAX_PROBE_BODY) throw IOException("响应体过大（${body.contentLength()} 字节）")
+    val out=java.io.ByteArrayOutputStream(); val input=body.byteStream(); val buffer=ByteArray(64*1024)
+    while(true) {
+        val n=input.read(buffer); if(n<0) break
+        if(out.size()+n>MAX_PROBE_BODY) throw IOException("响应体超过 $MAX_PROBE_BODY 字节")
+        out.write(buffer,0,n)
+    }
+    return out.toByteArray()
+}
 
 /**
  * Where the probe's report goes.
@@ -60,7 +86,7 @@ private fun run(args: Array<String>, report: ProbeReport) {
                 val request=okhttp3.Request.Builder().url(url)
                 headers.forEach { (k,v) -> request.header(k,v) }
                 body?.let { request.post(it.toRequestBody("application/json; charset=utf-8".toMediaType())) }
-                val bytes=http.newCall(request.build()).execute().use { response -> response.body?.bytes() ?: ByteArray(0) }
+                val bytes=http.newCall(request.build()).execute().use { response -> readBody(response) }
                 say("[$label] bytes=${bytes.size} :: ${String(bytes,0,minOf(160,bytes.size)).replace(Regex("\\s+")," ")}")
             } catch(e: Exception) {
                 say("[$label] FAILED ${e.javaClass.simpleName}: ${e.message?.take(110)}")
@@ -185,7 +211,8 @@ private fun run(args: Array<String>, report: ProbeReport) {
             for(type in ContentType.entries) {
                 val total=decoded?.index?.sizeOf(type) ?: 0
                 val first=decoded?.index?.browse(0,6,type).orEmpty().map { it.title }
-                say("  ${type.label}：$total 部 -> ${(total+29)/30} 页，首屏 ${first.joinToString("、")}")
+                val pageSize=ContentRepository.SEARCH_PAGE_SIZE
+                say("  ${type.label}：$total 部 -> ${(total+pageSize-1)/pageSize} 页，首屏 ${first.joinToString("、")}")
             }
             // 分档之后，每条货架各有多少部才是真正要看的数字：漫剧这一档是 comic-drama + ai-drama。
             for(route in Route.entries) {
@@ -338,18 +365,24 @@ private fun run(args: Array<String>, report: ProbeReport) {
     }
     val type=if(args.contains("--comic")) ContentType.COMIC else ContentType.SHORT
     val keyword=if(type==ContentType.COMIC) "修仙" else "总裁"
-    val search=repository.search(keyword,type=type); say("search=${search.items.size}; hasMore=${search.hasMore}")
-    val home=repository.home(type=type); say("type=${type.label}; home=${home.items.size}; hasMore=${home.hasMore}")
-    val next=repository.home(2,type)
-    say("homePage2=${next.items.size}; overlap=${home.items.map { it.id }.intersect(next.items.map { it.id }.toSet()).size}")
-    val detail=repository.detail(args.firstOrNull { it.matches(Regex("[0-9]{1,30}")) } ?: home.items.first().id)
-    say("detail=${detail.series.title}; episodes=${detail.episodes.size}")
-    val stream=repository.stream(detail.series.id,detail.episodes.first())
-    RemoteVideo(repository.http,stream).use { remote ->
-        remote.prepare(); val first=remote.read(0,1024*1024)
-        val tail=remote.read((remote.total-65536).coerceAtLeast(0),65536)
-        say("quality=${stream.quality}; total=${remote.total}; first=${first.size}; tail=${tail.size}; header=${String(first,4,4)}")
-        if(args.contains("--save")) java.io.File("/tmp/hongguo-kotlin-first.mp4").writeBytes(first)
+    // The client is shut down here as it is in every other branch. OkHttp's dispatcher runs
+    // non-daemon threads, so a probe that throws before this point leaves the JVM running with
+    // nothing to do: the report is half written and the process never ends.
+    try {
+        val search=repository.search(keyword,type=type); say("search=${search.items.size}; hasMore=${search.hasMore}")
+        val home=repository.home(type=type); say("type=${type.label}; home=${home.items.size}; hasMore=${home.hasMore}")
+        val next=repository.home(2,type)
+        say("homePage2=${next.items.size}; overlap=${home.items.map { it.id }.intersect(next.items.map { it.id }.toSet()).size}")
+        val detail=repository.detail(args.firstOrNull { it.matches(Regex("[0-9]{1,30}")) } ?: home.items.first().id)
+        say("detail=${detail.series.title}; episodes=${detail.episodes.size}")
+        val stream=repository.stream(detail.series.id,detail.episodes.first())
+        RemoteVideo(repository.http,stream).use { remote ->
+            remote.prepare(); val first=remote.read(0,1024*1024)
+            val tail=remote.read((remote.total-65536).coerceAtLeast(0),65536)
+            say("quality=${stream.quality}; total=${remote.total}; first=${first.size}; tail=${tail.size}; header=${String(first,4,4)}")
+            if(args.contains("--save")) java.io.File("/tmp/hongguo-kotlin-first.mp4").writeBytes(first)
+        }
+    } finally {
+        repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
     }
-    repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
 }

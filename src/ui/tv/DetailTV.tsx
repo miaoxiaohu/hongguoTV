@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Image,
   ScrollView,
@@ -7,7 +7,12 @@ import {
   TVFocusGuideView,
   View,
 } from "react-native";
-import { Detail, Progress, resumeTarget } from "../../domain/model";
+import {
+  Detail,
+  Progress,
+  episodeGroup,
+  resumeTarget,
+} from "../../domain/model";
 import { Button, palette } from "../components";
 import { EPISODE_GROUP_SIZE } from "./layout";
 
@@ -29,13 +34,22 @@ export function DetailTV({
   const current = detail.episodes.findIndex(
     (e) => e.id === (restoreEpisode || progress?.episodeId)
   );
-  const [group, setGroup] = useState(
-    Math.floor(Math.max(0, current) / EPISODE_GROUP_SIZE)
-  );
+  const follow = episodeGroup(current, EPISODE_GROUP_SIZE);
+  const [group, setGroup] = useState(follow);
   const [expanded, setExpanded] = useState(false);
   const scroll = useRef<ScrollView>(null);
   const episodeTop = useRef(0);
   const target = resumeTarget(detail, progress);
+  const followed = useRef(restoreEpisode || progress?.episodeId);
+  // The episode the page follows changes when the player hands back the episode
+  // that was just watched, and the group has to follow it there. A group the
+  // reader picked by hand is not taken away, because the episode did not move.
+  useEffect(() => {
+    const episode = restoreEpisode || progress?.episodeId;
+    if (episode === followed.current) return;
+    followed.current = episode;
+    setGroup(follow);
+  }, [restoreEpisode, progress?.episodeId, follow]);
   return (
     <ScrollView
       ref={scroll}

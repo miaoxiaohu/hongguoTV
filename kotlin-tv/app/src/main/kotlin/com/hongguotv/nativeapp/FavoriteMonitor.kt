@@ -3,6 +3,7 @@ package com.hongguotv.nativeapp
 
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import com.hongguotv.core.ContentRepository
 import com.hongguotv.core.RequestScope
 import java.util.concurrent.Executors
@@ -38,12 +39,20 @@ class FavoriteMonitor(private val library: Library, source: ContentRepository, p
         val owned = RequestScope()
         scope = owned
         running = true
-        var completed = 0; var failures = 0; var consecutiveFailures = 0
+        var completed = 0; var failures = 0; var consecutiveFailures = 0; var lastError: Throwable? = null
         fun next() {
             if (ticket != epoch) return
             if (completed == items.size || consecutiveFailures >= 3) {
                 running = false
-                status = "已检查 $completed/${items.size} 部" + (if (failures > 0) " · $failures 部失败，稍后可重试" else " · 检查完成")
+                // The reason the run ended is part of what the user is told: a network that is
+                // down and a detail page that changed shape need different answers, and a run
+                // that stopped early says so.
+                val reason=lastError?.let { describe(it) }.orEmpty()
+                status = when {
+                    failures == 0 -> "已检查 $completed/${items.size} 部 · 检查完成"
+                    consecutiveFailures >= 3 -> "已检查 $completed/${items.size} 部 · 连续 3 次失败已停止（$reason）"
+                    else -> "已检查 $completed/${items.size} 部 · $failures 部失败（$reason），稍后可重试"
+                }
                 changed(); return
             }
             val item = items[completed]
@@ -61,7 +70,14 @@ class FavoriteMonitor(private val library: Library, source: ContentRepository, p
                         library.observeFavorite(item.id, count, started)
                         lastChangedId = item.id
                         consecutiveFailures = 0
-                    }.onFailure { failures++; consecutiveFailures++ }
+                    }.onFailure { error ->
+                        failures++; consecutiveFailures++
+                        // The exception used to be dropped here: it went into no status and into
+                        // no log, so a check that failed for every show looked the same as one
+                        // that failed for one show, and there was nothing to look at afterwards.
+                        lastError=error
+                        Log.w("HongguoTV", "收藏更新检查失败：${item.id}", error)
+                    }
                     completed++
                     next()
                 }
@@ -77,4 +93,16 @@ class FavoriteMonitor(private val library: Library, source: ContentRepository, p
         job?.cancel(true); job = null
     }
     fun destroy() { destroyed = true; stop(); worker.shutdownNow() }
+    /**
+     * What went wrong, in words the user can read.
+     *
+     * The type says which kind of failure it was - a timeout, a refused connection, a page
+     * that no longer parses - and the message says which host or which field. The full
+     * exception is in the log; this is the short form that fits on a line of the status.
+     */
+    private fun describe(error: Throwable): String {
+        val name=error.javaClass.simpleName
+        val message=error.message?.replace(Regex("\\s+")," ")?.trim()?.take(60).orEmpty()
+        return if(message.isEmpty()) name else "$name: $message"
+    }
 }
