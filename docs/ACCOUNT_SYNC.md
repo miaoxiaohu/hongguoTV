@@ -6,7 +6,7 @@
 
 本轮没有实现红果登录或云端同步。缺少经过验证的红果用户授权、账号映射、收藏和进度读写接口；普通抖音 OAuth 授权不能作为这些权限已获授予的证据。不得将头像或昵称获取成功标记为“红果已登录/已同步”。
 
-- 当前客户端 `ContentRepository` 使用游客内容请求，搜索参数 `user_is_login=0`；`Library` 的收藏和进度在本机 SharedPreferences，没有平台账户会话。
+- 当前原生客户端 `ContentRepository` 以游客身份读公开页面（搜索走 `/search/<关键词>?page=1`），不带任何账户参数；`user_is_login=0` 那个参数只存在于 Node 内容服务 vendor 的签名 app 搜索请求里，不在这条链路上。`Library` 的收藏和进度在本机 SharedPreferences，没有平台账户会话。
 - 检查红果官网首页、首页直接引用的三个业务脚本，未找到登录入口或账户同步实现。范围仅限这些公开资源，不能据此推断平台没有内部或合作接口。
 - [抖音 SDK 概述](https://open.douyin.com/platform/resource/docs/develop/summarize/sdk) 描述抖音授权和获取公开用户资料；更多数据能力需对应申请。未找到明确开放红果收藏和观看进度的 scope。
 - [抖音网站 OAuth 文档](https://open.douyin.com/platform/resource/docs/develop/permission/web/oauth2) 要求注册开发者配置 ClientKey / ClientSecret，通过授权码交换令牌，并提示应用密钥放在客户端不安全。项目当前未配置该应用的平台注册凭据，不能挪用红果官方 App 的身份和应用密钥来声称已授权。

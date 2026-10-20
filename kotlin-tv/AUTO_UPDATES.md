@@ -30,16 +30,22 @@
    对应 release 名为「修自动更新通道」。**但根因不是地址写错而是仓库私有，那次修复并没有真正打通。**
 2. 2026-10-16 把仓库从私有改为公开，通道才真正生效。
 
-实测（2026-10-16，转公开后）：
+实测（2026-10-20，0.9.47 发布后复测）：
 
 ```
 GET .../releases/latest/download/update.json                                        → 200
-GET .../releases/download/kotlin-v0.9.9/update.json                                 → 200
-GET .../releases/download/kotlin-v0.9.9/hongguotv-kotlin-0.9.9-...-android8.apk     → 200
+GET .../releases/download/kotlin-v0.9.47/update.json                                → 200
+GET .../releases/download/kotlin-v0.9.47/hongguotv-kotlin-0.9.47-android8.apk        → 200
 ```
 
 线上 manifest 逐条通过 `AppUpdates.parse()` 的断言：`schema=1`、包名 `com.hongguotv.nativeapp`、
-`versionCode=18`、`minSdk=26`，`tag`/`fileName`/`versionName` 三个正则、`sha256` 格式与 `size` 范围全部合规。
+`versionCode=9047`、`versionName=0.9.47`、`minSdk=26`，`tag`/`fileName`/`versionName` 三个正则、
+`sha256` 格式与 `size` 范围全部合规。
+
+**这一条是拿真实校验器跑出来的，不是抄的**：把线上那份 `update.json` 放到 `server/update.json`
+（`.gitignore` 排除的生成物），再跑 `AppUpdatesTest.generatedUpdateJsonPassesTheRealValidatorWhenPresent`
+—— 它用 `AppUpdate.parse()` 逐条断言，文件不存在时会被 `Assume` 跳过。2026-10-20 实测：该测试类
+13 项全过、**0 跳过**，说明校验器确实读到了线上那份。
 
 ### 1.2 版本号：已统一为 tag 派生
 
@@ -54,8 +60,8 @@ versionCode = major × 1,000,000 + minor × 1,000 + patch
 
 这个映射保证了三件事：
 
-- **与线上已有产物兼容**：线上 0.9.6–0.9.9 用的是 15–18，新规则从 9009 起，远大于 18，
-  电视上装过旧版也能正常收到升级提示。
+- **与线上已有产物兼容**：线上 0.9.6–0.9.9 用的是旧的一串连号 15–18；新规则从 0.9.14 起
+  （0.9.14 → 9014，0.9.10–0.9.13 从未发布），远大于 18，电视上装过旧版也能正常收到升级提示。
 - **单调且可复现**：同一个 tag 无论重跑多少次都算出同一个 versionCode，
   同一次发布的重跑不会换成另一个版本号。
 - **不重叠**：minor 与 patch 各占 3 位，上限 999，`release.yml` 和
