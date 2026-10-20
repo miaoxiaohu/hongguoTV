@@ -25,8 +25,20 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test
-      - run: docker compose config --quiet
-      - run: docker compose -f server/compose.yaml config --quiet
+      # Both compose files refuse to interpolate without a token, and they are right to: an open
+      # listener hands out decrypted media to the whole network. These two steps only ask whether
+      # the files parse, so they get a placeholder - the real token belongs to whoever deploys,
+      # and it never belongs in CI. The token stays out of the job environment on purpose: the
+      # service refuses to start without one on a non-loopback address, and a test that checks
+      # that refusal must see an environment without one.
+      - name: Check the root compose file
+        env:
+          BRIDGE_TOKEN: ci-config-check-only
+        run: docker compose config --quiet
+      - name: Check the server compose file
+        env:
+          BRIDGE_TOKEN: ci-config-check-only
+        run: docker compose -f server/compose.yaml config --quiet
 
   container:
     runs-on: ubuntu-latest
