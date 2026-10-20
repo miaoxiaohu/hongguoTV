@@ -666,6 +666,31 @@ class ContentRepositoryTest {
         assertEquals(listOf("测试真人剧"),single.items.map { it.title })
     }
 
+    @Test fun aBrowsedPageKnowsHowManyPagesThereAre() {
+        // 站方给的是它自己的页数（实测 2026-10-20：三条货架都是 800 部、24 条一页、34 页）。
+        // App 把这些条画在自己的网格里，从屏幕上的条数去数页数，数出来的是另一个数 ——
+        // 所以这个数必须一路从 core 带上来，否则页码选择器在首页上永远只会说「只有一页」。
+        val repo=repository { request ->
+            val route=Route.entries.single { request.url.encodedPath=="/category/${it.categorySlug}" }
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"1","series_name":"测试${route.label}"}],"pagination":{"total":800,"pageNum":1,"pageSize":24,"totalPages":34}}}};</script>"""
+        }
+        assertEquals(34,repo.routePage().totalPages)
+        assertEquals(34,repo.home(1,ContentType.SHORT).totalPages)
+        // 漫剧这一档是两条货架拼起来的：总页数取短的那条，因为两条是齐步走的。
+        assertEquals(34,repo.home(1,ContentType.COMIC).totalPages)
+    }
+
+    @Test fun theLastPageIsTheLastPage() {
+        // 「还有下一页」和「一共有几页」必须是同一个数：否则页码选择器能翻到的最后一页，
+        // 和「下一页」按到底的那一页，会打起来。
+        val repo=repository { request ->
+            val page=request.url.queryParameter("page")?.toInt() ?: 1
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"1","series_name":"测试"}],"pagination":{"total":800,"pageNum":$page,"pageSize":24,"totalPages":34}}}};</script>"""
+        }
+        assertTrue(repo.home(33,ContentType.SHORT).hasMore)
+        assertFalse(repo.home(34,ContentType.SHORT).hasMore)
+    }
+
     @Test fun browsingTheComicCatalogueNoLongerReturnsHotBoardMetadata() {
         val repo=repository { request ->
             assertTrue(request.url.encodedPath in setOf("/category/comic-drama","/category/ai-drama"))

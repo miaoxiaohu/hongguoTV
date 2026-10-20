@@ -34,12 +34,12 @@ class MainActivity: Activity() {
      * 长出另一个标签页的行为 —— 排行榜长出剧集进度、收藏页开始显示热度，都是这么来的。
      */
     companion object {
-        const val TAB_HOME=0
-        const val TAB_SEARCH=1
-        const val TAB_RANKING=2
-        const val TAB_FAVORITES=3
-        const val TAB_HISTORY=4
-        const val TAB_SETTINGS=5
+        const val TAB_HOME=Paging.HOME
+        const val TAB_SEARCH=Paging.SEARCH
+        const val TAB_RANKING=Paging.RANKING
+        const val TAB_FAVORITES=Paging.FAVORITES
+        const val TAB_HISTORY=Paging.HISTORY
+        const val TAB_SETTINGS=Paging.SETTINGS
         val TAB_LABELS=listOf("首页","搜索","排行榜","收藏","最近观看","设置")
     }
     private val bg=TvStyle.background; private val surface=TvStyle.surface
@@ -206,8 +206,16 @@ class MainActivity: Activity() {
     private var episodeViews: List<View> = emptyList()
     /** 当前详情页里承载「同系列剧」结果的容器；异步回调用它确认自己没画到别的剧上。 */
     private var seasonsHolder: LinearLayout?=null
-    private data class CatalogState(val page: Int,val items: List<Series>,val hasMore: Boolean,val ranking: HotRanking?)
+    private data class CatalogState(val page: Int,val items: List<Series>,val hasMore: Boolean,val ranking: HotRanking?,val totalPages: Int?=null)
     private var ranking: HotRanking?=null
+    /**
+     * 这一页所在的清单一共有几页，站方说的那个数。
+     *
+     * 只有首页用得上（搜索的总数在 searchTotal 里，榜单的在 ranking 里，本机清单的自己数）。
+     * 首页的页数只有站方知道：它一页给 24 条，34 页，而 App 把这些条画在自己的网格里 ——
+     * 从屏幕上的条数去数页数，数出来的是 App 的页数，不是站方的页数。
+     */
+    private var catalogTotalPages:Int?=null
     private val tabState=mutableMapOf<Int,CatalogState>()
     private val tabFocus=mutableMapOf<Int,String>()
     private val nav=mutableListOf<View>()
@@ -410,8 +418,8 @@ class MainActivity: Activity() {
     private fun fetchesRemote(which: Int)=which==TAB_HOME || which==TAB_SEARCH || which==TAB_RANKING
     private fun switchTab(next: Int) {
         leaveCollection()
-        tabState[tab]=CatalogState(page,catalog,hasMore,ranking); tabFocus[tab]=catalogFocus
-        tab=next; val saved=tabState[next]; page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; catalogFocus=tabFocus[next].orEmpty(); focusColumn=null
+        tabState[tab]=CatalogState(page,catalog,hasMore,ranking,catalogTotalPages); tabFocus[tab]=catalogFocus
+        tab=next; val saved=tabState[next]; page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; catalogTotalPages=saved?.totalPages; catalogFocus=tabFocus[next].orEmpty(); focusColumn=null
         // 搜索页只有真的放过一个词才去请求；空着的搜索框配一张空网格，什么也没说。
         // 从导航按「搜索」进来时焦点交给输入框：那才是这一页要做的事，跳到结果卡片等于让人先
         // 看结果再想办法回去改词。返回详情页时不走这里，焦点仍旧回到上次看的那张卡。
@@ -435,7 +443,7 @@ class MainActivity: Activity() {
         library.contentType=type
         dropShelfCachedPages()
         releaseCatalogViews()
-        page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""; focusColumn=null; homePosition=null
+        page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogTotalPages=null; catalogFocus=""; focusColumn=null; homePosition=null
         // query 可能还是上一次搜索留下的。非空不等于现在在搜索页 —— 在首页上切分类，
         // 按 query 非空去发请求会把搜索结果画到首页上。
         showCatalog(load=(tab==TAB_HOME || tab==TAB_RANKING || (tab==TAB_SEARCH && query.isNotBlank())),focusType=true)
@@ -443,11 +451,11 @@ class MainActivity: Activity() {
     private fun leaveCollection() {
         if(collection==null) return
         collection=null
-        collectionReturn?.let { page=it.page; catalog=it.items; hasMore=it.hasMore; ranking=it.ranking }
+        collectionReturn?.let { page=it.page; catalog=it.items; hasMore=it.hasMore; ranking=it.ranking; catalogTotalPages=it.totalPages }
         catalogFocus=collectionFocus; collectionReturn=null
     }
     private fun showCollection(kind: String) {
-        collectionReturn=CatalogState(page,catalog,hasMore,ranking); collectionFocus=catalogFocus
+        collectionReturn=CatalogState(page,catalog,hasMore,ranking,catalogTotalPages); collectionFocus=catalogFocus
         collection=kind; page=1; catalogFocus=""; focusColumn=null; showCatalog()
     }
     /**
@@ -644,9 +652,9 @@ class MainActivity: Activity() {
                 if(requestTab==TAB_HOME && requestPage==1) library.cacheHome(requestType,result.items,result.hasMore)
                 if(requestTab==TAB_HOME && requestPage==1 && (homeFromCache || tvTools.showing || updater.showing)) {
                     homeScreen?.refresh?.text="热门已更新 · 按确认查看"
-                    homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; showCatalog() }
+                    homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; catalogTotalPages=result.totalPages; showCatalog() }
                 } else {
-                    catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
+                    catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; catalogTotalPages=result.totalPages
                     searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy
                     val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }
                     body.removeAllViews()
@@ -661,7 +669,7 @@ class MainActivity: Activity() {
                     homeScreen?.refresh?.setOnClickListener { showCatalog(true) }
                     return@work
                 }
-                catalog=emptyList(); hasMore=false; ranking=null; searchMatched=null
+                catalog=emptyList(); hasMore=false; ranking=null; catalogTotalPages=null; searchMatched=null
                 if(problem is SearchSessionExpiredException) {
                     page=1; catalogFocus=""
                     Toast.makeText(this,"搜索结果已过期，已回到第 1 页刷新",Toast.LENGTH_LONG).show()
@@ -846,6 +854,8 @@ class MainActivity: Activity() {
             paging.addView(jump,lp(dp(
                 when {
                     tab==TAB_RANKING -> 135
+                    // 首页的页数是两位数（「第 34 / 34 页」），比榜单那一位数宽。
+                    tab==TAB_HOME -> 150
                     tab==TAB_SEARCH && searchTotal!=null -> 210
                     else -> 95
                 }),dp(44)))
@@ -1144,20 +1154,24 @@ class MainActivity: Activity() {
         }
     }
 
-    /** 「第 X / Y 页 · 共 N 部」；只有搜索知道命中总数，其它页维持原来的写法。 */
-    private fun pagingLabel(): String = when {
-        localCatalog() -> "第 $page / ${pageCount()} 页"
-        tab==TAB_RANKING && ranking!=null -> "第 $page / ${pageCount()} 页"
-        tab==TAB_SEARCH && (searchTotal ?: 0)>0 -> "第 $page / ${pageCount()} 页 · 共 $searchTotal 部"
-        else -> "第 $page 页"
-    }
+    /**
+     * 这一页的账：几页、页码那行字怎么写。
+     *
+     * 算法在 [Paging] 里，因为它得有一个能写测试的地方 —— 这里的私有方法测不到，而
+     * 「哪一页一共有几页」正是那种读代码看不出错、只有数一遍才发现的逻辑。
+     */
+    private fun pagingAccount() = Paging.of(
+        tab=tab,
+        localItems=if(localCatalog()) catalog.size else null,
+        pageSize=pageSizeFor(tab),
+        sitePages=catalogTotalPages,
+        rankingPages=ranking?.totalPages,
+        searchHits=searchTotal
+    )
+    /** 「第 X / Y 页 · 共 N 部」。 */
+    private fun pagingLabel(): String = pagingAccount().label(page)
     /** 这一页一共有几页。 */
-    private fun pageCount(): Int = when {
-        localCatalog() -> maxOf(1,(catalog.size+pageSizeFor(tab)-1)/pageSizeFor(tab))
-        tab==TAB_RANKING && ranking!=null -> ranking!!.totalPages
-        tab==TAB_SEARCH && (searchTotal ?: 0)>0 -> maxOf(1,((searchTotal ?: 0)+pageSizeFor(tab)-1)/pageSizeFor(tab))
-        else -> 1
-    }
+    private fun pageCount(): Int = pagingAccount().total
     /**
      * 跳到第几页。
      *

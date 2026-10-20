@@ -94,6 +94,13 @@ data class HotRanking(val positions: Map<String,RankPosition>, val totalPages: I
  * [matchedCount] is how many of [items] the keyword actually found, [totalHits] how many exist in
  * total across pages, and [fuzzy] whether that came from the one-character typo fallback. All three
  * are null / false where the page is not a search result and the questions do not apply.
+ *
+ * [totalPages] is how many pages the whole listing has, when the site says so. It is the one
+ * number the app cannot work out for itself: a page of a browse list holds a fixed number of
+ * rows, but the rows a page of the site holds are the site's business (measured 2026-10-20: 24 a
+ * page, 34 pages for every route), and the app draws the browsed rows in a grid of its own width.
+ * Counting pages from the rows on screen would therefore count the app's pages, not the site's,
+ * and the two must not be mixed up - see [routePage] and [home].
  */
 data class CatalogPage(
     val items: List<Series>,
@@ -101,7 +108,8 @@ data class CatalogPage(
     val ranking: HotRanking? = null,
     val matchedCount: Int? = null,
     val totalHits: Int? = null,
-    val fuzzy: Boolean = false
+    val fuzzy: Boolean = false,
+    val totalPages: Int? = null
 )
 data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
@@ -207,6 +215,11 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      * The walk consumes this, one route at a time, because each route has its own page count and
      * its own bookmark. Browsing does not: a type is browsed as the whole of it, which is
      * [home]'s job.
+     *
+     * The page count the site reports is carried along, because the app cannot work it out for
+     * itself: a browsed page is drawn in a grid of the app's own width, so the rows on screen
+     * say nothing about how many pages the site has. Measured 2026-10-20: 24 rows a page and 34
+     * pages for every route (800 shows).
      */
     fun routePage(page: Int = 1, route: Route = Route.REAL_DRAMA): CatalogPage {
         require(page in 1..100)
@@ -215,7 +228,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val rows=section.optJSONArray("recommendList") ?: section.optJSONObject("categoryData")?.optJSONArray("recommendList") ?: throw IOException("首页数据暂不可用")
         val items=valid(rows.objects().map(::card))
         val lastPage=section.optJSONObject("pagination")?.optInt("totalPages",100) ?: 100
-        return CatalogPage(items,items.isNotEmpty() && page<minOf(lastPage,100))
+        val totalPages=minOf(lastPage,100)
+        return CatalogPage(items,items.isNotEmpty() && page<totalPages,totalPages=totalPages)
     }
     /**
      * Browse one of the catalogues the user picks, named by [ContentType].
@@ -243,7 +257,16 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         }
         if(pages.isEmpty()) throw failure ?: IOException("首页数据暂不可用")
         val items=pages.flatMap { it.items }.distinctBy { it.id }
-        return CatalogPage(items,items.isNotEmpty() && pages.any { it.hasMore })
+        // 同一档的两条货架是齐步走的：一条走完了，这一页就不完整了。所以总页数取短的那条 ——
+        // 再往后还能看到长出来的那条，可那不是这一档的完整一页。
+        // 站方今天给三条货架报的都是 34 页（实测 2026-10-20，800 部，一页 24 条），取短的那条
+        // 不改变今天的数字，但它写的是那条规则，而不是今天恰好相等。
+        val totalPages=pages.mapNotNull { it.totalPages }.minOrNull()
+        // 「还有下一页」和「一共有几页」必须是同一个数。不然页码选择器能翻到的最后一页，
+        // 和「下一页」按到底的那一页，会打起来。
+        val hasMore=if(totalPages!=null) items.isNotEmpty() && page<totalPages
+            else items.isNotEmpty() && pages.any { it.hasMore }
+        return CatalogPage(items,hasMore,totalPages=totalPages)
     }
     /**
      * Search the whole catalogue locally when an index is available, otherwise through the public page.
