@@ -54,7 +54,6 @@ class MainActivity: Activity() {
     private val preparedNext=PreparedSlot<RemoteVideo>({ android.os.SystemClock.elapsedRealtime() },PrefetchPolicy.TTL_MS)
     private var prefetchJob: java.util.concurrent.Future<*>?=null
     private var prefetchScope: RequestScope?=null
-    private var prefetchedFor=""
     private var readySince=0L
     private lateinit var artwork: ArtworkLoader
     private data class DeferredUi(val apply: ()->Unit,val discard: ()->Unit={})
@@ -592,10 +591,11 @@ class MainActivity: Activity() {
                 // 榜单永远先显示手上有的那份 —— 上次取到的，或者刚在后台取到的。新的在后台取，
                 // 到货再换上去：用户不用等，也不用按什么。站方的榜一天只更新一次，所以一天取一次
                 // 就够了（HotRank.FRESH_MS）。
-                val cached=library.cachedRanking()
+                // 手上的榜必须是**这一档**的榜：真人剧档和漫剧档是两个榜，画错就是别人的榜。
+                val requestType=library.contentType
+                val cached=library.cachedRanking(requestType)
                 if(cached!=null && cached.items.isNotEmpty()) showRankingPage(cached,body,focusNav,focusType)
                 else { message(body,"正在读取最新榜单…"); if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
-                val requestType=library.contentType
                 work({ rankingList(requestType) }, { list ->
                     library.saveRanking(list)
                     showRankingPage(list,body,focusNav,focusType)
@@ -656,8 +656,8 @@ class MainActivity: Activity() {
      * already there when the user asks for it.
      */
     private fun rankingList(type: ContentType): HotRank.HotList {
-        val cached=library.cachedRanking()
-        if(cached!=null && !cached.isStale(System.currentTimeMillis())) return cached
+        // 手上那份只在这一档自己身上算数：另一档的榜再新也不是这一档的榜。
+        library.freshRanking(type)?.let { return it }
         return repository.rankingList(type)
     }
 
@@ -687,8 +687,7 @@ class MainActivity: Activity() {
      * and this must not cancel the page the user is on.
      */
     private fun refreshRankingInBackground() {
-        val cached=library.cachedRanking()
-        if(cached!=null && !cached.isStale(System.currentTimeMillis())) return
+        if(library.freshRanking(library.contentType)!=null) return
         io.submit {
             runCatching { repository.rankingList(library.contentType) }
                 .onSuccess { list -> main.post { if(!isDestroyed) library.saveRanking(list) } }
@@ -1421,7 +1420,7 @@ class MainActivity: Activity() {
     private fun cancelPrefetch() {
         prefetchScope?.cancel(); prefetchScope=null
         preparedNext.clear(); prefetchJob?.cancel(true); prefetchJob=null
-        closeTransport(prefetchHttp); prefetchHttp=null; prefetchedFor=""
+        closeTransport(prefetchHttp); prefetchHttp=null
     }
     private fun maybePrefetch() {
         val p=player ?: return; val data=detail ?: return
@@ -1434,7 +1433,7 @@ class MainActivity: Activity() {
         val id=data.episodes[episodeIndex+1]; val quality=library.maxQuality; val key="$id:$quality"
         if(preparedNext.isFresh(key) || prefetchJob?.isDone==false) return
         if(prefetchAttempts>=3 || (prefetchAttempts>0 && now-prefetchAttemptAt<15_000) || connectivity.isActiveNetworkMetered || !networkAvailable()) return
-        cancelPrefetch(); prefetchedFor=key; prefetchAttemptAt=now; prefetchAttempts++
+        cancelPrefetch(); prefetchAttemptAt=now; prefetchAttempts++
         val ticket=preparedNext.begin(key)
         val http=okhttp3.OkHttpClient.Builder().connectTimeout(8,java.util.concurrent.TimeUnit.SECONDS).readTimeout(15,java.util.concurrent.TimeUnit.SECONDS).callTimeout(20,java.util.concurrent.TimeUnit.SECONDS).build()
         val source=ContentRepository(http); prefetchHttp=http

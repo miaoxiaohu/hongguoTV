@@ -189,7 +189,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             }
         }
         if(boards.isEmpty()) throw failure ?: IOException("热播榜暂不可用")
-        val list=HotRank.combine(boards)
+        val list=HotRank.combine(boards,type)
         rankingCache[type]=list
         return list
     }

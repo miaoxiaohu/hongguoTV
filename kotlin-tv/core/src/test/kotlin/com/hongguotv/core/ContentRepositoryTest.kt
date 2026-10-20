@@ -369,26 +369,28 @@ class ContentRepositoryTest {
         // 榜单落盘是为了「下次打开就有东西看」：用户不必等网络，也不必按刷新。
         val list=HotRank.combine(listOf(
             HotRank.Board(Route.COMIC_DRAMA,listOf(show("1","漫剧甲")),mapOf("1" to RankPosition(1,"8370万热度")),5,"10月20日已更新"),
-            HotRank.Board(Route.AI_DRAMA,listOf(show("2","AI剧甲")),mapOf("2" to RankPosition(2,"7406万热度")),5,"10月20日已更新")))
+            HotRank.Board(Route.AI_DRAMA,listOf(show("2","AI剧甲")),mapOf("2" to RankPosition(2,"7406万热度")),5,"10月20日已更新")),ContentType.COMIC)
         val decoded=HotRank.decode(HotRank.encode(list))
         assertNotNull(decoded)
         assertEquals(listOf("漫剧甲","AI剧甲"),decoded!!.items.map { it.title })
         assertEquals(RankPosition(1,"8370万热度"),decoded.positions["1"])
         assertEquals(RankPosition(2,"7406万热度"),decoded.positions["2"])
         assertEquals("10月20日已更新",decoded.updatedText)
+        // 属于哪一档也要一起存下来：存不下来的话，落盘那份榜就分不清是给谁看的了。
+        assertEquals(ContentType.COMIC,decoded.type)
     }
 
     @Test fun aRankingIsGoodForADayAndThenWorthFetchingAgain() {
         // 站方的榜一天只更新一次，所以一天取一次就够了 —— 一天取四次只是白花站的调用频率。
         val now=1_000_000L
-        val list=HotRank.HotList(listOf(show("1","甲")),emptyMap(),"10月20日已更新",now)
+        val list=HotRank.HotList(listOf(show("1","甲")),emptyMap(),"10月20日已更新",now,ContentType.SHORT)
         assertFalse(list.isStale(now+23*60*60*1000L))
         assertTrue(list.isStale(now+25*60*60*1000L))
     }
 
     @Test fun aRankingPageIsCutOutOfTheWholeList() {
         val items=(1..100).map { show(it.toString(),"第 $it 部") }
-        val list=HotRank.HotList(items,items.mapIndexed { index,series -> series.id to RankPosition(index+1,"") }.toMap(),"",0L)
+        val list=HotRank.HotList(items,items.mapIndexed { index,series -> series.id to RankPosition(index+1,"") }.toMap(),"",0L,ContentType.COMIC)
         val page=HotRank.page(list,1,36)
         assertEquals(36,page.items.size)
         assertEquals("第 1 部",page.items.first().title)

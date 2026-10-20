@@ -147,7 +147,16 @@ object HotRank {
         val items: List<Series>,
         val positions: Map<String, RankPosition>,
         val updatedText: String,
-        val fetchedAt: Long
+        val fetchedAt: Long,
+        /**
+         * The shelf this list was fetched for.
+         *
+         * The two shelves are separate boards and the user picks between them, so a list is only
+         * ever good for the shelf it came from. The field is what makes that checkable: a list that
+         * cannot say which shelf it belongs to must not be shown at all, because the comic board's
+         * first row under the real shelf's heading is not a stale list, it is somebody else's list.
+         */
+        val type: ContentType
     ) {
         /** True when this list is old enough to be worth fetching again. */
         fun isStale(now: Long) = now - fetchedAt > FRESH_MS
@@ -167,7 +176,7 @@ object HotRank {
      * small thing, and inventing a number for it would be a lie in the place the user reads a
      * ranking.
      */
-    fun combine(boards: List<Board>): HotList {
+    fun combine(boards: List<Board>, type: ContentType): HotList {
         val rows = boards.flatMap { board -> board.items.map { series -> board.positions[series.id] to series } }
         // The same show can be on two boards - the site's overall board holds the hottest shows of
         // every route, and a route's own board can repeat one. The hotter copy is the first one
@@ -178,7 +187,7 @@ object HotRank {
         val positions = LinkedHashMap<String, RankPosition>()
         ordered.forEachIndexed { index, (position, series) -> positions[series.id] = RankPosition(index + 1, position?.heat.orEmpty()) }
         val updated = boards.firstOrNull { it.updatedText.isNotBlank() }?.updatedText.orEmpty()
-        return HotList(ordered.map { it.second }, positions, updated, System.currentTimeMillis())
+        return HotList(ordered.map { it.second }, positions, updated, System.currentTimeMillis(), type)
     }
 
     /**
@@ -207,6 +216,9 @@ object HotRank {
     fun encode(list: HotList): String = JSONObject()
         .put("fetchedAt",list.fetchedAt)
         .put("updatedText",list.updatedText)
+        // The shelf travels with the list. Without it a written-down list cannot be handed to a
+        // shelf without guessing, and guessing here is how one shelf ends up showing another's board.
+        .put("shelf",list.type.storedValue)
         .put("items",JSONArray(list.items.map { series ->
             val position=list.positions[series.id]
             JSONObject().put("i",series.id).put("t",series.title).put("c",series.cover)
@@ -217,6 +229,11 @@ object HotRank {
     /** Reads back what [encode] wrote; null for anything unreadable - a broken list is not worth failing over. */
     fun decode(value: String): HotList? = runCatching {
         val o=JSONObject(value)
+        // 存下来的旧版本没有「属于哪一档」这一栏。那份榜单属于哪一档已经无从判断，
+        // 宁可当作没有 —— 猜一个（比方说一律当漫剧）会让真人剧那一档画出漫剧的榜，
+        // 而且一猜就错一整天。
+        val type=if(!o.has("shelf")) null else ContentType.entries.firstOrNull { it.storedValue==o.optString("shelf") }
+        if(type==null) return@runCatching null
         val items=ArrayList<Series>()
         val positions=LinkedHashMap<String,RankPosition>()
         o.getJSONArray("items").objects().forEach { row ->
@@ -225,7 +242,7 @@ object HotRank {
             positions[id]=RankPosition(if(row.isNull("r")) null else row.optInt("r"),row.optString("h",""))
         }
         require(items.isNotEmpty())
-        HotList(items,positions,o.optString("updatedText",""),o.getLong("fetchedAt"))
+        HotList(items,positions,o.optString("updatedText",""),o.getLong("fetchedAt"),type)
     }.getOrNull()
 
     /**
@@ -242,5 +259,36 @@ object HotRank {
         val number = match.groupValues[1].toDoubleOrNull() ?: return null
         val scale = when (match.groupValues[2]) { "万" -> 10_000.0; "亿" -> 100_000_000.0; else -> 1.0 }
         return (number * scale).toLong()
+    }
+
+    /**
+     * The hot lists, one per shelf.
+     *
+     * The two shelves are separate boards and the user picks between them, so a list belongs to
+     * exactly one of them. Holding them in one place keyed by the shelf the list itself carries
+     * makes handing a shelf the wrong board impossible: there is no list without a shelf to look
+     * it up by.
+     *
+     * This is not a theoretical worry. The lists used to be held as one bare list with no shelf on
+     * it, and the page then drew whatever that one list was - so switching from 漫剧 to 真人剧 put
+     * the comic board under the real shelf's heading, and the real shelf's own board was never
+     * even fetched, because the cached list answered for it and was younger than a day.
+     */
+    class Cache {
+        private val lists=mutableMapOf<ContentType,HotList>()
+
+        /** The list held for [type], whatever its age. */
+        fun get(type: ContentType): HotList? = lists[type]
+
+        /** The list held for [type], if it is young enough to show. */
+        fun fresh(type: ContentType, now: Long): HotList? = lists[type]?.takeIf { !it.isStale(now) }
+
+        /** Keeps a list under the shelf it was fetched for. */
+        fun put(list: HotList) { lists[list.type]=list }
+
+        companion object {
+            /** The key a shelf's list is written under. */
+            fun key(type: ContentType) = "ranking-${type.storedValue}"
+        }
     }
 }

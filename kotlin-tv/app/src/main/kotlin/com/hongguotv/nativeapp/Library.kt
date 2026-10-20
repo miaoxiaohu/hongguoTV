@@ -26,7 +26,7 @@ class Library(context: Context) {
         val homes: Map<ContentType, CatalogPage>,
         val stamps: Map<ContentType, Long>,
         val catalogue: CatalogueSnapshot?,
-        val ranking: HotRank.HotList?
+        val ranking: HotRank.Cache
     )
     private val app = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
@@ -48,8 +48,8 @@ class Library(context: Context) {
     private val homes = mutableMapOf<ContentType, CatalogPage>()
     private val homeSavedAt = mutableMapOf<ContentType, Long>()
     private var catalogue: CatalogueSnapshot? = null
-    /** The hot list as it was last fetched, kept on disk so the next launch has something to show. */
-    private var rankingCache: HotRank.HotList? = null
+    /** The hot lists, one per shelf, kept on disk so the next launch has something to show. */
+    private var rankingCache = HotRank.Cache()
     private var catalogueBuilding = false
     private var loading = false
     private var closed = false
@@ -97,7 +97,12 @@ class Library(context: Context) {
                 // simply leaves null behind.
                 val builtCatalogue = cataloguePrefs.getString("index", null)?.let { CatalogueIndexDisk.decode(it, now) }
                 // 榜单也是上一份就能先看的东西：它不是用户的记录，坏了也只影响「热播榜」这一页。
-                val builtRanking = rankingPrefs.getString("ranking", null)?.let { HotRank.decode(it) }
+                // 两档各存各的：真人剧一个榜，漫剧两个榜合成一张。把两档塞进同一份里，
+                // 切档时就会拿另一档的榜来画，而这一档自己的榜再也取不回来。
+                val builtRanking=HotRank.Cache()
+                ContentType.entries.forEach { type ->
+                    HotRank.decode(rankingPrefs.getString(HotRank.Cache.key(type),null) ?: "")?.let { builtRanking.put(it) }
+                }
                 Loaded(loaded, cached, stamps, builtCatalogue, builtRanking)
             }
             main.post {
@@ -136,17 +141,31 @@ class Library(context: Context) {
     /** Whether every indexed show records the catalogue it came from; until then 分开搜 cannot split. */
     fun isCatalogueLabelled() = catalogue?.labelled == true
     /**
-     * The hot list as it was last fetched, or null when there is none yet.
+     * The hot list of one shelf, or null when there is none yet.
      *
      * It is kept on disk so the ranking page has something to show before the network answers -
      * the page then updates itself in the background instead of making the user wait and press
      * anything.
+     *
+     * The shelf is part of the question, not of the answer: [type] asks for one shelf's list and
+     * gets that shelf's list or nothing. A list belonging to the other shelf is not a fallback
+     * here - it is the wrong board, and showing it under this shelf's heading is worse than
+     * showing an empty page that fills in a moment later.
      */
-    fun cachedRanking() = rankingCache
-    /** Keeps a freshly fetched hot list, in memory and on disk. */
+    fun cachedRanking(type: ContentType) = rankingCache.get(type)
+    /**
+     * The list of one shelf, but only while it is still young enough to show.
+     *
+     * "Young enough" is one rule, so it is asked in one place: the page draws whatever it has and
+     * refreshes in the background, while the request itself only reuses a list that has not gone
+     * stale. Two copies of that rule drift apart, and the one that drifts is the one that decides
+     * whether the site's rate is worth spending.
+     */
+    fun freshRanking(type: ContentType) = rankingCache.fresh(type, System.currentTimeMillis())
+    /** Keeps a freshly fetched hot list, in memory and on disk, under the shelf it was fetched for. */
     fun saveRanking(list: HotRank.HotList) {
-        rankingCache = list
-        rankingWrites.submit(mapOf("ranking" to { HotRank.encode(list) }))
+        rankingCache.put(list)
+        rankingWrites.submit(mapOf(HotRank.Cache.key(list.type) to { HotRank.encode(list) }))
     }
     /**
      * True when the index is old enough that a rebuild is due.
@@ -320,7 +339,7 @@ class Library(context: Context) {
         flush()
     }
     /** Requests prompt background commit, without lifecycle-thread disk waits. */
-    fun flush() { writes.flush(); homeWrites.flush(); catalogueWrites.flush() }
+    fun flush() { writes.flush(); homeWrites.flush(); catalogueWrites.flush(); rankingWrites.flush() }
     /** Drain pending commits after Activity destruction; abrupt process death is still a boundary. */
     fun close() {
         if (closed) return
@@ -328,8 +347,10 @@ class Library(context: Context) {
         readyCallbacks.clear(); errorCallbacks.clear()
         loader.shutdown(); catalogueLoader.shutdownNow()
         synchronized(retiredWrites) {
-            writes.close(); homeWrites.close(); catalogueWrites.close()
-            retiredWrites += writes; retiredWrites += homeWrites; retiredWrites += catalogueWrites
+            // 榜单这一份也要在这里收尾：漏掉它，取到的榜就停在写队列里没落盘，
+            // 下次开应用时手上没有，当天取榜的那十个请求白花了。
+            writes.close(); homeWrites.close(); catalogueWrites.close(); rankingWrites.close()
+            retiredWrites += writes; retiredWrites += homeWrites; retiredWrites += catalogueWrites; retiredWrites += rankingWrites
         }
     }
     private fun commit(target: SharedPreferences, values: Map<String, () -> Any?>): Boolean {

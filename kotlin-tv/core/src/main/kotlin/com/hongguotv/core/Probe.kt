@@ -205,6 +205,46 @@ private fun run(args: Array<String>, report: ProbeReport) {
         return
     }
 
+    // How long a signed stream URL stays usable.
+    //
+    // The next episode is now prepared while the current one is still playing, so the URL it holds
+    // was signed a whole episode ago - and longer still if the user paused. If the CDN stops serving
+    // that URL before the next episode starts, the prepared episode fails, the user sees a loading
+    // step anyway, and this time with an error on top. The prepared resource's own lifetime (see
+    // PrefetchPolicy.TTL_MS) has to stay under the URL's real one, so measure it instead of guessing.
+    //
+    // --urllife [minutes] resolves one URL and then asks for its first kilobyte every minute, the way
+    // the player does, until the answer stops being 206. The first non-206 is the cliff.
+    if(args.contains("--urllife")) {
+        val minutes=args.getOrNull(args.indexOf("--urllife")+1)?.toIntOrNull() ?: 30
+        try {
+            val sample=repository.home(1,ContentType.SHORT).items.firstOrNull() ?: error("首页没有剧集")
+            val episode=repository.detail(sample.id).episodes.firstOrNull() ?: error("没有分集")
+            val stream=repository.stream(sample.id,episode)
+            say("取到地址：${sample.title} 画质=${stream.quality}")
+            val started=System.currentTimeMillis()
+            var alive=true
+            for(minute in 0..minutes) {
+                val age=(System.currentTimeMillis()-started)/1000
+                val answer=runCatching {
+                    val request=okhttp3.Request.Builder().url(stream.url)
+                        .header("User-Agent",VendorConstants.VIDEO_UA)
+                        .header("Referer","https://novel.snssdk.com/")
+                        .header("Range","bytes=0-1023")
+                        .header("Accept-Encoding","identity").build()
+                    repository.http.newCall(request).execute().use { response -> response.code to (response.body?.bytes()?.size ?: 0) }
+                }.getOrElse { (0 to 0) }
+                say("t=${age}s http=${answer.first} bytes=${answer.second}")
+                if(answer.first!=206) { alive=false; break }
+                Thread.sleep(60_000)
+            }
+            say(if(alive) "URL 在 $minutes 分钟内一直是 206" else "URL 在 ${(System.currentTimeMillis()-started)/1000}s 之后不再返回 206")
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
+
     if(args.contains("--ranking")) {
         try {
             // 两档都量：真人剧档一个榜，漫剧档两个榜合成一张。名次必须连续且递增 ——
