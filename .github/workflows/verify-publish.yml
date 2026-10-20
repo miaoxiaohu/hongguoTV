@@ -26,11 +26,12 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       # Both compose files refuse to interpolate without a token, and they are right to: an open
-      # listener hands out decrypted media to the whole network. These two steps only ask whether
-      # the files parse, so they get a placeholder - the real token belongs to whoever deploys,
-      # and it never belongs in CI. The token stays out of the job environment on purpose: the
-      # service refuses to start without one on a non-loopback address, and a test that checks
-      # that refusal must see an environment without one.
+      # listener hands out decrypted media to the whole network. But the step that only asks whether
+      # the files parse has no token to give it, so the check has failed on every push since the
+      # token became mandatory - six red runs in a row, all of them about a variable the check
+      # never wanted. The placeholder is scoped to these two steps and to nothing else: it exists
+      # to satisfy the interpolation, and the rest of the job should not see a token it did not
+      # ask for. The real one belongs to whoever deploys.
       - name: Check the root compose file
         env:
           BRIDGE_TOKEN: ci-config-check-only
