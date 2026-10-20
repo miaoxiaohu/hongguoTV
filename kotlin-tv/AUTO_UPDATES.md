@@ -147,6 +147,44 @@ git push origin main kotlin-v0.9.10
 
 已经发布过的构建被重跑时会原样保留附件，不会覆盖电视上已安装的 APK。
 
+### 发布说明从哪来
+
+**电视上「检查更新」弹出来的那段字，是 release 里的 `update.json` 的 `notes` 字段** ——
+它和 APK、源码 ZIP 一起挂在 release 上，电视每次检查都重新拉。
+
+以前 `release.yml` 从来没设过 `RELEASE_NOTES`，所以每一版的 `notes` 都是同一句通用文案
+（「应用内自动检查和下载更新；保留安静连播…」），**更新弹窗等于什么都没说**。
+
+现在改成按版本取说明文档：
+
+- 仓库里放 `kotlin-tv/RELEASE_<版本号>.md`（例：`RELEASE_0.9.47.md`）。没有这个文件时，
+  `release.yml` 会打一条 warning，更新弹窗退回通用文案。
+- 文件里 `<!-- notes -->` 和 `<!-- /notes -->` **之间**的那几行，是电视上显示的短说明
+  （`update.json` 的 `notes`）；**整个文件**是 release 页面正文。标记用注释写明，是为了
+  改正文时不会不知不觉改掉电视读到的那段。
+- `scripts/publish-tv-update.py` 会优先用这个短说明，其次是 `RELEASE_NOTES` 环境变量，
+  最后才是通用文案。
+
+**已经发布过、想补说明怎么办**：说明常常是包发出去之后才写得出来的。此时重跑发布脚本会被
+「已发布就不再动附件」这条挡住 —— 那是为了不覆盖电视上已装的 APK。但只改说明是安全的，所以
+脚本多了一个模式：
+
+```sh
+HONGGUOTV_VERSION_NAME=0.9.47 HONGGUOTV_VERSION_CODE=9047 UPDATE_TAG=kotlin-v0.9.47 \
+RELEASE_NOTES_FILE=kotlin-tv/RELEASE_0.9.47.md \
+python scripts/publish-tv-update.py --refresh-notes
+```
+
+它**只**重写 `update.json`、`SHA256SUMS` 里对应的那一行、以及 release 正文；
+**APK 附件一个字节都不碰**。动手之前它会先核对：线上那份 `update.json` 说的版本号要对得上，
+线上 APK 的 SHA-256 和长度要跟清单里写的一致 —— 对不上就拒绝动手，而不是在坏数据上再叠一层。
+
+### 顺带修掉的一个坑
+
+`gh` 是靠当前工作目录判断仓库的。CI 步骤的工作目录、以及从别处手动调用脚本时，
+它会对着一个明明存在的 release 回答「release not found」。脚本现在自己把仓库名算出来
+（优先用 `GITHUB_REPOSITORY`，否则从 `origin` 推导），每条 `gh` 命令都显式带上 `--repo`。
+
 ### 本地构建
 
 日常开发直接用默认值即可（`0.0.0-dev` / versionCode 1）：

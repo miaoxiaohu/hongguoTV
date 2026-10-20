@@ -94,6 +94,25 @@ jobs:
             echo "UPDATE_TAG=$tag"
           } >> "$GITHUB_ENV"
 
+          # Per-version release notes, when the repository has them. The block between the
+          # markers is what the television shows when it offers this version; the whole
+          # document is the release page body. Without this file every release carried the
+          # same generic sentence, so the update dialog said nothing about what changed.
+          notes_file="kotlin-tv/RELEASE_${version}.md"
+          if [[ -f "$notes_file" ]]; then
+            echo "RELEASE_NOTES_FILE=$notes_file" >> "$GITHUB_ENV"
+            short_notes="$(awk '/^<!-- notes -->/{flag=1;next}/^<!-- \/notes -->/{flag=0}flag' "$notes_file")"
+            if [[ -n "$short_notes" ]]; then
+              {
+                echo "RELEASE_NOTES<<RELEASE_NOTES_EOF"
+                printf '%s\n' "$short_notes"
+                echo "RELEASE_NOTES_EOF"
+              } >> "$GITHUB_ENV"
+            fi
+          else
+            echo "::warning::no per-version notes at $notes_file; the update dialog will carry the generic text"
+          fi
+
       - name: Tests, release lint, and signed APK
         env:
           HONGGUOTV_STORE_PASSWORD: ${{ secrets.HONGGUOTV_STORE_PASSWORD }}
