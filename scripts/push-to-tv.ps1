@@ -73,34 +73,55 @@ $ins = Invoke-WebRequest -Uri "$base/api/install?k=$Key" -Method Post -ContentTy
         -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 120 -UseBasicParsing
 Write-Output ("install -> " + $ins.StatusCode + " " + (Format-Safe $ins.Content))
 
-# 3. Read the TV's view of the queue and the installed version.
+# 3. Read the TV's view of the queue and of what is installed.
+#    The queue entry carries the version of the file that was just uploaded. That is the version
+#    the TV has to end up with, and it is the yardstick for step 4.
 Start-Sleep -Seconds 3
 $apks = Invoke-RestMethod -Uri "$base/api/apks?k=$Key" -TimeoutSec 60
 $mine = $apks.items | Where-Object { $_.name -eq $name }
 if ($mine) { Write-Output ("queued  -> " + (Format-Safe ($mine | ConvertTo-Json -Compress))) } else { Write-Output "queued  -> NOT FOUND in the TV's list" }
+$wanted = if ($mine) { $mine.versionCode } else { $null }
 
 $installed = Invoke-RestMethod -Uri "$base/api/installed?k=$Key" -TimeoutSec 60
 $app = $installed.items | Where-Object { $_.package -eq $Package }
-if (-not $app) {
-  Write-Output "onTV    -> $Package not in the installed list"
-  exit 1
+if ($app) {
+  Write-Output ("onTV    -> " + (Format-Safe ($app | ConvertTo-Json -Compress)))
+} else {
+  # Being absent from the list is the normal state of a fresh install: the package manager only
+  # reports a package once it really has it. Treating that as a failure ends the run before the
+  # wait below gets its chance, and the push then reads as broken when it actually worked.
+  Write-Output "onTV    -> $Package is not installed yet"
 }
-Write-Output ("onTV    -> " + (Format-Safe ($app | ConvertTo-Json -Compress)))
 
-# 4. Optionally wait for the new version to show up. Installing takes a while on this box, and
+# 4. Wait for the pushed version to show up on the TV. Installing takes a while on this box, and
 #    "pushed" is not "installed" - reading the version back is the only proof that landed.
+#    The yardstick is the version that was pushed, not the version that happened to be there
+#    before: pushing a rebuild of a version that is already installed never changes versionCode,
+#    and a "did the number change?" test would sit there until it timed out on an install that
+#    had in fact succeeded.
 if ($WaitSeconds -gt 0) {
-  $before = $app.versionCode
-  Write-Output "waiting -> up to $WaitSeconds s for the version to change from $before"
+  Write-Output "waiting -> up to $WaitSeconds s for $Package at version $wanted"
   $deadline = (Get-Date).AddSeconds($WaitSeconds)
   while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 5
+    $queued = (Invoke-RestMethod -Uri "$base/api/apks?k=$Key" -TimeoutSec 60).items | Where-Object { $_.name -eq $name }
+    if ($queued -and $queued.error) {
+      Write-Output ("onTV    -> the TV reported an install failure: " + (Format-Safe $queued.error))
+      exit 1
+    }
     $now = (Invoke-RestMethod -Uri "$base/api/installed?k=$Key" -TimeoutSec 60).items | Where-Object { $_.package -eq $Package }
-    if ($now -and $now.versionCode -ne $before) {
+    if ($now -and ($null -eq $wanted -or $now.versionCode -eq $wanted)) {
       Write-Output ("onTV    -> installed: " + (Format-Safe ($now | ConvertTo-Json -Compress)))
       exit 0
     }
   }
-  Write-Output "onTV    -> still the old version after $WaitSeconds s; check the TV's screen"
+  Write-Output "onTV    -> $Package is not at version $wanted after $WaitSeconds s; check the TV's screen"
+  exit 1
+}
+
+# No waiting was asked for, so there is no proof to give back. Say that plainly instead of
+# exiting 0 on the strength of an install request that was merely accepted.
+if (-not $app) {
+  Write-Output "onTV    -> not confirmed (WaitSeconds=0 means no waiting); re-run with -WaitSeconds to watch the version land"
   exit 1
 }
