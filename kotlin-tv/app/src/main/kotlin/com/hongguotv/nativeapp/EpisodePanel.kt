@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
+import android.view.ViewTreeObserver
 import android.view.Window
 import android.widget.*
 
@@ -17,6 +18,12 @@ class EpisodePanel(
     private val select: (Int)->Unit,private val closed: ()->Unit
 ) {
     private val dialog=Dialog(activity)
+    /**
+     * 面板自己的焦点图。
+     *
+     * 面板是另一个窗口，坐标是相对那个窗口算的 —— 混进主屏那张图里，落点会指到别处去。
+     */
+    private val focusRouter=FocusRouter()
     private var group=current/20
     private var focused=current
     private fun dp(n: Int)=(n*activity.resources.displayMetrics.density).toInt()
@@ -41,6 +48,7 @@ class EpisodePanel(
     }
     fun dismiss()=dialog.dismiss()
     private fun render() {
+        focusRouter.reset()
         val content=LinearLayout(activity).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(14),dp(12),dp(14),dp(12)); setBackgroundColor(TvStyle.background) }
         content.addView(label("选集  /  正在看第 ${current+1} 集",20f))
         val actions=LinearLayout(activity)
@@ -71,33 +79,14 @@ class EpisodePanel(
             repeat(5-indexes.size) { row.addView(Space(activity),LinearLayout.LayoutParams(0,1,1f)) }
             grid.addView(row)
         }
-        close.nextFocusLeftId=close.id; close.nextFocusRightId=jump.id; jump.nextFocusLeftId=close.id; jump.nextFocusRightId=jump.id
-        if(cells.isEmpty()) {
-            // A show with no episodes has no cells to point at, and the focus has to stay among
-            // the buttons instead of being sent to an index that does not exist.
-            previous.nextFocusDownId=jump.id; next.nextFocusDownId=jump.id
-            close.nextFocusDownId=if(previous.isFocusable) previous.id else jump.id
-            jump.nextFocusDownId=if(next.isFocusable) next.id else close.id
-        } else {
-            // 本组最后一行满格时不能把「下」指回自己，否则焦点被困在末行；改为落到分页按钮。
-            val lastRowStart=((cells.size-1)/5)*5
-            cells.forEachIndexed { i,cell ->
-                cell.nextFocusLeftId=cells[if(i%5==0) i else i-1].id
-                cell.nextFocusRightId=cells[if(i%5==4 || i==cells.lastIndex) i else i+1].id
-                cell.nextFocusUpId=if(i>=5) cells[i-5].id else if(i<3 && previous.isFocusable) previous.id else if(next.isFocusable) next.id else jump.id
-                cell.nextFocusDownId=when {
-                    i+5<cells.size -> cells[i+5].id
-                    i>=lastRowStart && next.isFocusable -> next.id
-                    i>=lastRowStart -> jump.id
-                    else -> cells[cells.lastIndex].id
-                }
-            }
-            previous.nextFocusUpId=close.id; next.nextFocusUpId=jump.id
-            previous.nextFocusDownId=cells.first().id; next.nextFocusDownId=cells[minOf(4,cells.lastIndex)].id
-            close.nextFocusDownId=if(previous.isFocusable) previous.id else cells.first().id
-            jump.nextFocusDownId=if(next.isFocusable) next.id else cells[minOf(4,cells.lastIndex)].id
-        }
+        // 面板里的四个方向由焦点图统一算：同一行左右环绕，上下按位置对齐。
+        // 以前这里是手写的 nextFocus*Id，第一行按「上」按格子下标分派（0—2 去「上一组」、
+        // 3—4 去「下一组」），纯属数下标数出来的。
         dialog.setContentView(content)
+        // 面板每一组重画一次，落点跟着重算一次。
+        content.viewTreeObserver.addOnGlobalLayoutListener(object: ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() { focusRouter.apply(content) }
+        })
         if(cells.isNotEmpty()) cells[(focused-group*20).coerceIn(0,cells.lastIndex)].requestFocus()
     }
 }

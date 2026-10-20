@@ -127,8 +127,6 @@ class MainActivity: Activity() {
     private val favoriteBadges=mutableMapOf<String,TextView>()
     private var favoriteStatus: TextView?=null
     private var favoriteCheck: TextView?=null
-    private var homeUpdates: TextView?=null
-    private val resumeCards=mutableListOf<View>()
     private var episodePanel: EpisodePanel?=null
     private val recovery=RecoveryBudget()
     private var retryPending=false
@@ -168,6 +166,13 @@ class MainActivity: Activity() {
      * generation 留给播放器和选集面板，那两处的 ticket 是在 invalidatePage() 之后取的。
      */
     private val workTicket=WorkTicket()
+    /**
+     * 这一屏的焦点图。
+     *
+     * 遥控器往哪儿落由它算：收齐这一屏所有可聚焦的 view，量出各自的位置，再按位置决定
+     * 上下左右落到哪儿。落点不再由下标算 —— 下标算出来的落点常常在屏幕另一头。
+     */
+    private val focusRouter=FocusRouter()
     private var screen="catalog"
     private var tab=0
     private var page=1
@@ -202,8 +207,6 @@ class MainActivity: Activity() {
      * 字符串而不是 view id，是因为 view id 是 View.generateViewId 生成的，新一轮渲染的 id 不同。
      */
     private var keptFocusAnchor: String? = null
-    /** 当前详情页剧集网格里的按钮，供 [renderSeasons] 接同系列区块的双向焦点。 */
-    private var episodeViews: List<View> = emptyList()
     /** 当前详情页里承载「同系列剧」结果的容器；异步回调用它确认自己没画到别的剧上。 */
     private var seasonsHolder: LinearLayout?=null
     private data class CatalogState(val page: Int,val items: List<Series>,val hasMore: Boolean,val ranking: HotRanking?,val totalPages: Int?=null)
@@ -281,6 +284,12 @@ class MainActivity: Activity() {
         super.onCreate(state)
         window.decorView.systemUiVisibility=View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }; setContentView(root)
+        // 焦点图跟着布局走：每一次布局落定都重算一次落点。
+        // 布局变了（异步内容到了、封面高度改了）落点就得跟着变 —— 只算一次的话，
+        // 换页之后按方向键还是会落到上一屏的位置上。
+        root.viewTreeObserver.addOnGlobalLayoutListener(object: ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() { if(!isDestroyed) focusRouter.apply(root) }
+        })
         updater=AppUpdater(this) { foreground && library.isLoaded && screen=="catalog" && !tvTools.showing }
         connectivity=getSystemService(ConnectivityManager::class.java)
         runCatching { connectivity.registerDefaultNetworkCallback(networkCallback); networkRegistered=true }
@@ -375,14 +384,15 @@ class MainActivity: Activity() {
     }
     private fun releaseCatalogViews() {
         homeScreen?.let { homePosition=it.capturePosition() }
-        episodeViews=emptyList()
         catalogScroll?.let { scrollPositions[catalogPageKey]=it.scrollY }
         catalogBody=null
         homeScreen=null; selectionPreview=null; catalogScroll=null
         nav.clear(); typeButtons.clear(); searchInput=null; searchButton=null; searchActions.clear()
         historyManage=null; collectionBack=null; favoriteBadges.clear()
-        favoriteStatus=null; favoriteCheck=null; homeUpdates=null; resumeCards.clear()
+        favoriteStatus=null; favoriteCheck=null
         catalogCards.clear(); cardImages.clear()
+        // 上一屏的 view 都不在了，焦点图也该重画 —— 否则新旧两屏的落点会串在一起。
+        focusRouter.reset()
     }
     private fun <T> work(action: ()->T,done: (T)->Unit,failed: (Throwable)->Unit) {
         cancelWork()
@@ -537,17 +547,15 @@ class MainActivity: Activity() {
             if(!inlineCatalogueFilters()) types.addView(text("片库",12f,muted),lp(dp(42),-2))
             ContentType.entries.forEach { type ->
                 typeButtons[type]=addButton(types,type.label,library.contentType==type) { switchContentType(type) }
-                    .apply { isSelected=library.contentType==type; nextFocusUpId=nav[tab].id }
+                    .apply { isSelected=library.contentType==type }
             }
             placeCatalogueRow(top,container,types,"长按确认 · 管理片单")
-            nav.forEach { it.nextFocusDownId=typeButtons.getValue(library.contentType).id }
         }
         if(tab==TAB_SEARCH) {
             val searchRow=row(); val input=EditText(this).apply { id=View.generateViewId(); hint="输入剧名或关键词（当前片库全量）"; setText(query); textSize=16f; setTextColor(white); setHintTextColor(muted); isSingleLine=true; maxLines=1; filters=arrayOf(android.text.InputFilter.LengthFilter(80)); imeOptions=android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH }
             searchRow.addView(input,lp(0,dp(45)).apply { weight=1f; rightMargin=dp(10) })
             fun search() { val next=input.text.toString().trim(); if(next.isBlank()) { input.requestFocus(); return }; runSearch(next) }
             searchInput=input; searchButton=addButton(searchRow,"搜索") { search() }
-            input.nextFocusUpId=nav[tab].id; searchButton?.nextFocusUpId=input.nextFocusUpId
             // 分类按钮进导航栏右上角，和首页完全同一套。它在搜索页是真的有作用：全库索引记着每部
             // 剧属于哪套目录，而同一个题材词两边都命中 —— 搜「都市」1042 部里 670 部是漫剧，
             // 不分开的话大半结果和用户想要的不是一档。摆法和首页一样，是为了让这个开关在两页
@@ -556,16 +564,13 @@ class MainActivity: Activity() {
             if(!inlineCatalogueFilters()) types.addView(text("片库",12f,muted),lp(dp(42),-2))
             ContentType.entries.forEach { type ->
                 typeButtons[type]=addButton(types,type.label,library.contentType==type) { switchContentType(type) }
-                    .apply { isSelected=library.contentType==type; nextFocusUpId=input.nextFocusUpId }
+                    .apply { isSelected=library.contentType==type }
             }
             placeCatalogueRow(top,container,types)
-            // 导航往下先落到分类按钮，再由它落到输入框 —— 分类按钮和导航同处一行，从导航往下跳到
-            // 左下角的输入框会显得突兀。
-            nav.forEach { it.nextFocusDownId=typeButtons[library.contentType]?.id ?: input.id }
             lateinit var recent: TextView
-            recent=addButton(searchRow,"历史") { showSearchHistory(recent) }; recent.nextFocusUpId=input.nextFocusUpId
+            recent=addButton(searchRow,"历史") { showSearchHistory(recent) }
             lateinit var phone: TextView
-            phone=addButton(searchRow,"手机输入") { (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(input.windowToken,0); tvTools.phoneInput(phone) { runSearch(it) } }; phone.nextFocusUpId=input.nextFocusUpId
+            phone=addButton(searchRow,"手机输入") { (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(input.windowToken,0); tvTools.phoneInput(phone) { runSearch(it) } }
             searchActions.addAll(listOf(recent,phone))
             // The walk is normally invisible and automatic, so this only appears once it has fallen
             // behind. Without a lever here the only thing a user can do is restart the app, which is
@@ -581,7 +586,7 @@ class MainActivity: Activity() {
                         else "将重新抓一遍全部目录，补上站上新剧。途中可以照常使用应用，搜索照旧可用。",
                         rebuild)
                     startCatalogueBuild(true)
-                }; rebuild.nextFocusUpId=input.nextFocusUpId
+                }
                 searchActions.add(rebuild)
             }
             input.setOnEditorActionListener { _,_,_-> search(); true }; container.addView(searchRow)
@@ -592,17 +597,16 @@ class MainActivity: Activity() {
             if(!inlineCatalogueFilters()) types.addView(text("片库",12f,muted),lp(dp(42),-2))
             ContentType.entries.forEach { type ->
                 typeButtons[type]=addButton(types,type.label,library.contentType==type) { switchContentType(type) }
-                    .apply { isSelected=library.contentType==type; nextFocusUpId=nav[tab].id }
+                    .apply { isSelected=library.contentType==type }
             }
             placeCatalogueRow(top,container,types)
             // 标题、刷新按钮、站方的更新说明，整行都去掉了：这一页已经用分类按钮说明了是哪一档，
             // 榜单自己会更新（一天一次），用户没有任何需要按的东西。
-            nav.forEach { it.nextFocusDownId=typeButtons.getValue(library.contentType).id }
         } else if(tab>TAB_RANKING) {
             val heading=row().apply { setPadding(0,dp(14),0,dp(6)) }
             heading.addView(text(if(tab==TAB_FAVORITES) "我的收藏" else "接着上次看",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
             if(tab==TAB_FAVORITES) {
-                favoriteCheck=addButton(heading,"检查更新") { favoriteMonitor.check(force=true) }.apply { nextFocusUpId=nav[tab].id }
+                favoriteCheck=addButton(heading,"检查更新") { favoriteMonitor.check(force=true) }
             }
             if(tab==TAB_HISTORY && library.history().isNotEmpty()) {
                 historyManage=addButton(heading,"管理记录") {
@@ -610,7 +614,7 @@ class MainActivity: Activity() {
                     tvTools.choose("选择要管理的观看记录",rows.map { it.series.title },historyManage,{ index -> manageHistory(rows[index].series,historyManage) },"清空记录") {
                         tvTools.confirm("清空观看记录","将删除本机所有观看进度，收藏会保留。",historyManage) { library.clearHistory(); catalogFocus=""; showCatalog() }
                     }
-                }.apply { nextFocusUpId=nav[tab].id }
+                }
             }
             container.addView(heading)
             if(tab==TAB_FAVORITES) {
@@ -677,7 +681,6 @@ class MainActivity: Activity() {
                 } else {
                     body.removeAllViews()
                     error(body,problem) { showCatalog(true) }
-                    if(resumeCards.isNotEmpty()) resumeCards.first().requestFocus()
                 }
             })
             }
@@ -729,16 +732,12 @@ class MainActivity: Activity() {
         }
     }
     private fun catalogGrid(body: LinearLayout,focusNav: Boolean,focusType: Boolean=false,loading: Boolean=false,focusInput: Boolean=false,focusAnchor: String?=null) {        if(tab==TAB_HOME && page==1 && collection==null) { renderHome(body,focusNav,focusType,loading); return }
-        resumeCards.clear(); catalogCards.clear(); cardImages.clear(); collectionBack=null
+        catalogCards.clear(); cardImages.clear(); collectionBack=null
         if(collection!=null) {
             val heading=row()
-            collectionBack=addButton(heading,"‹ 返回首页") { leaveCollection(); showCatalog() }.apply {
-                nextFocusUpId=typeButtons[library.contentType]?.id ?: nav[tab].id
-                nextFocusDownId=id
-            }
+            collectionBack=addButton(heading,"‹ 返回首页") { leaveCollection(); showCatalog() }
             heading.addView(text(when(collection) { "later" -> "稍后看"; "updates" -> "收藏有更新"; "hot" -> "热门发现"; else -> "接着看" },22f))
             body.addView(heading)
-            typeButtons.values.forEach { it.nextFocusDownId=collectionBack!!.id }
         }
         catalogPageKey="$tab:${collection.orEmpty()}:$page:$query"
         val preview=SeriesPreview(this); selectionPreview=preview; body.addView(preview)
@@ -757,19 +756,11 @@ class MainActivity: Activity() {
             // 没结果可跳时，searchInput / searchButton / searchActions 的 ↓ 不能再指 cards.first()，
             // 那是个已经不存在的旧 id，焦点会卡死。分页按钮（如果存在）是最自然的 ↓ 落点；
             // 没有分页按钮就指回 nav，至少不指向过期引用。
-            val prevBtn=if((tab<=TAB_RANKING || localCatalog()) && page>1) addButton(list,"上一页") { page--; showCatalog(!localCatalog()) } else null
-            val nextBtn=if((tab<=TAB_RANKING || localCatalog()) && hasMore) addButton(list,"下一页") { page++; showCatalog(!localCatalog()) } else null
-            val emptyTarget=(nextBtn ?: prevBtn)?.id ?: nav[tab].id
-            searchInput?.nextFocusDownId=emptyTarget
-            searchButton?.nextFocusDownId=emptyTarget
-            searchActions.forEach { it.nextFocusDownId=emptyTarget }
-            if(resumeCards.isNotEmpty()) {
-                typeButtons.values.forEach { it.nextFocusDownId=resumeCards.first().id }
-                resumeCards.forEach { it.nextFocusDownId=it.id }
-            }
+            if((tab<=TAB_RANKING || localCatalog()) && page>1) addButton(list,"上一页") { page--; showCatalog(!localCatalog()) }
+            if((tab<=TAB_RANKING || localCatalog()) && hasMore) addButton(list,"下一页") { page++; showCatalog(!localCatalog()) }
             val anchorView=focusAnchorView(focusAnchor)
             if(anchorView!=null) anchorView.requestFocus()
-            else if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else if(focusNav || resumeCards.isEmpty()) nav[tab].requestFocus() else resumeCards.first().requestFocus()
+            else if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else nav[tab].requestFocus()
             return
         }
         // The site answers every query with ten same-genre rows and never an empty list, so a search
@@ -808,14 +799,12 @@ class MainActivity: Activity() {
         // spacing left the same visible gap. The row width is now a multiple of the page size
         // instead, so a page never ends short to begin with.
         val cardWidth=((resources.displayMetrics.widthPixels*.9f-gap*(maxColumns-1))/maxColumns).toInt()
-        val rows=mutableListOf<List<View>>()
         displayed.chunked(maxColumns).forEach { items ->
             val columns=items.size
             // 每行都左对齐。曾经只把「孤零零一张卡」的那行居中，理由是让它看起来不像没渲染出来 ——
             // 但同一页里别的行全是左对齐，唯独这行飘到中间，左边线在这里断开，反而更像出了错。
             // 统一靠左，海报列才是齐的。
             val line=row().apply { gravity=Gravity.TOP }
-            val built=mutableListOf<View>()
             items.forEachIndexed { columnIndex,item ->
                 // 这一页里的序号。翻页后靠它把焦点放回同一格 —— 与页长无关，所以搜索页
                 // （core 给 30 条一页）和别的页（18）用的是同一套算法。
@@ -838,19 +827,17 @@ class MainActivity: Activity() {
                 card.setOnKeyListener { _,key,event -> if(key==KeyEvent.KEYCODE_MENU) { if(event.action==KeyEvent.ACTION_UP) { catalogFocus=item.id; quickActions(item,card) }; true } else false }
                 card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) { catalogFocus=item.id; focusColumn=pageIndex; loadCover(image,item.cover); preview?.show(item,selectionStatus(item)); if(!restoringScroll) scroll.post { scroll.smoothScrollTo(0,when { line.top<scroll.scrollY -> line.top; line.bottom>scroll.scrollY+scroll.height -> (line.bottom-scroll.height).coerceAtLeast(0); else -> scroll.scrollY }) } } }
                 // The row measures its tallest card, then stretches siblings to keep badges aligned.
-                line.addView(card,lp(cardWidth,-1).apply { if(columnIndex<columns-1) rightMargin=gap }); built+=card; cards+=card
+                line.addView(card,lp(cardWidth,-1).apply { if(columnIndex<columns-1) rightMargin=gap }); cards+=card
             }
             list.addView(line,lp(-1,-2).apply { bottomMargin=dp(10) })
-            rows+=built
         }
         val paging=row(); paging.gravity=Gravity.CENTER
-        var prev: View?=null; var next: View?=null; var pageJump: View?=null
+        var next: View?=null
         if(tab<=TAB_RANKING || localCatalog()) {
-            prev=addButton(paging,"上一页") { if(page>1) turnPage(page-1) }.apply { isEnabled=page>1; isFocusable=page>1; alpha=if(page>1) 1f else .4f }
+            addButton(paging,"上一页") { if(page>1) turnPage(page-1) }.apply { isEnabled=page>1; isFocusable=page>1; alpha=if(page>1) 1f else .4f }
             // 页码本身是个按钮：翻到第几页不该一页一页按。
             val jump=button(pagingLabel()) { }.apply { gravity=Gravity.CENTER; textSize=14f; setTextColor(muted) }
             jump.setOnClickListener { showPagePicker(jump) }
-            pageJump=jump
             paging.addView(jump,lp(dp(
                 when {
                     tab==TAB_RANKING -> 135
@@ -860,52 +847,18 @@ class MainActivity: Activity() {
                     else -> 95
                 }),dp(44)))
             next=addButton(paging,"下一页") { if(hasMore) turnPage(page+1) }.apply { isEnabled=hasMore; isFocusable=hasMore; alpha=if(hasMore) 1f else .4f }
-            // 翻页这一行自己排成一条：上一页 → 页码 → 下一页。
-            prev?.let { it.nextFocusRightId=jump.id; jump.nextFocusLeftId=it.id }
-            jump.nextFocusRightId=next?.id ?: jump.id
-            next?.let { it.nextFocusLeftId=jump.id }
             if(collection=="hot" && !hasMore && collectionReturn?.hasMore==true) {
                 next=addButton(paging,"下一批热门") { collection=null; collectionReturn=null; page=2; catalogFocus=""; showCatalog(true) }
             }
             list.addView(paging,lp(-1,dp(50)))
         }
-        // 行内左右只在本行的卡片之间走；上下按列号对齐到相邻行，短行的列号越过邻行长度时落到
-        // 那行最右一张。卡片宽度虽然统一了，但末行张数不同，用全局下标推邻卡会指错。
-        rows.forEachIndexed { rowIndex,rowCards ->
-            val above=rows.getOrNull(rowIndex-1); val below=rows.getOrNull(rowIndex+1)
-            rowCards.forEachIndexed { columnIndex,card ->
-                card.nextFocusLeftId=if(columnIndex==0) card.id else rowCards[columnIndex-1].id
-                card.nextFocusRightId=if(columnIndex==rowCards.lastIndex) card.id else rowCards[columnIndex+1].id
-                // 第一排海报的上方，贴着它的是这一页的分类按钮所在的那一行：
-                // 上下键该是对称的，不该从海报一下跳到导航栏去。
-                card.nextFocusUpId=if(above==null) (searchInput?.id ?: collectionBack?.id ?: typeButtons[library.contentType]?.id ?: favoriteCheck?.id ?: historyManage?.id ?: resumeCards.getOrNull(minOf(columnIndex,2))?.id ?: nav[tab].id) else above[columnIndex.coerceAtMost(above.lastIndex)].id
-                // 最后一排往下落到翻页那一行：上一页（第一页时不可选）→ 页码 → 下一页。
-                card.nextFocusDownId=if(below==null) (prev?.takeIf { it.isFocusable }?.id ?: pageJump?.id ?: next?.takeIf { it.isFocusable }?.id ?: card.id) else below[columnIndex.coerceAtMost(below.lastIndex)].id
-            }
-        }
-        nav.forEach { it.nextFocusDownId=typeButtons[library.contentType]?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
-        historyManage?.nextFocusDownId=cards.first().id
-        favoriteCheck?.nextFocusDownId=cards.first().id
-        collectionBack?.nextFocusDownId=cards.first().id
-        resumeCards.forEachIndexed { index,v -> v.nextFocusDownId=cards[minOf(index,cards.lastIndex)].id }
-        val firstRow=cards.take(maxColumns)
-        if(resumeCards.isNotEmpty()) firstRow.forEachIndexed { index,v -> v.nextFocusUpId=resumeCards[minOf(index,resumeCards.lastIndex)].id }
-        else homeUpdates?.let { updates -> updates.nextFocusUpId=typeButtons[library.contentType]?.id ?: nav[TAB_HOME].id; updates.nextFocusDownId=cards.first().id; firstRow.forEach { it.nextFocusUpId=updates.id } }
-        // 分类按钮往下直接轮到海报。
-        typeButtons.values.forEach { it.nextFocusDownId=searchInput?.id ?: collectionBack?.id ?: resumeCards.firstOrNull()?.id ?: homeUpdates?.id ?: cards.first().id }
-        // 上一行把导航往下接到了分类按钮，这一行再把最后一排接回海报。
-        // 少了它 Android 会按几何位置乱找，遥控器从分类按钮直接落到导航栏，网格就选不中。
-        // 搜索页没有分类按钮，searchInput 自己往下走一跳。
-        // searchRow 里 input → 搜索 → 历史 → 手机输入 → (续建索引) 从左到右一字排开，
-        // 原本都跳 cards[4] 让「搜索」按 ↓ 直接横移到右侧第 5 张，体验上是一跳。改成按 searchRow
-        // 内的列号分发，每一列 ↓ 落在最近的那张海报上，几何和焦点一致。
-        searchInput?.nextFocusDownId=cards.first().id
-        searchButton?.nextFocusDownId=cards.getOrNull(1)?.id ?: cards.first().id
-        searchActions.forEachIndexed { i,view -> view.nextFocusDownId=cards.getOrNull(i+2)?.id ?: cards.last().id }
+        // 落点不在这里算：整屏的焦点图按每个控件在屏幕上的实际位置统一算，写回 nextFocus*Id。
+        // 这一段原来手写下一整套：行内左右、上下对齐、导航和片库按钮的连线、翻页那一行的
+        // 连线。落点是按下标算出来的，于是「首页」按下键会跳到屏幕另一头的片库按钮，
+        // 第一列按左会把自己锁死。现在这些都由 [FocusRouter] 接手。
         val anchorView=focusAnchorView(focusAnchor)
         if(anchorView!=null) anchorView.requestFocus()
         else if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else if(focusNav) nav[tab].requestFocus()
-        else if(resumeCards.isNotEmpty() && (catalogFocus.isEmpty() || catalogFocus.startsWith("resume:"))) (resumeCards.firstOrNull { it.tag==catalogFocus } ?: resumeCards.first()).requestFocus()
         else {
             // 还记得是那张卡就还在那张卡上；那张卡这一页没有了（翻页、换词）就退到同一格 ——
             // 那一格是翻页前记下的序号，与页长无关，所以搜索页不会再每翻一页就丢一次焦点。
@@ -950,8 +903,7 @@ class MainActivity: Activity() {
     private fun renderHome(body: LinearLayout,focusNav: Boolean,focusType: Boolean,loading: Boolean) {
         homeUpdateCount=library.updatedFavorites()
         val preview=SeriesPreview(this); selectionPreview=preview; body.addView(preview)
-        val top=if(inlineCatalogueFilters()) nav[TAB_HOME] else typeButtons.getValue(library.contentType)
-        val home=HomeScreen(this,top,::loadCover,{ item,label -> preview.show(item,if(label.startsWith("第 ")) selectionStatus(item) else listOf(label,selectionStatus(item)).filter { it.isNotBlank() }.joinToString(" · ")) },
+        val home=HomeScreen(this,::loadCover,{ item,label -> preview.show(item,if(label.startsWith("第 ")) selectionStatus(item) else listOf(label,selectionStatus(item)).filter { it.isNotBlank() }.joinToString(" · ")) },
             { item,resume -> openDetail(item,resume) },::quickActions,{ catalogFocus=it })
         homeScreen=home; body.addView(home,lp(-1,0).apply { weight=1f })
         val hot=catalog.filterNot { it.id in library.hidden() }
@@ -959,8 +911,6 @@ class MainActivity: Activity() {
             if(hasMore) { { page=2; catalogFocus=""; showCatalog(true) } } else null,homePosition)
         home.refresh.text=if(loading) if(homeFromCache) "已显示上次内容 · 正在更新热门…" else "正在更新热门…" else "刷新热门"
         home.refresh.setOnClickListener { showCatalog(true) }
-        typeButtons.values.forEach { it.nextFocusDownId=home.firstId() }
-        if(inlineCatalogueFilters()) nav.forEach { it.nextFocusDownId=home.firstId() }
         if(focusNav) nav[TAB_HOME].requestFocus() else if(focusType) typeButtons.getValue(library.contentType).requestFocus()
         if(hot.isNotEmpty() && !homeContentLogged) {
             homeContentLogged=true
@@ -1027,7 +977,6 @@ class MainActivity: Activity() {
         favoriteBadges.forEach { (id,label) -> val value=library.favoriteLabel(id); if(label.text.toString()!=value) label.text=value }
         favoriteStatus?.text=favoriteMonitor.status
         favoriteCheck?.text=if(favoriteMonitor.running) "正在检查…" else "检查更新"
-        homeUpdates?.text="收藏更新 ${library.updatedFavorites()} 部"
         val home=homeScreen
         if(screen=="catalog" && tab==TAB_HOME && page==1 && collection==null && home!=null && library.updatedFavorites()!=homeUpdateCount) {
             // A stable resume key can be restored without moving the user's selection.
@@ -1095,14 +1044,8 @@ class MainActivity: Activity() {
         val license=setting(device,"开源许可") {
             AlertDialog.Builder(this).setTitle("开源许可").setMessage("本原生版以 GPL-3.0 发布。\n内容协议与加密处理移植自 drpys（22261ad）。\nAndroidX Media3 / OkHttp：Apache-2.0\nKotlin：Apache-2.0\nBouncy Castle：MIT\n完整源码和许可证见 GitHub：${AppUpdate.REPOSITORY}。").setPositiveButton("关闭",null).show()
         }
-        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton); val right=listOf(backup,hidden,updates,license)
-        listOf(left,right).forEach { items -> items.forEachIndexed { index,view ->
-            view.nextFocusUpId=items.getOrNull(index-1)?.id ?: nav[tab].id
-            view.nextFocusDownId=items.getOrNull(index+1)?.id ?: view.id
-        } }
-        left.forEachIndexed { i,v -> v.nextFocusLeftId=v.id; v.nextFocusRightId=right[i].id }
-        right.forEachIndexed { i,v -> v.nextFocusLeftId=left[i].id; v.nextFocusRightId=v.id }
-        nav.forEach { it.nextFocusDownId=qualityButton.id }
+        // 两列之间的左右、以及每一列里的上下，都由焦点图按实际位置算 —— 设置页的按钮是
+        // 左边一列、右边一列，手写的连线只照顾了其中几个方向。
         parent.addView(text("红果TV+  /  ${BuildConfig.VERSION_NAME}    ·    收藏与进度保存在本机",12f,muted).apply { setPadding(dp(2),dp(18),0,dp(10)) })
         nav[tab].requestFocus()
     }
@@ -1277,13 +1220,9 @@ class MainActivity: Activity() {
             repeat(10-numbers.size) { line.addView(Space(this),lp(0,dp(42)).apply { weight=1f; rightMargin=dp(6) }) }
             content.addView(line,lp(-1,dp(49)))
         }
-        // 最后一行不设 nextFocusDownId：写成指向自己会把下键困在网格里，「同系列剧」区块就在
-        // 网格下方，那样就永远按不到季度卡了。留空让系统的默认向下搜索落过去。
-        episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; if(i+10<episodes.size) v.nextFocusDownId=episodes[i+10].id }
-        // 「同系列剧」排在网格之后。两个方向的连线都在 renderSeasons 里接：网格最后一行向下
-        // 落到第一张季度卡、最后一张季度卡向上回到网格。只靠系统的默认几何搜索，两个方向都
-        // 不可靠 —— 之前「下」被 v.id 自锁、「上」直接落空，都是这么来的。
-        episodeViews=episodes.toList()
+        // 剧集网格的四个方向由焦点图统一算：同一行左右环绕，上下按列对齐，末行往下落到
+        // 「同系列剧」区块的第一张卡。以前这里是手写的 nextFocus*Id：末行不写下键，于是
+        // 「下」只能靠系统的几何搜索去猜，猜不中就永远按不到季度卡。
         seasonsHolder=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
         content.addView(seasonsHolder)
         loadSeasons(data)
@@ -1346,19 +1285,8 @@ class MainActivity: Activity() {
             holder.addView(item,lp(-1,-2).apply { bottomMargin=dp(8) })
             cards+=item
         }
-        // 纵向列表，焦点只连上下；连左右会让上下键在某些布局下被劫持。
-        // 两端都接回剧集网格：写成指向自己会把方向键自锁在区块里（第一张卡按「上」回不去
-        // 选集、最后一张按「下」掉不下来）。网格为空时退回自锁，避免连到已销毁的视图。
-        val grid=episodeViews
-        cards.forEachIndexed { i,v ->
-            val upTarget=if(i==0) grid.lastOrNull()?.id else cards[i-1].id
-            val downTarget=if(i==cards.lastIndex) grid.firstOrNull()?.id else cards[i+1].id
-            v.nextFocusUpId=upTarget ?: v.id
-            v.nextFocusDownId=downTarget ?: v.id
-        }
-        // 网格最后一行向下 → 第一张卡。网格每行只连了行内和同列的上一行，末行没有下行目标，
-        // 不显式接的话系统的默认几何搜索会跳过头（之前就是直接落空）。
-        grid.lastOrNull()?.let { last -> cards.firstOrNull()?.let { first -> last.nextFocusDownId=first.id } }
+        // 纵向列表：季度卡自己排成上下一条，焦点图再把这一串和上面的剧集网格接起来 ——
+        // 网格最后一行往下落到第一张季度卡、第一张季度卡往上回到网格最后一行。
     }
     private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
         updater.interrupt()
@@ -1703,7 +1631,9 @@ class MainActivity: Activity() {
     private fun formatTime(millis: Long): String { val seconds=(millis.coerceAtLeast(0)/1000); return "%02d:%02d".format(seconds/60,seconds%60) }
     private fun saveProgress(completed: Boolean=false) {
         val p=player ?: return; val data=detail ?: return; if(!playbackReady || episodeIndex !in data.episodes.indices) return
-        library.save(WatchProgress(data.series,data.episodes[episodeIndex],episodeIndex,p.currentPosition.coerceAtLeast(0),p.duration.coerceAtLeast(0),completed || p.playbackState==Player.STATE_ENDED,System.currentTimeMillis()))
+        // 用 core 里那个真名，不用同模块的 typealias：跨文件引用 typealias 在增量编译时
+        // 会偶发解析不到（报「Unresolved reference 'WatchProgress'」，而那个符号就在眼前）。
+        library.save(BackupProgress(data.series,data.episodes[episodeIndex],episodeIndex,p.currentPosition.coerceAtLeast(0),p.duration.coerceAtLeast(0),completed || p.playbackState==Player.STATE_ENDED,System.currentTimeMillis()))
     }
     private fun releasePlayer() {
         cancelRecovery(); cancelPrefetch(); mediaSession.deactivate(); tvTools.close()

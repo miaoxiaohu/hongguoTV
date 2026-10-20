@@ -34,7 +34,6 @@ class SeriesPreview(context: Context): LinearLayout(context) {
 /** Bounded horizontal shelves with stable D-pad selection and per-row scroll positions. */
 class HomeScreen(
     context: Context,
-    private val top: View,
     private val loadCover: (ImageView,String)->Unit,
     private val selected: (Series,String)->Unit,
     private val open: (Series,Boolean)->Unit,
@@ -153,13 +152,9 @@ class HomeScreen(
             val next=label("更多热门  ›",15f).apply { id=View.generateViewId(); tag="home:more"; isFocusable=true; isFocusableInTouchMode=true; setPadding(dp(12),dp(12),dp(12),dp(12)); background=shape(false); setOnFocusChangeListener { _,f -> background=shape(f); if(f) lastFocus=tag.toString() }; setOnClickListener { more() } }
             contents.addView(next,LayoutParams(-1,-2).apply { topMargin=dp(8) }); footer+=next; moreButton=next
         }
-        rows.forEachIndexed { i,row -> row.cards.forEachIndexed { j,card ->
-            card.view.nextFocusLeftId=row.cards[(j-1).coerceAtLeast(0)].view.id; card.view.nextFocusRightId=row.cards[(j+1).coerceAtMost(row.cards.lastIndex)].view.id
-            card.view.nextFocusUpId=if(i==0) top.id else rows[i-1].cards[j.coerceAtMost(rows[i-1].cards.lastIndex)].view.id
-            card.view.nextFocusDownId=if(i==rows.lastIndex) refresh.id else rows[i+1].cards[j.coerceAtMost(rows[i+1].cards.lastIndex)].view.id
-        } }
-        footer.forEachIndexed { i,v -> v.nextFocusUpId=if(i==0) rows.lastOrNull()?.cards?.firstOrNull()?.view?.id ?: top.id else footer[i-1].id; v.nextFocusDownId=footer.getOrNull(i+1)?.id ?: v.id }
-        top.nextFocusDownId=firstId()
+        // 四个方向不在这里连：货架是横向的一排一排摆的，上下要跨整屏对齐到另一条货架，
+        // 而货架和导航栏又不在同一个容器里 —— 手写的 nextFocus*Id 只能连自己看得见的部分，
+        // 于是「上下切换分区」这条提示有一半是假的。焦点图扫的是整棵视图树，跨容器也连得上。
         val preferred=focus.ifBlank { previous?.focus.orEmpty() }
         val target=target(preferred,previous)
         if(requestFocus) target.requestFocus()
@@ -252,5 +247,4 @@ class HomeScreen(
             row.cards.forEach { card -> card.view.getChildAt(0).let { artwork -> if(artwork.layoutParams.height!=imageHeight) artwork.layoutParams=artwork.layoutParams.apply { height=imageHeight } } }
         }
     }
-    fun firstId()=rows.firstOrNull()?.cards?.firstOrNull()?.view?.id ?: refresh.id
 }
