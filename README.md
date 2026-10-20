@@ -141,6 +141,19 @@ docker compose --env-file .env -f server/compose.yaml up -d --build
 
 ## 开发与验证
 
+**当前交付的是 Kotlin 原生独立版**（`kotlin-tv/`）。构建它需要 JDK 17、Android SDK Platform 36 / Build Tools 36.0.0：
+
+```sh
+# JVM 单元测试 + Android lint + 可安装的 debug APK
+./kotlin-tv/gradlew -p kotlin-tv :core:test :app:lintDebug :app:assembleDebug
+adb install -r kotlin-tv/app/build/outputs/apk/debug/app-debug.apk
+```
+
+正式签名包走 `scripts/build-kotlin.sh`，版本号由 `kotlin-vX.Y.Z` tag 派生。构建、签名、覆盖安装和
+应用内更新的完整说明见 [原生版说明](kotlin-tv/README.md) 与 [自动更新与发布链路](kotlin-tv/AUTO_UPDATES.md)。
+
+**以下是保留的 React Native 版与 Node 内容服务** —— 只有仍按旧方式部署的人才需要：
+
 ```sh
 npm ci
 npm run typecheck
