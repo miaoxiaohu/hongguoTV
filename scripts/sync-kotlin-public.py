@@ -32,10 +32,12 @@ ALLOWED_REMOTES = (
 # The paths the export replaces in the target repository.
 REPLACED = ('kotlin-tv', 'scripts', 'server', 'README.md', 'LICENSE', '.gitignore', '.github/workflows')
 
-# The two files that are copied out of kotlin-tv/distribution instead of the tracked tree.
+# The two files the mirror needs that the tracked export above does not carry: the release
+# workflow and the publish script. They used to live in kotlin-tv/distribution/, which the
+# tag-driven workflow removed in c59aa19; they now come straight from this repository.
 DISTRIBUTION = (
-    ('kotlin-tv/distribution/release.yml', '.github/workflows/release.yml'),
-    ('kotlin-tv/distribution/publish-tv-update.py', 'scripts/publish-tv-update.py'),
+    ('.github/workflows/release.yml', '.github/workflows/release.yml'),
+    ('scripts/publish-tv-update.py', 'scripts/publish-tv-update.py'),
 )
 
 root = Path(__file__).resolve().parent.parent
@@ -131,7 +133,7 @@ Android 8.0+，Kotlin / Media3，单 APK，无需部署服务。非官方、自�
 ./kotlin-tv/gradlew -p kotlin-tv :core:test :app:assembleDebug
 ```
 
-正式构建使用 `scripts/build-kotlin.sh`；签名配置见 [原生构建说明](kotlin-tv/README.md)。自动版本号为 10000 + workflow run_number，versionName 为 0.9.0+run_number。Release 的 update.json 记录确切版本和源码提交，复现时传入 HONGGUOTV_VERSION_CODE 与 HONGGUOTV_VERSION_NAME。
+正式构建使用 `scripts/build-kotlin.sh`；签名配置见 [原生构建说明](kotlin-tv/README.md)。版本号由 kotlin-vX.Y.Z tag 决定：versionName 即 tag 中的 X.Y.Z，versionCode 为 major*1000000 + minor*1000 + patch（kotlin-v0.9.47 对应 9047），CI 另有单调性守卫拒绝比已发布版本旧的 tag。Release 的 update.json 记录确切版本和源码提交；复现发布构建时传入同样的 HONGGUOTV_VERSION_CODE 与 HONGGUOTV_VERSION_NAME。
 
 Android 8 实体电视的解码、音频、遥控器和系统安装入口仍需实机确认。
 ''')
