@@ -24,6 +24,11 @@ object PrefetchPolicy {
      * the next episode is now prepared while the current one is still playing, so the resource
      * sits here for the whole of it. A short-drama episode runs a couple of minutes, and the
      * prepared stream URL is only worth holding while the CDN still serves it.
+     *
+     * It does: measured 2026-10-20 by resolving one signed URL and asking for its first kilobyte
+     * every minute for half an hour - thirty-one requests, all 206, so the URL was still serving
+     * bytes long after the ten minutes this resource is held for. The ten minutes are therefore
+     * the life of the resource, not the life of the address.
      */
     const val TTL_MS = 10 * 60_000L
 
