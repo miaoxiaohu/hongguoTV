@@ -123,6 +123,9 @@ class MainActivity: Activity() {
     private val sleepTimer=SleepTimer { android.os.SystemClock.elapsedRealtime() }
     private var sleepStopped=false
     private var playerView: PlayerView?=null
+    /** 画在画面上的弹幕；没有它播放器就只是一段视频。 */
+    private var danmakuOverlay: DanmakuOverlay?=null
+    private val danmakuSession=DanmakuSession()
     private lateinit var favoriteMonitor: FavoriteMonitor
     private val favoriteBadges=mutableMapOf<String,TextView>()
     private var favoriteStatus: TextView?=null
@@ -254,6 +257,14 @@ class MainActivity: Activity() {
                 if(sleepTimer.poll()) stopForSleep()
                 if(hud.visibility==View.VISIBLE) updatePlaybackText()
                 maybePrefetch()
+                val p=player
+                if(p!=null) {
+                    // 弹幕：把这一集的时长告诉它（它靠这个知道问到哪里为止），再报一下进度，
+                    // 离已加载的末尾近了它就去问下一窗。
+                    val duration=p.duration
+                    if(duration>0) danmakuSession.setDuration(duration)
+                    danmakuSession.onPosition(p.currentPosition)
+                }
                 val now=android.os.SystemClock.elapsedRealtime()
                 if(player?.isPlaying==true && now-lastSaved>5000) { saveProgress(); lastSaved=now }
             }
@@ -295,6 +306,9 @@ class MainActivity: Activity() {
         runCatching { connectivity.registerDefaultNetworkCallback(networkCallback); networkRegistered=true }
         favoriteMonitor=FavoriteMonitor(library,repository) { refreshFavoriteLabels() }
         mediaSession=TvMediaSession(this,{ if(foreground && screen=="player") requestPlayback(true) },{ if(foreground && screen=="player") requestPlayback(false) },{ position -> if(foreground && screen=="player") seekTo(position) },{ direction -> skipEpisode(direction) },{ if(foreground && screen=="player") returnToDetail() })
+        // 弹幕是锦上添花：拉不到就拉不到，绝不能打断播放，也不该在屏幕上留一条错误。
+        danmakuSession.onItems={ items -> danmakuOverlay?.setItems(items); if(items.isNotEmpty()) danmakuOverlay?.start() }
+        danmakuSession.onFailure={ problem -> android.util.Log.w("HongguoTV","Danmaku unavailable: ${problem.message}") }
         message(base(),"正在读取本机记录…")
         loadLibrary()
     }
@@ -1298,6 +1312,8 @@ class MainActivity: Activity() {
     }
     private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
         updater.interrupt()
+        // 上一集的弹幕先撤下来 —— 换集到新地址取到之前，画面上不该还飘着旧集的弹幕。
+        danmakuSession.stop(); danmakuOverlay?.setItems(emptyList())
         val data=detail ?: return
         val playbackStarted=android.os.SystemClock.elapsedRealtime()
         val reuse=screen=="player" && player!=null && playerView!=null && !recovering && !playError
@@ -1332,6 +1348,10 @@ class MainActivity: Activity() {
                 setKeepContentOnPlayerReset(true); setShutterBackgroundColor(Color.BLACK); setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
             }
             playerView=view; root.addView(view,FrameLayout.LayoutParams(-1,-1))
+            // 弹幕画在画面上：加在播放器之上、HUD 之下。位置取自播放进度，所以暂停、跳转、
+            // 倍速都对得上 —— 用墙钟算位移这三件事一定做不对其中一件。
+            danmakuOverlay=DanmakuOverlay(this).apply { setPositionSource { player?.currentPosition ?: 0L } }
+            root.addView(danmakuOverlay,FrameLayout.LayoutParams(-1,-1))
             hud=column().apply { setPadding(dp(widthDp()*.05f),dp(20),dp(widthDp()*.05f),(resources.displayMetrics.heightPixels*.05f).toInt()); background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(Color.TRANSPARENT,Color.argb(240,11,15,21))) }
             playbackTitle=text("",23f).apply { maxLines=1; ellipsize=TextUtils.TruncateAt.END; setTypeface(null,Typeface.BOLD) }; hud.addView(playbackTitle)
             playbackText=text("",15f,muted).apply { setPadding(0,dp(10),0,dp(9)) }; hud.addView(playbackText)
@@ -1392,6 +1412,8 @@ class MainActivity: Activity() {
             playerListener=listener; p.addListener(listener)
             val source=ProgressiveMediaSource.Factory { VideoDataSource(remote) }.createMediaSource(MediaItem.Builder().setMediaId(requestedId).setUri("hongguotv://episode/$requestedId").setMimeType(MimeTypes.VIDEO_MP4).build())
             p.setMediaSource(source); p.seekTo(position.coerceAtLeast(0)); p.prepare(); p.playWhenReady=foreground && requestedAutoplay && !pausedForLifecycle && episodePanel==null
+            // 这一集的弹幕。切集时也走这里：session 一开始就会把上一集的弹幕撤掉。
+            danmakuSession.start(data.series.id,requestedId)
         }, { problem -> playerFailure(problem) })
     }
     private fun closeTransport(http: okhttp3.OkHttpClient?) {
@@ -1651,6 +1673,8 @@ class MainActivity: Activity() {
         main.removeCallbacks(hideHud); main.removeCallbacks(seekRunnable); pendingSeek=null
         playerListener?.let { player?.removeListener(it) }; playerListener=null
         video?.close(); video=null; playerView?.player=null; playerView=null; player?.release(); player=null; playbackReady=false; transportPlay=null; sleepButton=null
+        // 弹幕也要停：不然它会接着按上一集的位置往下画，而画面已经不是那一集了。
+        danmakuSession.stop(); danmakuOverlay?.stop(); danmakuOverlay=null
         closeTransport(playbackHttp); playbackHttp=null
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
