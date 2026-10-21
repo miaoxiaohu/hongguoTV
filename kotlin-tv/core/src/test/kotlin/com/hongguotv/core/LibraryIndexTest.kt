@@ -81,6 +81,16 @@ class LibraryIndexTest {
         assertEquals(state.settings, merged.settings)
     }
 
+    @Test fun `the danmaku switch is read from the local state`() {
+        val source = data()
+        val values = mapOf("favorites" to LibraryDisk.series(source.favorites), "progress" to LibraryDisk.history(source.history),
+            "later" to LibraryDisk.series(source.later), "hidden" to source.hidden, "watched" to source.watched,
+            "searches" to SearchHistory.encode(source.searches), "quality" to 720, "playbackSpeed" to 1.5f,
+            "autoNext" to false, "contentType" to "short", "frameMode" to "FIT", "danmaku" to false,
+            "favoriteUpdates" to LibraryDisk.updates(mapOf("1" to FavoriteUpdate(83, 80, 10))))
+        assertFalse(LibraryDisk.decode(values).settings.danmaku)
+    }
+
     @Test fun `malformed rows do not discard valid records`() {
         val favoriteJson = "[null,{},${series(1).toJson()},false]"
         val state = LibraryDisk.decode(mapOf("favorites" to favoriteJson, "progress" to "bad", "favoriteUpdates" to "bad"))

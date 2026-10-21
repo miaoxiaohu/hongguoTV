@@ -326,6 +326,10 @@ class Library(context: Context) {
     var autoNext: Boolean
         get() = state().settings.autoNext
         set(value) { if (value != autoNext) { state().settings = state().settings.copy(autoNext = value); put("autoNext", value) } }
+    /** 画面上的弹幕。关掉时既不拉也不画 —— 连请求都不该发出去。 */
+    var danmakuEnabled: Boolean
+        get() = state().settings.danmaku
+        set(value) { if (value != danmakuEnabled) { state().settings = state().settings.copy(danmaku = value); put("danmaku", value) } }
     var contentType: ContentType
         get() = state().settings.type
         set(value) { if (value != contentType) { state().settings = state().settings.copy(type = value); put("contentType", value.storedValue) } }

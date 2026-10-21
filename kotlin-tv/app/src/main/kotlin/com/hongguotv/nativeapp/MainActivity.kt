@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.view.*
@@ -1046,11 +1047,18 @@ class MainActivity: Activity() {
             library.autoNext=!library.autoNext
             autoNextButton.text="自动连播  ·  ${if(library.autoNext) "开启" else "关闭"}"
         }
+        lateinit var danmakuButton: TextView
+        danmakuButton=setting(playback,"弹幕  ·  ${if(library.danmakuEnabled) "开启" else "关闭"}") {
+            library.danmakuEnabled=!library.danmakuEnabled
+            danmakuButton.text="弹幕  ·  ${if(library.danmakuEnabled) "开启" else "关闭"}"
+            applyDanmakuSetting()
+        }
         lateinit var backup: TextView
         backup=setting(device,"手机备份与恢复") {
             runCatching { LibraryBackup.encode(library.snapshot()) }.onSuccess { encoded ->
                 tvTools.libraryTransfer(encoded,backup) { data,restoreSettings ->
                     favoriteMonitor.stop(); library.restore(data,restoreSettings)
+                    applyDanmakuSetting()
                     tabState.clear(); tabFocus.clear(); catalogFocus=""; page=1
                     showCatalog(); favoriteMonitor.check()
                     Toast.makeText(this,"记录已合并恢复",Toast.LENGTH_LONG).show()
@@ -1350,7 +1358,10 @@ class MainActivity: Activity() {
             playerView=view; root.addView(view,FrameLayout.LayoutParams(-1,-1))
             // 弹幕画在画面上：加在播放器之上、HUD 之下。位置取自播放进度，所以暂停、跳转、
             // 倍速都对得上 —— 用墙钟算位移这三件事一定做不对其中一件。
-            danmakuOverlay=DanmakuOverlay(this).apply { setPositionSource { player?.currentPosition ?: 0L } }
+            danmakuOverlay=DanmakuOverlay(this).apply {
+                setPositionSource { player?.currentPosition ?: 0L }
+                setVideoRectProvider { videoRect() }
+            }
             root.addView(danmakuOverlay,FrameLayout.LayoutParams(-1,-1))
             hud=column().apply { setPadding(dp(widthDp()*.05f),dp(20),dp(widthDp()*.05f),(resources.displayMetrics.heightPixels*.05f).toInt()); background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(Color.TRANSPARENT,Color.argb(240,11,15,21))) }
             playbackTitle=text("",23f).apply { maxLines=1; ellipsize=TextUtils.TruncateAt.END; setTypeface(null,Typeface.BOLD) }; hud.addView(playbackTitle)
@@ -1413,7 +1424,7 @@ class MainActivity: Activity() {
             val source=ProgressiveMediaSource.Factory { VideoDataSource(remote) }.createMediaSource(MediaItem.Builder().setMediaId(requestedId).setUri("hongguotv://episode/$requestedId").setMimeType(MimeTypes.VIDEO_MP4).build())
             p.setMediaSource(source); p.seekTo(position.coerceAtLeast(0)); p.prepare(); p.playWhenReady=foreground && requestedAutoplay && !pausedForLifecycle && episodePanel==null
             // 这一集的弹幕。切集时也走这里：session 一开始就会把上一集的弹幕撤掉。
-            danmakuSession.start(data.series.id,requestedId)
+            if(library.danmakuEnabled) danmakuSession.start(data.series.id,requestedId)
         }, { problem -> playerFailure(problem) })
     }
     private fun closeTransport(http: okhttp3.OkHttpClient?) {
@@ -1551,10 +1562,46 @@ class MainActivity: Activity() {
             if(anchor.tag!="playback-settings") anchor.text="定时 ${sleepTimer.label()}"; updatePlaybackText(); showHud()
         })
     }
+    /**
+     * 弹幕开关生效。
+     *
+     * 关掉时连请求都不该发出去 —— 开着开关却什么都看不到，比没有这个功能还让人以为坏了。
+     * 开着时正在播的那一集要立刻把弹幕拉起来，不用等下一集。
+     */
+    private fun applyDanmakuSetting() {
+        if(!library.danmakuEnabled) {
+            danmakuSession.stop(); danmakuOverlay?.setItems(emptyList()); danmakuOverlay?.stop()
+            return
+        }
+        val data=detail ?: return
+        if(screen!="player") return
+        val episode=data.episodes.getOrNull(episodeIndex) ?: return
+        danmakuSession.start(data.series.id,episode)
+    }
     private fun frameResizeMode()=when(library.frameMode) {
         VideoFrameMode.FIT -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
         VideoFrameMode.ZOOM -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
         VideoFrameMode.FILL -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL
+    }
+    /**
+     * 视频画面在窗口里的矩形。
+     *
+     * 竖屏短剧在 16:9 的电视上默认是「完整画面」：画面撑满高度，左右各留一条黑边。弹幕要按
+     * 画面的真实宽度走，不然就飘在那两条黑边上 —— 看着像飘在画面外面。
+     *
+     * 找的是 surface 本身：播放器外面那层框永远是全屏的，只有 surface 才是画面真正的范围。
+     */
+    private fun videoRect(): Rect? {
+        val pv=playerView ?: return null
+        val surface=findSurface(pv) ?: return null
+        if(surface.width<=0||surface.height<=0) return null
+        val at=IntArray(2); surface.getLocationInWindow(at)
+        return Rect(at[0],at[1],at[0]+surface.width,at[1]+surface.height)
+    }
+    private fun findSurface(view: View): View? {
+        if(view is SurfaceView||view is TextureView) return view
+        if(view is ViewGroup) for(i in 0 until view.childCount) findSurface(view.getChildAt(i))?.let { return it }
+        return null
     }
     private fun showFramePicker(anchor: TextView,inPlayer: Boolean) {
         tvTools.choose("全局画面模式",listOf("完整画面 · 保留比例与全部内容","等比铺满 · 会裁掉部分画面与字幕","拉伸铺满 · 画面比例会改变"),anchor,{ index ->
@@ -1581,7 +1628,7 @@ class MainActivity: Activity() {
         episodes=addButton(options,"选集") { showEpisodePanel(episodes) }
         lateinit var more: TextView
         more=addButton(options,"播放设置") {
-            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放"),more,{ choice ->
+            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放","弹幕 ${if(library.danmakuEnabled) "开" else "关"}"),more,{ choice ->
                 main.post {
                     if(screen=="player" && more.isAttachedToWindow) when(choice) {
                         0 -> showSpeedPicker(more)
@@ -1589,6 +1636,7 @@ class MainActivity: Activity() {
                         2 -> showFramePicker(more,true)
                         3 -> showSleepPicker(more)
                         4 -> { seekTo(0); hidePanel() }
+                        5 -> { library.danmakuEnabled=!library.danmakuEnabled; applyDanmakuSetting() }
                     }
                 }
             })
@@ -1775,6 +1823,7 @@ class MainActivity: Activity() {
         favoriteMonitor.destroy(); tvTools.destroy(); updater.destroy(); saveProgress(); releasePlayer(); library.close()
         artwork.close(); releaseCatalogViews(); mediaSession.release(); main.removeCallbacksAndMessages(null)
         io.shutdownNow(); prefetchWorker.shutdownNow(); networkCleanup.shutdown()
+        danmakuSession.close()
         Thread({ repository.http.dispatcher.cancelAll(); repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown() },"hongguotv-network-cleanup").start()
         super.onDestroy()
     }

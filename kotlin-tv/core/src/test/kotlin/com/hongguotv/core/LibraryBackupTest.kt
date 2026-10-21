@@ -16,6 +16,19 @@ class LibraryBackupTest {
         val result=LibraryBackup.decode(LibraryBackup.encode(sanitized))
         assertEquals("你 好",result.favorites.single().title); assertEquals("",result.favorites.single().cover)
     }
+    @Test fun `a backup from before the danmaku switch still restores with danmaku on`() {
+        // 0.9.50 之前备份里没有这个字段。备份是给人拿去用的，不是让人丢设置的 ——
+        // 缺这个字段就当开着，而不是让整份备份读不出来。
+        val fromOldBuild=JSONObject(LibraryBackup.encode(data()))
+        fromOldBuild.getJSONObject("settings").remove("danmaku")
+        val restored=LibraryBackup.decode(fromOldBuild.toString())
+        assertTrue(restored.settings.danmaku)
+        assertEquals("测试 1",restored.favorites.single().title)
+    }
+    @Test fun `the danmaku switch survives a backup round trip`() {
+        val off=data().copy(settings=BackupSettings(720,1.5f,false,ContentType.COMIC,VideoFrameMode.ZOOM,false))
+        assertFalse(LibraryBackup.decode(LibraryBackup.encode(off)).settings.danmaku)
+    }
     @Test fun `merge retains newer progress and watched state unless imported progress is newer`() {
         val local=data(); val incoming=data().copy(favorites=listOf(series("2"),series("1")),history=listOf(progress("1",50),progress("2",200)),watched=emptySet(),settings=BackupSettings(480,2f))
         val merged=LibraryBackup.merge(local,incoming,false)

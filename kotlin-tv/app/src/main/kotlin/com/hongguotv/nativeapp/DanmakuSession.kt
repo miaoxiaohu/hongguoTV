@@ -33,6 +33,13 @@ class DanmakuSession(
     private var loading=false
     private var items=emptyList<Danmaku>()
     private var failed=false
+    /**
+     * 换了集或关了开关就作废在飞的那次请求。
+     *
+     * 不用「还在不在跑」来判断：拉完最后一窗时也会把 running 置否，而那一批是要显示的。
+     * 用一个只增不减的编号，谁的编号变了谁的结果就扔掉 —— 这跟搜索页作废上一次请求是同一招。
+     */
+    private var epoch=0
 
     /** 拿到新一批弹幕时回调（主线程）。 */
     var onItems: ((List<Danmaku>)->Unit)?=null
@@ -48,6 +55,7 @@ class DanmakuSession(
         synchronized(lock) {
             this.seriesId=seriesId; this.vid=vid; this.durationMs=durationMs
             loadedUntilMs=0L; loading=false; items=emptyList<Danmaku>(); failed=false
+            epoch++
         }
         running.set(true)
         // 换集了：先把上一集的弹幕从画面上撤掉，别让它停在新集的开头。
@@ -74,15 +82,16 @@ class DanmakuSession(
     }
 
     private fun fetch(startMs: Long) {
-        val series: String; val episode: String
+        val series: String; val episode: String; val mine: Int
         synchronized(lock) {
             if(loading||!running.get()) return
-            loading=true; series=seriesId; episode=vid
+            loading=true; series=seriesId; episode=vid; mine=epoch
         }
         worker.execute {
             try {
                 val window=repository.window(series,episode,startMs,synchronized(lock){ durationMs })
                 val merged=synchronized(lock) {
+                    if(mine!=epoch) return@synchronized null      // 换集或关了开关：这一批扔掉
                     val all=(items+window.items).distinctBy { it.offsetMs to it.text }.sortedBy { it.offsetMs }
                     items=all
                     loadedUntilMs=maxOf(loadedUntilMs,window.nextStartMs)
@@ -90,9 +99,10 @@ class DanmakuSession(
                     if(durationMs>0&&loadedUntilMs>=durationMs) running.set(false)
                     all
                 }
-                main.post { onItems?.invoke(merged) }
+                // 拉到最后一批时 running 会被置否，但那一批仍要显示 —— 所以看的是编号，不是 running。
+                if(merged!=null) main.post { onItems?.invoke(merged) }
             } catch(e: Exception) {
-                synchronized(lock) { loading=false; failed=true }
+                synchronized(lock) { if(mine==epoch) { loading=false; failed=true } }
                 main.post { onFailure?.invoke(e) }
             }
         }
@@ -101,7 +111,13 @@ class DanmakuSession(
     /** 换集或退出播放时叫停。 */
     fun stop() {
         running.set(false)
-        synchronized(lock) { loading=false; items=emptyList<Danmaku>(); loadedUntilMs=0L }
+        synchronized(lock) { epoch++; loading=false; items=emptyList<Danmaku>(); loadedUntilMs=0L }
+    }
+
+    /** App 退出时把线程池收掉。 */
+    fun close() {
+        stop()
+        worker.shutdownNow()
     }
 
     fun snapshot(): List<Danmaku> = synchronized(lock) { items }

@@ -459,6 +459,31 @@ private fun run(args: Array<String>, report: ProbeReport) {
         }
         return
     }
+    // The danmaku path as the app actually uses it: the real repository, the real signer, one
+    // window at a time. --danmu measured the endpoint by hand; this one runs the shipped code.
+    if(args.contains("--danmu2")) {
+        val danmaku=DanmakuRepository()
+        try {
+            val sample=repository.home(1,ContentType.SHORT).items.firstOrNull() ?: error("首页没有剧集")
+            val detail=repository.detail(sample.id)
+            val vid=detail.episodes.firstOrNull() ?: error("没有分集")
+            val seriesId=detail.series.id
+            say("样本：${detail.series.title} series=$seriesId vid=$vid")
+            val window=danmaku.window(seriesId,vid,0L,0L)
+            say("第一窗：${window.items.size} 条, has_more=${window.hasMore}, 下一窗从 ${window.nextStartMs}ms 开始")
+            for(item in window.items.take(8)) say("  ${item.offsetMs}ms digg=${item.digg} ${item.text}")
+            // The second window has to come from where the first one said it would.
+            val next=danmaku.window(seriesId,vid,window.nextStartMs,0L)
+            say("第二窗：${next.items.size} 条, 起点 ${next.items.firstOrNull()?.offsetMs}ms")
+            // And the track layout has to survive the real rows.
+            val timeline=DanmakuTimeline(window.items,trackCount=6,lifetimeMs=8_000L)
+            say("排布：${timeline.placed.size} 条占了 ${timeline.placed.map { it.track }.toSet().size} 条轨道")
+            say("在 3 秒处看得见的：${timeline.visibleAt(3_000L).size} 条")
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
     val type=if(args.contains("--comic")) ContentType.COMIC else ContentType.SHORT
     val keyword=if(type==ContentType.COMIC) "修仙" else "总裁"
     // The client is shut down here as it is in every other branch. OkHttp's dispatcher runs

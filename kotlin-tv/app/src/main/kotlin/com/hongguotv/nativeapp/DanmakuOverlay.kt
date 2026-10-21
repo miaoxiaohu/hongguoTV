@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Rect
 import android.view.View
 import com.hongguotv.core.Danmaku
 import com.hongguotv.core.DanmakuTimeline
@@ -29,10 +30,13 @@ class DanmakuOverlay(context: Context) : View(context) {
     /** 尺寸还没定下来时先存着，定下来再排 —— 字号是 0 时量出来的宽度全是 0。 */
     private var pending: List<Danmaku>?=null
     private var positionSource:()->Long={ 0L }
+    private var videoRectProvider:()->Rect?={ null }
     private var running=false
     private var textSizePx=0f
     private var trackHeightPx=0
     private var trackCount=1
+    /** 每帧都要用，不该每帧都新建一个数组。 */
+    private val overlayAt=IntArray(2)
 
     private val tick=object: Runnable {
         override fun run() {
@@ -62,6 +66,14 @@ class DanmakuOverlay(context: Context) : View(context) {
 
     /** 弹幕的位置从哪儿来。 */
     fun setPositionSource(source: ()->Long) { positionSource=source }
+
+    /**
+     * 视频画面在窗口里的矩形。
+     *
+     * 竖屏短剧在 16:9 的电视上默认是「完整画面」：画面撑满高度，左右留出黑边。弹幕要是按整个
+     * 屏幕算，就会飘在那两条黑边上 —— 看着像飘在画面外面。所以要拿画面的真实矩形。
+     */
+    fun setVideoRectProvider(provider: ()->Rect?) { videoRectProvider=provider }
 
     fun start() {
         if(running) return
@@ -98,12 +110,18 @@ class DanmakuOverlay(context: Context) : View(context) {
         val position=positionSource()
         val visible=laid.visibleAt(position)
         if(visible.isEmpty()) return
+        // 画面在哪儿：拿不到就按整个 view 算（刚开始播放、surface 还没尺寸时是这种）。
+        val rect=videoRectProvider()?.let { r -> if(r.width()>0&&r.height()>0) r else null }
+        // 两边都是相对窗口的坐标，差值才是相对本 overlay 的。
+        getLocationInWindow(overlayAt)
+        val left=rect?.left?.minus(overlayAt[0]) ?: 0
+        val right=rect?.right?.minus(overlayAt[0]) ?: width
         val baseline0=textSizePx
         for(v in visible) {
             val w=if(v.index<widths.size) widths[v.index] else 0f
-            val travel=width+w
-            val x=width-(v.elapsedMs.toFloat()/laid.lifetimeMs)*travel
-            if(x>width||x+w<0) continue
+            val travel=(right-left)+w
+            val x=right-(v.elapsedMs.toFloat()/laid.lifetimeMs)*travel
+            if(x>right||x+w<left) continue
             val baseline=baseline0+v.track*trackHeightPx
             canvas.drawText(v.danmaku.text,x,baseline,edge)
             canvas.drawText(v.danmaku.text,x,baseline,fill)
