@@ -66,9 +66,20 @@ function Format-Safe([string]$text) {
 $up = Invoke-WebRequest -Uri "$base/api/upload?filename=$([uri]::EscapeDataString($name))&k=$Key" `
         -Method Post -InFile $Apk -ContentType 'application/octet-stream' -TimeoutSec 300 -UseBasicParsing
 Write-Output ("upload  -> " + $up.StatusCode + " " + (Format-Safe $up.Content))
+# The service stores the file under a different name when that name is taken: it answers with the
+# name it actually used ("...-1.apk"), and the install has to name THAT file. Asking to install the
+# name we sent instead installs the older file that still sits under it, so the push reports
+# success while the TV keeps the previous build. Measured 2026-10-21: a re-push of 0.9.49 landed
+# the previous 0.9.49 on the box instead of the new one.
+$stored = $name
+try {
+    $answer = $up.Content | ConvertFrom-Json
+    if ($answer.name) { $stored = [string]$answer.name }
+} catch { }
+if ($stored -ne $name) { Write-Output "upload  -> the service stored it as $stored (that name was taken)" }
 
 # 2. Ask the TV to install it.
-$body = @{ name = $name } | ConvertTo-Json -Compress
+$body = @{ name = $stored } | ConvertTo-Json -Compress
 $ins = Invoke-WebRequest -Uri "$base/api/install?k=$Key" -Method Post -ContentType 'application/json' `
         -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 120 -UseBasicParsing
 Write-Output ("install -> " + $ins.StatusCode + " " + (Format-Safe $ins.Content))
@@ -78,7 +89,7 @@ Write-Output ("install -> " + $ins.StatusCode + " " + (Format-Safe $ins.Content)
 #    the TV has to end up with, and it is the yardstick for step 4.
 Start-Sleep -Seconds 3
 $apks = Invoke-RestMethod -Uri "$base/api/apks?k=$Key" -TimeoutSec 60
-$mine = $apks.items | Where-Object { $_.name -eq $name }
+$mine = $apks.items | Where-Object { $_.name -eq $stored }
 if ($mine) { Write-Output ("queued  -> " + (Format-Safe ($mine | ConvertTo-Json -Compress))) } else { Write-Output "queued  -> NOT FOUND in the TV's list" }
 $wanted = if ($mine) { $mine.versionCode } else { $null }
 
@@ -104,7 +115,7 @@ if ($WaitSeconds -gt 0) {
   $deadline = (Get-Date).AddSeconds($WaitSeconds)
   while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 5
-    $queued = (Invoke-RestMethod -Uri "$base/api/apks?k=$Key" -TimeoutSec 60).items | Where-Object { $_.name -eq $name }
+    $queued = (Invoke-RestMethod -Uri "$base/api/apks?k=$Key" -TimeoutSec 60).items | Where-Object { $_.name -eq $stored }
     if ($queued -and $queued.error) {
       Write-Output ("onTV    -> the TV reported an install failure: " + (Format-Safe $queued.error))
       exit 1
