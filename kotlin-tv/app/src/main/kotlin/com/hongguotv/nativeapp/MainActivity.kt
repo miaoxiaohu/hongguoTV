@@ -860,11 +860,19 @@ class MainActivity: Activity() {
         if(anchorView!=null) anchorView.requestFocus()
         else if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else if(focusNav) nav[tab].requestFocus()
         else {
-            // 还记得是那张卡就还在那张卡上；那张卡这一页没有了（翻页、换词）就退到同一格 ——
-            // 那一格是翻页前记下的序号，与页长无关，所以搜索页不会再每翻一页就丢一次焦点。
-            val index=catalogFocus.takeIf { it.isNotEmpty() }?.let { id -> displayed.indexOfFirst { it.id==id } }?.takeIf { it>=0 }
-                ?: focusColumn?.takeIf { it<displayed.size }
-            cards[index ?: 0].requestFocus()
+            // 新页的焦点落在哪一格，由 [PageTurn] 说了算：
+            // - 用户正在看的那张卡还在新页里，就让它留在原地（页面自己换的时候：榜单每天刷新
+            //   一次、收藏有更新 —— 别把它从用户眼皮底下挪走）。
+            // - 搜索页回到同一格：结果是一份连续的清单，用户拿两页对着看，位置跳了就没法比。
+            // - 其余各页从新页的第一张开始：翻页那一行（上一页 / 页码 / 下一页）画在整页的最
+            //   下面，它不在网格里，「回到翻页前的那一格」照搬过来就是把用户丢到新页的最后一排，
+            //   而新页的头几行还在屏幕上面看不见。实测（2026-10-21，排行榜一页 36 张、六列六行）：
+            //   焦点从左上角一路按到底停在第六行第一列，按下「下一页」之后新页的焦点也在第六行
+            //   第一列 —— 看着就像「跳到了角落里」。
+            val sameCard=catalogFocus.takeIf { it.isNotEmpty() }?.let { id -> displayed.indexOfFirst { it.id==id } }
+                ?: PageTurn.NOT_THERE
+            val index=PageTurn.focusCell(tab,focusColumn,sameCard,displayed.size)
+            cards[index].requestFocus()
         }
         val savedScroll=scrollPositions[catalogPageKey]
         scroll.post {
@@ -1056,14 +1064,14 @@ class MainActivity: Activity() {
      * 「正在加载…」再立刻跳走，那一下闪烁比等待本身更让人以为卡住了。回到第 1 页仍然要发请求，
      * 因为只有那一页会用服务端那十行补位，所以那一次仍旧走异步。
      *
-     * 翻页后焦点回到新页的同一格。那一格由 [focusColumn] 记着 —— 翻页前那张卡在它自己那一页
-     * 里的序号。原先是「按页长切片再取下标」重算 catalogFocus，而切片用的页长和搜索页真正的
-     * 页长不是一个数，下标对第 19 张以后的卡片全是错的，于是每翻一页焦点就跳回第 1 张。
+     * 翻页后焦点落在新页的哪一格，由 [PageTurn] 说了算：搜索页回到同一格（那一格由
+     * [focusColumn] 记着 —— 翻页前那张卡在它自己那一页里的序号，与页长无关；原先是「按页长
+     * 切片再取下标」重算 catalogFocus，而切片用的页长和搜索页真正的页长不是一个数，下标对
+     * 第 19 张以后的卡片全是错的，于是每翻一页焦点就跳回第 1 张），其余各页从新页的第一张开始。
      */
     private fun turnPage(target: Int) {
         page=target
-        // 旧页上那张卡这一页没有了，焦点得重新放。放哪一格由 focusColumn 记着 —— 那是翻页前
-        // 那张卡在它自己那一页里的序号，与页长无关，所以搜索页不会再每翻一页就丢一次焦点。
+        // 旧页上那张卡这一页没有了，焦点得重新放。放哪一格由 [PageTurn] 说了算。
         // catalogFocus 先清掉：旧页的 id 在新页里找不到时，不能再被当成「还记得的卡」而挡住
         // 同一格的还原。
         //
