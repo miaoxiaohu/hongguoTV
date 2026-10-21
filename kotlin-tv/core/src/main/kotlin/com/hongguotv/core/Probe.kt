@@ -484,6 +484,63 @@ private fun run(args: Array<String>, report: ProbeReport) {
         }
         return
     }
+    // Are the danmaku really repeated, or does it look that way?
+    //
+    // Three shapes of "the same thing" have to be told apart, and they mean different things:
+    // - the same row twice in one answer (the platform really sent it twice)
+    // - the same text at different moments (different people wrote the same thing - that is real)
+    // - the same row in two windows (our own paging asked for it twice)
+    if(args.contains("--danmu3")) {
+        val danmaku=DanmakuRepository()
+        try {
+            val sample=repository.home(1,ContentType.SHORT).items.firstOrNull() ?: error("首页没有剧集")
+            val detail=repository.detail(sample.id)
+            val vid=detail.episodes.firstOrNull() ?: error("没有分集")
+            val seriesId=detail.series.id
+            say("样本：${detail.series.title} vid=$vid")
+
+            val windows=mutableListOf<com.hongguotv.core.DanmakuWindow>()
+            var start=0L
+            repeat(4) {
+                val window=danmaku.window(seriesId,vid,start,0L)
+                windows+=window
+                say("窗口 ${it+1}：起点 ${start}ms，${window.items.size} 条，下一窗 ${window.nextStartMs}ms")
+                if(window.items.isEmpty()) return@repeat
+                start=window.nextStartMs
+            }
+
+            val raw=windows.flatMap { it.items }
+            say("四窗一共 ${raw.size} 条（没去重）")
+            val exactDuplicates=raw.groupBy { it.offsetMs to it.text }.filter { it.value.size>1 }
+            say("完全一样的行（同一个时间点 + 同一句话）出现了 ${exactDuplicates.size} 组")
+            for(entry in exactDuplicates.entries.take(3)) {
+                say("  重复 ${entry.value.size} 次 @${entry.key.first}ms 「${entry.key.second.take(20)}」")
+            }
+            val byText=raw.groupBy { it.text }
+            val repeatedText=byText.filter { it.value.size>1 }
+            say("出现过一次以上的文本有 ${repeatedText.size} 种，涉及 ${repeatedText.values.sumOf { it.size }} 条")
+            for(entry in repeatedText.entries.sortedByDescending { it.value.size }.take(5)) {
+                val times=entry.value.map { it.offsetMs }.sorted()
+                say("  「${entry.key.take(18)}」×${entry.value.size}，出现在 ${times.take(6).joinToString(",")}ms")
+            }
+            val tagged=raw.count { it.text.count { ch->ch=='[' }>=2 }
+            say("正文里带两个以上方括号标记的：$tagged 条")
+            for(item in raw.filter { it.text.count { ch->ch=='[' }>=2 }.take(3)) {
+                say("  @${item.offsetMs}ms 「${item.text.take(40)}」")
+            }
+            // The rule the app merges with: one row per (moment, text).
+            val merged=raw.distinctBy { it.offsetMs to it.text }
+            say("按 App 的合并规则（同一时间点 + 同一句话算一条）之后：${merged.size} 条，去掉 ${raw.size-merged.size} 条")
+            val sameMoment=merged.groupBy { it.offsetMs }.filter { it.value.size>1 }
+            say("同一个时间点上仍有多条（不同的话）：${sameMoment.size} 组")
+            for(entry in sameMoment.entries.sortedByDescending { it.value.size }.take(3)) {
+                say("  @${entry.key}ms 有 ${entry.value.size} 条：${entry.value.map { it.text.take(10) }.distinct().joinToString(" / ")}")
+            }
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
     val type=if(args.contains("--comic")) ContentType.COMIC else ContentType.SHORT
     val keyword=if(type==ContentType.COMIC) "修仙" else "总裁"
     // The client is shut down here as it is in every other branch. OkHttp's dispatcher runs
