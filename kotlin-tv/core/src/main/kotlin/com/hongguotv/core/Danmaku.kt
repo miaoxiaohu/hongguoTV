@@ -110,15 +110,22 @@ class DanmakuTimeline(items: List<Danmaku>, val trackCount: Int, val lifetimeMs:
      *
      * 看得见的弹幕在时间轴上是一段连续的区间（活得一样久），所以这里二分出那段区间，而不是
      * 每帧把整集扫一遍 —— 播放时每 33 毫秒就要问一次。
+     *
+     * @param positionMs 播放位置（**视频时间**轴）。
+     * @param speed 播放倍速。弹幕在画面上飘过去要多久，按的是**真实时间**：2 倍速时画面内容
+     *  走得快，弹幕也跟着飞快的话，一句话还没看完就出屏了 —— 倍速下就白看了。
+     *  出现的时间点仍按视频时间轴算，所以弹幕和画面的内容对得上。
      */
-    fun visibleAt(positionMs: Long): List<Visible> {
-        val end=firstAfter(positionMs)                 // 第一个起点 > 位置
-        val begin=firstAfter(positionMs-lifetimeMs)    // 第一个起点 > 位置 - 存活时长
+    fun visibleAt(positionMs: Long, speed: Float = 1f): List<Visible> {
+        val factor=if(speed>0.05f) speed else 1f
+        val end=firstAfter(positionMs)                             // 第一个起点 > 位置
+        // 存活窗口按倍速放大：8 秒真实时间，在 2 倍速下是 16 秒的**视频**时间。
+        val begin=firstAfter(positionMs-(lifetimeMs*factor).toLong())
         if(end<=begin) return emptyList()
         val out=ArrayList<Visible>(end-begin)
         for(i in begin until end) {
             val p=placed[i]
-            out+=Visible(p.danmaku,p.track,positionMs-p.danmaku.offsetMs,i)
+            out+=Visible(p.danmaku,p.track,((positionMs-p.danmaku.offsetMs)/factor).toLong(),i)
         }
         return out
     }

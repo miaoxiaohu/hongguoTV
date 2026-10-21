@@ -123,4 +123,37 @@ class DanmakuTest {
         assertTrue("30 秒那一处最多八十来条",visible.size<=90)
         assertEquals(30_000L,visible.last().danmaku.offsetMs)
     }
+
+    // ---- 倍速 ----
+
+    /**
+     * 2 倍速时弹幕不该跟着飞两倍快。
+     *
+     * 弹幕出现在哪一刻仍按视频时间轴（跟画面对得上），但它**飘过去的时间按真实时间算**：
+     * 不然 2 倍速下一句话还没看完就出屏了，倍速就白看了。
+     */
+    @Test fun atDoubleSpeedTheDanmakuStillTakesItsTimeToCross() {
+        val timeline=DanmakuTimeline(listOf(at(10_000)),trackCount=2,lifetimeMs=8_000L)
+        // 视频第 10 秒这条弹幕出现。2 倍速下真实经过 5 秒时，播放位置到了 10 秒。
+        val atTenSeconds=timeline.visibleAt(10_000L,2f)
+        assertEquals(1,atTenSeconds.size)
+        assertEquals("刚出现时真实经过的时间是 0",0L,atTenSeconds[0].elapsedMs)
+        // 真实经过 4 秒（视频第 18 秒）：横着走了 4 秒。
+        assertEquals(4_000L,timeline.visibleAt(18_000L,2f)[0].elapsedMs)
+    }
+
+    @Test fun atDoubleSpeedTheDanmakuLivesLongerOnScreen() {
+        val timeline=DanmakuTimeline(listOf(at(10_000)),trackCount=2,lifetimeMs=8_000L)
+        // 真实 8 秒 = 视频 16 秒，所以它到视频第 26 秒才走完。
+        assertTrue("8 秒真实时间里它还在",timeline.visibleAt(25_000L,2f).isNotEmpty())
+        assertTrue("8 秒真实时间走完了它就没了",timeline.visibleAt(26_000L,2f).isEmpty())
+    }
+
+    /** 1 倍速时行为不能变 —— 免得为了倍速把正常的也改了。 */
+    @Test fun atNormalSpeedNothingChanges() {
+        val timeline=DanmakuTimeline(listOf(at(0)),trackCount=2,lifetimeMs=8_000L)
+        assertEquals(1_000L,timeline.visibleAt(1_000L,1f)[0].elapsedMs)
+        assertTrue(timeline.visibleAt(7_999L,1f).isNotEmpty())
+        assertTrue(timeline.visibleAt(8_000L,1f).isEmpty())
+    }
 }

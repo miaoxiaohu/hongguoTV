@@ -28,6 +28,8 @@ class DanmakuSession(
     private var seriesId=""
     private var vid=""
     private var durationMs=0L
+    /** 现在的倍速，决定要提前多少去问下一窗。 */
+    private var speed=1f
     /** 已经问到的位置：这一行之前的内容都有了。 */
     private var loadedUntilMs=0L
     private var loading=false
@@ -67,6 +69,14 @@ class DanmakuSession(
     fun setDuration(durationMs: Long) { synchronized(lock) { this.durationMs=durationMs } }
 
     /**
+     * 现在的播放倍速。
+     *
+     * 2 倍速时视频时间走得快，30 秒的窗口 15 秒真实时间就播完了 —— 提前量要跟着放大，
+     * 不然就会断档：上一窗刚播完，下一窗还没到。
+     */
+    fun setSpeed(value: Float) { synchronized(lock) { speed=if(value>0.05f) value else 1f } }
+
+    /**
      * 播放到了哪儿。
      *
      * 离已加载的末尾还剩不到两秒就去问下一窗：问一次要几百毫秒，晚了就断档。
@@ -76,7 +86,7 @@ class DanmakuSession(
         val need=synchronized(lock) {
             if(loading||failed) false
             else if(durationMs>0&&loadedUntilMs>=durationMs) false
-            else positionMs+LEAD_MS>=loadedUntilMs
+            else positionMs+(LEAD_MS*speed).toLong()>=loadedUntilMs
         }
         if(need) fetch(synchronized(lock){ loadedUntilMs })
     }

@@ -261,9 +261,11 @@ class MainActivity: Activity() {
                 val p=player
                 if(p!=null) {
                     // 弹幕：把这一集的时长告诉它（它靠这个知道问到哪里为止），再报一下进度，
-                    // 离已加载的末尾近了它就去问下一窗。
+                    // 离已加载的末尾近了它就去问下一窗。倍速也要告诉它：2 倍速时视频时间走得快，
+                    // 提前量得跟着放大，不然上一窗播完了下一窗还没到。
                     val duration=p.duration
                     if(duration>0) danmakuSession.setDuration(duration)
+                    danmakuSession.setSpeed(p.playbackParameters.speed)
                     danmakuSession.onPosition(p.currentPosition)
                 }
                 val now=android.os.SystemClock.elapsedRealtime()
@@ -1360,6 +1362,7 @@ class MainActivity: Activity() {
             // 倍速都对得上 —— 用墙钟算位移这三件事一定做不对其中一件。
             danmakuOverlay=DanmakuOverlay(this).apply {
                 setPositionSource { player?.currentPosition ?: 0L }
+                setSpeedSource { player?.playbackParameters?.speed ?: 1f }
                 setVideoRectProvider { videoRect() }
             }
             root.addView(danmakuOverlay,FrameLayout.LayoutParams(-1,-1))

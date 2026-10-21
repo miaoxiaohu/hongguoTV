@@ -30,6 +30,7 @@ class DanmakuOverlay(context: Context) : View(context) {
     /** 尺寸还没定下来时先存着，定下来再排 —— 字号是 0 时量出来的宽度全是 0。 */
     private var pending: List<Danmaku>?=null
     private var positionSource:()->Long={ 0L }
+    private var speedSource:()->Float={ 1f }
     private var videoRectProvider:()->Rect?={ null }
     private var running=false
     private var textSizePx=0f
@@ -66,6 +67,15 @@ class DanmakuOverlay(context: Context) : View(context) {
 
     /** 弹幕的位置从哪儿来。 */
     fun setPositionSource(source: ()->Long) { positionSource=source }
+
+    /**
+     * 现在的播放倍速。
+     *
+     * 弹幕在画面上飘过去要多久按的是真实时间：2 倍速时画面内容走得快，弹幕也跟着飞快的话，
+     * 一句话还没看完就出屏了 —— 倍速下就白看了。它**出现在哪一刻**仍按视频时间轴算，
+     * 所以弹幕和画面的内容还是对得上。
+     */
+    fun setSpeedSource(source: ()->Float) { speedSource=source }
 
     /**
      * 视频画面在窗口里的矩形。
@@ -108,7 +118,7 @@ class DanmakuOverlay(context: Context) : View(context) {
         super.onDraw(canvas)
         val laid=timeline ?: return
         val position=positionSource()
-        val visible=laid.visibleAt(position)
+        val visible=laid.visibleAt(position,speedSource())
         if(visible.isEmpty()) return
         // 画面在哪儿：拿不到就按整个 view 算（刚开始播放、surface 还没尺寸时是这种）。
         val rect=videoRectProvider()?.let { r -> if(r.width()>0&&r.height()>0) r else null }
