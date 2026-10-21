@@ -2,6 +2,8 @@ package com.hongguotv.core
 
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.io.PrintWriter
@@ -358,6 +360,100 @@ private fun run(args: Array<String>, report: ProbeReport) {
                 check(shared.isEmpty()) { "${keys[i]} 与 ${keys[j]} 共享剧集: $shared" }
             }
             say("catalogsOk=${seen.entries.joinToString { "${it.key}:${it.value.size}" }}")
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
+    // Whether the platform still serves danmaku for a short drama, and under which signature.
+    //
+    // The comment endpoint is not the player endpoint: it wants `comment-source`/`server-channel`
+    // and an empty `x-ss-stub`, and the reference danmu client signs it with metasec-style
+    // X-Argus/X-Gorgon while this project signs with the drpys-style one. Every shape is tried
+    // in one run instead of guessing, and a known-good player request rides along as the control:
+    // a banned fingerprint also answers HTTP 200 with an empty body, so "refused" and "we got
+    // blocked" look identical without it.
+    if(args.contains("--danmu")) {
+        val signer=Signer()
+        fun call(label: String,url: String,headers: Map<String,String>,body: ByteArray?): ByteArray {
+            return try {
+                val request=okhttp3.Request.Builder().url(url)
+                headers.forEach { (k,v) -> request.header(k,v) }
+                body?.let { request.post(it.toRequestBody("application/json; charset=utf-8".toMediaType())) }
+                val bytes=repository.http.newCall(request.build()).execute().use { response -> readBody(response) }
+                say("[$label] bytes=${bytes.size} :: ${String(bytes,0,minOf(200,bytes.size)).replace(Regex("\\s+")," ")}")
+                bytes
+            } catch(e: Exception) {
+                say("[$label] FAILED ${e.javaClass.simpleName}: ${e.message?.take(110)}")
+                ByteArray(0)
+            }
+        }
+        try {
+            val sample=repository.home(1,ContentType.SHORT).items.firstOrNull() ?: error("首页没有剧集")
+            val detail=repository.detail(sample.id)
+            val vid=detail.episodes.firstOrNull() ?: error("没有分集")
+            val seriesId=detail.series.id
+            say("样本：${detail.series.title} series=$seriesId vid=$vid 集数=${detail.episodes.size}")
+
+            // The control: the very same signer that resolves a playable URL for this episode.
+            val modelPayload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"video_id":"$vid"}""".toByteArray()
+            val modelSigned=signer.sign(ContentRepository.VIDEO_MODEL_API,VendorConstants.newDevice(),modelPayload)
+            call("control video_model",modelSigned.url,modelSigned.headers,modelPayload)
+
+            val body=JSONObject()
+                .put("comment_source",601).put("server_channel",1000)
+                .put("group_id",vid).put("group_type",30).put("comment_type",20).put("sort",1)
+                .put("business_param",JSONObject()
+                    .put("book_id",seriesId).put("start_offset_time",0)
+                    .put("playlet_item_duration",600000)
+                    .put("need_danmaku_guide_type",JSONArray(listOf(1,3,4,2))))
+                .put("count",90).put("cursor","").put("aid",8662).put("compliance_status",0)
+                .toString().toByteArray()
+            val commentApi="https://api5-normal-sinfonlineb.fqnovel.com/novel/commentapi/comment/list/$vid/v1/"
+
+            val base=mapOf("comment-source" to "601","server-channel" to "1000")
+            // A: signed, empty x-ss-stub (what the reference client sends)
+            val signedEmpty=signer.sign(commentApi,VendorConstants.newDevice(),body)
+            val answer=call("A signed stub-empty",signedEmpty.url,signedEmpty.headers+base+mapOf("x-ss-stub" to ""),body)
+            // What a danmaku row actually looks like, so the renderer is written against the real
+            // shape rather than against the reference client's idea of it.
+            if(answer.isNotEmpty()) {
+                runCatching {
+                    val json=JSONObject(String(answer))
+                    val data=json.optJSONObject("data") ?: error("no data")
+                    val list=data.optJSONArray("data_list")
+                    val info=data.optJSONObject("common_list_info")
+                    val extra=data.optJSONObject("extra")
+                    say("danmaku: 本页 ${list?.length() ?: 0} 条, has_more=${info?.optBoolean("has_more")}, total=${info?.optInt("total")}, next=${extra?.optInt("next_query_danmaku_list_time")}")
+                    for(i in 0 until minOf(6,list?.length() ?: 0)) {
+                        val item=list!!.optJSONObject(i) ?: continue
+                        val comment=item.optJSONObject("comment")
+                        val text=comment?.optJSONObject("common")?.optJSONObject("content")?.optString("text").orEmpty()
+                        val offset=comment?.optJSONObject("expand")?.optLong("offset_time") ?: -1L
+                        val digg=comment?.optJSONObject("stat")?.optInt("digg_count") ?: 0
+                        say("  [$i] ${offset}ms digg=$digg $text")
+                    }
+                }.onFailure { say("解析弹幕失败: ${it.message}") }
+            }
+            // B: signed, the signer's own MD5 x-ss-stub
+            val signedStub=signer.sign(commentApi,VendorConstants.newDevice(),body)
+            call("B signed stub-md5",signedStub.url,signedStub.headers+base,body)
+            // C: unsigned - if this is the one that works, the endpoint does not check signatures
+            val plain=linkedMapOf(
+                "iid" to "4439167111854618","device_id" to "4439167111850522","ac" to "wifi",
+                "channel" to "update_64","aid" to "8662","app_name" to "novelread",
+                "version_code" to "71332","version_name" to "7.1.3.32","device_platform" to "android",
+                "os" to "android","ssmix" to "a","device_type" to "25053RT47C","device_brand" to "Redmi",
+                "language" to "zh","os_api" to "36","os_version" to "16",
+                "manifest_version_code" to "71332","resolution" to "1280*2772","dpi" to "520",
+                "update_version_code" to "71332","host_abi" to "arm64-v8a","dragon_device_type" to "phone",
+                "pv_player" to "71332","compliance_status" to "0","need_personal_recommend" to "1",
+                "player_so_load" to "1","is_android_pad_screen" to "0",
+                "ts" to (System.currentTimeMillis()/1000).toString(),
+                "_rticket" to System.currentTimeMillis().toString()
+            )
+            val plainUrl="$commentApi?"+Signer.encode(plain)
+            call("C unsigned",plainUrl,base+mapOf("User-Agent" to VendorConstants.VIDEO_UA,"x-ss-stub" to ""),body)
         } finally {
             repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
         }
