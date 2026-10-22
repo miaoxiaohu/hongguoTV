@@ -400,8 +400,14 @@ class ContentRepositoryTest {
         assertFalse(last.hasMore)
     }
 
+    /**
+     * 站方搜索接口的回应。
+     *
+     * 2026-10-22 起站方把搜索页改成了纯前端渲染，数据改由 `/api/search/result?query=…` 下发，
+     * 字段形状和当年 SSR 那份一样（`searchList[].video_data.*`）。
+     */
     private fun searchPage(vararg rows: String) =
-        """<script>_ROUTER_DATA={"loaderData":{"search_(keyword)/page":{"searchList":[${rows.joinToString(",")}]}}};</script>"""
+        """{"searchList":[${rows.joinToString(",")}],"totalCount":"${rows.size}","pageNum":1,"hasMore":false}"""
 
     private fun searchRow(id: String, title: String, episodes: Int = 8) =
         """{"video_data":{"series_id":"$id","series_title":"$title","episode_cnt":$episodes}}"""
@@ -414,15 +420,28 @@ class ContentRepositoryTest {
         assertEquals("全 12 集",result.items.single().badge)
     }
 
+    @Test fun theSearchAsksTheSitesOwnApiWithTheQueryParameter() {
+        // 2026-10-22：站方把搜索页改成了纯前端渲染，数据改由 /api/search/result 下发。
+        // **参数名是 query，不是 keyword** —— 用 keyword 回 400，用 query 才回 200。
+        val asked=mutableListOf<Pair<String,String?>>()
+        val repo=repository { request ->
+            asked+=(request.url.encodedPath to request.url.queryParameter("query"))
+            searchPage(searchRow("456","测试短剧"))
+        }
+        repo.search("测试",1)
+        assertEquals(1,asked.size)
+        assertEquals("/api/search/result",asked.single().first)
+        assertEquals("测试",asked.single().second)
+    }
+
     @Test fun searchNeverAdvertisesANextPageBecauseTheSiteRendersOnlyPageOne() {
         val paths=mutableListOf<String>()
         val repo=repository { request ->
             paths+=request.url.encodedPath
-            assertEquals("1",request.url.queryParameter("page"))
             searchPage(searchRow("456","测试短剧"))
         }
         assertFalse(repo.search("测试",1).hasMore)
-        // The public page ignores ?page=, so a second request must never be made for one.
+        // 站方这一路只是补位，翻页是本机索引的事 —— 所以不该为翻页再问站方一次。
         assertTrue(repo.search("测试",2).items.isEmpty())
         assertEquals(1,paths.size)
     }
@@ -596,8 +615,44 @@ class ContentRepositoryTest {
         assertEquals(setOf("hongguoduanju.com"),hosts)
     }
 
-    @Test fun searchRejectsUnexpectedRouterShape() {
-        assertThrows(IOException::class.java) { repository { "<html>没有数据</html>" }.search("测试") }
+    @Test fun aServerSearchThatChangedShapeDoesNotSinkTheLocalSearch() {
+        // 站方那一路取不到时，搜索**不能**跟着一起完蛋：它只是补位用的十行，主体是本机索引。
+        // 2026-10-22 实测站方把搜索页改成了纯前端渲染，HTML 里不再有 _ROUTER_DATA，
+        // 这一路从此取不到 —— 搜索照常用本机索引出结果，页面照常有东西看。
+        val local=CatalogueIndex((1..70).map { Series((100+it).toString(),"总裁归来第${it}季") })
+        val result=repository { "<html>没有数据</html>" }.search("总裁归来",1,ContentType.SHORT,local)
+        assertEquals(ContentRepository.SEARCH_PAGE_SIZE,result.items.size)
+        assertTrue(result.hasMore)
+        assertTrue(result.serverFailed)
+        // 命中数是本机索引数出来的，不是站方告诉我们的 —— 界面据此不能说「站内没有」。
+        assertEquals(70,result.matchedCount)
+        assertEquals(70,result.totalHits)
+    }
+
+    @Test fun aServerSearchThatIsGoneStillLeavesTheLocalIndexToAnswer() {
+        // 站方搜索取不到、而且本机也没有索引时：页面要如实说是「站方搜索暂时不可用」，
+        // 不能显示成「没有找到相关剧」—— 那部剧可能真的存在，只是我们没问到站方。
+        val result=repository { "<html>没有数据</html>" }.search("庆余年")
+        assertTrue(result.items.isEmpty())
+        assertTrue(result.serverFailed)
+        assertEquals(0,result.matchedCount)
+    }
+
+    @Test fun aWorkingServerSearchIsNotReportedAsBroken() {
+        val repo=repository { searchPage(searchRow("456","测试短剧",12)) }
+        val result=repo.search("测试")
+        assertEquals("456",result.items.single().id)
+        assertFalse(result.serverFailed)
+    }
+
+    @Test fun theServerIsAskedOnTheFirstPageOnly() {
+        // 站方那一路每搜一次只问第一页：翻页是本机索引的事。
+        val asked=mutableListOf<String>()
+        val repo=repository { request -> asked+=request.url.encodedPath+"?"+request.url.query.orEmpty(); searchPage(searchRow("456","测试短剧")) }
+        val local=CatalogueIndex(listOf(Series("1","测试短剧第二季")))
+        repo.search("测试",1,ContentType.SHORT,local)
+        repo.search("测试",2,ContentType.SHORT,local)
+        assertEquals(1,asked.size)
     }
 
     @Test fun homeStopsOnTheLastPageOfANamedCatalogue() {

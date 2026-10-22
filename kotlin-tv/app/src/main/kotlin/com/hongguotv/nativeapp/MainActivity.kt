@@ -193,6 +193,13 @@ class MainActivity: Activity() {
     private var searchTotal:Int?=null
     /** 结果来自错字容错而非字面匹配，搜索页据此说明「按相近剧名找到」。 */
     private var searchFuzzy=false
+    /**
+     * 站方那一路（补位用的十条）取不到了。
+     *
+     * 搜索的主体是本机索引，所以这不影响能不能搜到 —— 但界面得说清楚结果是从哪来的，
+     * 更不能在这种时候说「站内没有《X》**：我们根本没问到站方，不能替它下结论。
+     */
+    private var searchServerFailed=false
     /** 上次重绘索引进度时已收录的部数，用于把 68 次回调压成每 400 部一次。 */
     private var cataloguePaintMark=0
     private var catalogFocus=""
@@ -366,7 +373,7 @@ class MainActivity: Activity() {
             // 回调可能落在别的页或别的查询上，回来时先确认自己没被顶掉。
             if(isDestroyed || at!=tab || q!=query || p!=page) return@work
             catalog=result.items; hasMore=result.hasMore
-            searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy
+            searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy; searchServerFailed=result.serverFailed
             val body=catalogBody ?: return@work
             body.removeAllViews(); catalogGrid(body,nav.any { it.hasFocus() },typeButtons.values.any { it.hasFocus() })
             // 失败就留着上一批结果：用户正在看的东西不该被一次网络抖动清空。
@@ -640,7 +647,7 @@ class MainActivity: Activity() {
         }
         val body=column(); catalogBody=body; container.addView(body,lp(-1,0).apply { weight=1f })
         if(localCatalog()) {
-            catalog=localItems(); ranking=null; searchMatched=null; searchTotal=null; searchFuzzy=false; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSizeFor(tab)-1)/pageSizeFor(tab))); hasMore=page*pageSizeFor(tab)<catalog.size
+            catalog=localItems(); ranking=null; searchMatched=null; searchTotal=null; searchFuzzy=false; searchServerFailed=false; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSizeFor(tab)-1)/pageSizeFor(tab))); hasMore=page*pageSizeFor(tab)<catalog.size
         }
         if(load) {
             if(tab==TAB_RANKING) {
@@ -676,7 +683,7 @@ class MainActivity: Activity() {
                     homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; catalogTotalPages=result.totalPages; showCatalog() }
                 } else {
                     catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; catalogTotalPages=result.totalPages
-                    searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy
+                    searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy; searchServerFailed=result.serverFailed
                     val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }
                     body.removeAllViews()
                     // keptFocusAnchor 优先：用户在加载期间用 D-pad 把焦点挪到「历史/手机输入/续建索引」
@@ -690,7 +697,7 @@ class MainActivity: Activity() {
                     homeScreen?.refresh?.setOnClickListener { showCatalog(true) }
                     return@work
                 }
-                catalog=emptyList(); hasMore=false; ranking=null; catalogTotalPages=null; searchMatched=null
+                catalog=emptyList(); hasMore=false; ranking=null; catalogTotalPages=null; searchMatched=null; searchServerFailed=false
                 if(problem is SearchSessionExpiredException) {
                     page=1; catalogFocus=""
                     Toast.makeText(this,"搜索结果已过期，已回到第 1 页刷新",Toast.LENGTH_LONG).show()
@@ -769,7 +776,18 @@ class MainActivity: Activity() {
             else if(tab==TAB_RANKING) catalog
             else catalog.take(ContentRepository.SEARCH_PAGE_SIZE)
         if(displayed.isEmpty()) {
-            message(list,if(loading) "正在加载推荐…" else when(tab) { TAB_SEARCH -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关剧，换个关键词试试"; TAB_FAVORITES -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; TAB_HISTORY -> "播放过的剧集会自动保存在这里"; else -> "本页没有更多内容" })
+            message(list,if(loading) "正在加载推荐…" else when(tab) { TAB_SEARCH -> when {
+                query.isBlank() -> "输入关键词，用遥控器确认搜索"
+                // 站方那一路取不到的时候不能说「没有找到」：我们没问到站方，只能说本机索引里也没有。
+                // 说成「没有找到」是拿索引的结论冒充站方的结论 —— 那部剧可能真的有。
+                searchServerFailed -> {
+                    val indexed=library.catalogueSize()
+                    // 索引还没建起来的时候，这一句才是要紧的：搜索不是没得搜，是还在建。
+                    if(library.isBuildingCatalogue()||indexed==0) "站方搜索暂时不可用 · 全库索引还在建立（已收录 $indexed 部）"
+                    else "站方搜索暂时不可用 · 本机索引里也没有《$query》"
+                }
+                else -> "没有找到相关剧，换个关键词试试"
+            }; TAB_FAVORITES -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; TAB_HISTORY -> "播放过的剧集会自动保存在这里"; else -> "本页没有更多内容" })
             // 没结果可跳时，searchInput / searchButton / searchActions 的 ↓ 不能再指 cards.first()，
             // 那是个已经不存在的旧 id，焦点会卡死。分页按钮（如果存在）是最自然的 ↓ 落点；
             // 没有分页按钮就指回 nav，至少不指向过期引用。
@@ -787,7 +805,11 @@ class MainActivity: Activity() {
         // chain below still starts on the first card.
         if(tab==TAB_SEARCH && query.isNotBlank()) {
             if(searchFuzzy) list.addView(text("没有完全匹配《$query》的剧，以下是相近剧名",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(6)) },lp(-1,-2))
-            else if(searchMatched==0) list.addView(text("站内没有《$query》，以下是同类推荐",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(6)) },lp(-1,-2))
+            // 「站内没有《X》」这句话只有问过站方才敢说。站方这一路取不到的时候说这句，是
+            // 拿本机索引的结论冒充站方的结论 —— 用户会以为那部剧真的不存在。
+            else if(searchMatched==0 && !searchServerFailed) list.addView(text("站内没有《$query》，以下是同类推荐",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(6)) },lp(-1,-2))
+            // 说清楚结果是从哪来的：站方那十行取不到时，剩下的都是本机索引里的。
+            if(searchServerFailed) list.addView(text("站方搜索暂时不可用 · 以下结果来自本机索引",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(6)) },lp(-1,-2))
             // Saying how much the index holds is the difference between "搜不出" and "还没建完".
             // Every state gets a line, including the one that used to say nothing at all - a silent
             // status is what left a user restarting the app with no idea whether it was working.
@@ -804,7 +826,8 @@ class MainActivity: Activity() {
                 // 自己按错了，不如把差在哪一步说出来 —— 「没建完」和「建完了但缺这一步」是两回事。
                 indexed>0 && !library.isCatalogueLabelled() -> "正在给每部剧记下属于哪套目录 · 已收录 $indexed 部，分开搜要等这一步做完"
                 indexed>0 -> "全库索引还没建完 · 已收录 $indexed 部，下次打开自动继续"
-                else -> "全库索引还没建起来 · 现在只能搜到站内的十条结果"
+                // 索引是空的，站方那一路又取不到 —— 这时候「只能搜到站内的十条结果」是句假话。
+                else -> if(searchServerFailed) "全库索引还没建起来 · 站方搜索也暂时不可用" else "全库索引还没建起来 · 现在只能搜到站内的十条结果"
             }
             list.addView(text(status,13f,muted).apply { setPadding(dp(4),0,dp(4),dp(12)) },lp(-1,-2))
         }
@@ -1112,7 +1135,7 @@ class MainActivity: Activity() {
         if(page==1) { showCatalog(true); return }
         val result=repository.search(query,page,library.contentType,local)
         catalog=result.items; hasMore=result.hasMore
-        searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy
+        searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy; searchServerFailed=result.serverFailed
         showCatalog()
     }
 
@@ -1176,7 +1199,7 @@ class MainActivity: Activity() {
             catalogFocus=tabFocus[TAB_SEARCH].orEmpty()
         }
         page=1; catalogFocus=""; focusColumn=null
-        searchMatched=null; searchTotal=null; searchFuzzy=false; showCatalog(true)
+        searchMatched=null; searchTotal=null; searchFuzzy=false; searchServerFailed=false; showCatalog(true)
     }
     private fun showSearchHistory(anchor: View) {
         val history=library.searches()

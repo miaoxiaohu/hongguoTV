@@ -109,7 +109,18 @@ data class CatalogPage(
     val matchedCount: Int? = null,
     val totalHits: Int? = null,
     val fuzzy: Boolean = false,
-    val totalPages: Int? = null
+    val totalPages: Int? = null,
+    /**
+     * 站方那一路取不到了。
+     *
+     * 搜索的主体是本机索引（2400 部都在里面），站方那十行只是**补位** —— 补的是站上有、
+     * 索引里还没有的新剧。所以它取不到的时候，搜索照样能用，只是少了那十行。
+     *
+     * 2026-10-22 实测：站方把搜索页改成了纯前端渲染（首页、分类页、榜单页仍然服务端渲染），
+     * HTML 里不再有 `_ROUTER_DATA`，于是那十行取不到了。此前它一失败，整页就变成
+     * 「暂时无法加载」—— 本机索引里明明已经有一千多条命中。
+     */
+    val serverFailed: Boolean = false
 )
 data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
@@ -309,7 +320,14 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         // The server is asked on page one only. Its ten rows merely top up a page that the local
         // index has not filled, so re-asking on page two would spend a request to return rows that
         // are already merged in - and with no index at all it would spend one to answer nothing.
-        val serverRows = if(page==1) publicSearch(keyword) else emptyList()
+        //
+        // 取不到就算了，不能把整页拖下水：它只是补位，搜索的主体是本机索引。
+        // 2026-10-22 实测站方把搜索页改成了纯前端渲染，这一路已经取不到了（首页/分类/榜单仍正常）。
+        // 之前它一失败，整页就变成「暂时无法加载」，而本机索引里明明有上千条命中。
+        var serverFailed=false
+        val serverRows=if(page==1) try { publicSearch(keyword) }
+        catch(e: Exception) { serverFailed=true; emptyList() }
+        else emptyList()
         // 分类过滤只在索引真能分类时才生效。索引里的每部剧都记着自己属于哪套目录，才谈得上
         // 「只看漫剧」；索引还欠着标签时（刚装上、或正在补建），硬过滤会把服务端的补位行全判成
         // 「不属于真人剧」而丢掉，搜什么都不出东西 —— 一个看起来生效、实际把人全筛没了的开关，
@@ -348,12 +366,23 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         // What paging will walk in total. Server filler is counted only on page one, where it is
         // actually merged in, so the number does not change as the user turns pages.
         val total = localTotal + if(page==1) filler.size else 0
-        return CatalogPage(window.distinctBy { it.id },hasMore,null,matched,total,fuzzy)
+        return CatalogPage(window.distinctBy { it.id },hasMore,null,matched,total,fuzzy,serverFailed=serverFailed)
     }
+    /**
+     * 站方搜索的十条补位行。
+     *
+     * 2026-10-22 实测：站方把 `/search/{关键词}` 改成了**纯前端渲染** —— HTML 里不再有
+     * `_ROUTER_DATA` 数据块（三个不同关键词返回的页面字节完全相同），数据改由
+     * `/api/search/result?query=…` 下发。**参数名是 `query`，不是 `keyword`**（用 keyword
+     * 回的是 400，用 query 才回 200）。
+     *
+     * 字段形状和当年 SSR 那份一模一样（`searchList[].video_data.*`），所以解析照旧。
+     * 这个接口还能翻页（请求参数 `page`，响应里是 `pageNum`/`totalPages`/`hasMore`），
+     * 但 App 的搜索主体是本机索引，站方这一路仍然只问第一页 —— 它只是补位。
+     */
     private fun publicSearch(keyword: String): List<Series> {
-        val data=router("$site/search/${Signer.encode(keyword)}?page=1")
-        val section=data.optJSONObject("search_(keyword)/page") ?: data.optJSONObject("search_page") ?: throw IOException("搜索数据暂不可用")
-        val rows=section.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
+        val body=text("$site/api/search/result?query=${Signer.encode(keyword)}")
+        val rows=JSONObject(body).optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
         return valid(rows.objects().map(::card))
     }
     fun detail(id: String): Detail {
