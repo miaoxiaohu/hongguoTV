@@ -8,6 +8,10 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.view.View
 import com.hongguotv.core.Danmaku
+import com.hongguotv.core.DanmakuLayout
+import com.hongguotv.core.DanmakuLayouts
+import com.hongguotv.core.DanmakuRows
+import com.hongguotv.core.DanmakuSize
 import com.hongguotv.core.DanmakuTimeline
 
 /**
@@ -36,8 +40,23 @@ class DanmakuOverlay(context: Context) : View(context) {
     private var textSizePx=0f
     private var trackHeightPx=0
     private var trackCount=1
+    /** 用户要的字号档位和行数。定下来之前先记着，等画面有了尺寸再排。 */
+    private var size=DanmakuSize.NORMAL
+    private var requestedRows=DanmakuRows.AUTO
+    /** 画面的高度。字号和行数都是按它算的。 */
+    private var viewHeight=0
+    private var layout: DanmakuLayout?=null
     /** 每帧都要用，不该每帧都新建一个数组。 */
     private val overlayAt=IntArray(2)
+
+    /**
+     * 屏幕放不下用户要的那么多行时告诉外面实际有几行。
+     *
+     * 只有「刚被截过」的那一刻才喊：界面上写着 12 行而屏幕上只有 7 行，用户只会以为这个设置
+     * 是坏的 —— 得说出来。但也不该一直喊，所以截过一次之后要等它不再被截才肯再喊。
+     */
+    var onClamped: ((Int) -> Unit)? = null
+    private var reportedClamp=false
 
     private val tick=object: Runnable {
         override fun run() {
@@ -67,6 +86,43 @@ class DanmakuOverlay(context: Context) : View(context) {
 
     /** 弹幕的位置从哪儿来。 */
     fun setPositionSource(source: ()->Long) { positionSource=source }
+
+    /**
+     * 弹幕的字号和行数。
+     *
+     * 轨道是排的时候定死的，所以改了要重排：不重排的话，字变大了还是按老的行高摆，
+     * 上一行的字会压到下一行头上，看起来就是「调大了反而更挤」。
+     *
+     * @return 是不是真的改了。
+     */
+    fun setStyle(size: DanmakuSize,rows: Int): Boolean {
+        if(size==this.size && rows==requestedRows) return false
+        this.size=size; requestedRows=rows
+        applyLayout()
+        return true
+    }
+
+    /**
+     * 按现在的字号和行数排一遍版。
+     *
+     * 排版的算式在 core 里（[DanmakuLayouts]），这里只负责把算出来的结果用到画布上：
+     * 字号给画笔，行高给行距，行数给轨道数，然后重排一次弹幕。
+     */
+    private fun applyLayout() {
+        if(viewHeight<=0) return
+        val laid=DanmakuLayouts.resolve(viewHeight,size,requestedRows)
+        layout=laid
+        textSizePx=laid.textSize
+        trackHeightPx=laid.trackHeight
+        trackCount=laid.trackCount
+        fill.textSize=textSizePx
+        edge.textSize=textSizePx
+        edge.strokeWidth=(textSizePx*.1f).coerceAtLeast(1f)
+        if(laid.clamped&&!reportedClamp) { reportedClamp=true; onClamped?.invoke(laid.trackCount) }
+        else if(!laid.clamped) reportedClamp=false
+        val items=pending ?: timeline?.placed?.map { it.danmaku }
+        if(items!=null) setItems(items)
+    }
 
     /**
      * 现在的播放倍速。
@@ -104,14 +160,9 @@ class DanmakuOverlay(context: Context) : View(context) {
     override fun onSizeChanged(w: Int,h: Int,oldw: Int,oldh: Int) {
         super.onSizeChanged(w,h,oldw,oldh)
         if(w<=0||h<=0) return
-        // 字号按屏高定：电视上看得清，又不至于糊住画面。
-        textSizePx=(h*.036f).coerceIn(18f,64f)
-        trackHeightPx=(textSizePx*1.5f).toInt()
-        // 轨道只占画面上半：下面要给字幕和 HUD 留地方。
-        trackCount=((h*.42f)/trackHeightPx).toInt().coerceAtLeast(1)
-        // 尺寸变了，轨道数和字号都变了，重排一次。
-        val items=pending ?: timeline?.placed?.map { it.danmaku }
-        if(items!=null) setItems(items)
+        // 字号按屏高定，行数按字号和屏高一起定 —— 都在 core 的算式里，这里只管用结果。
+        viewHeight=h
+        applyLayout()
     }
 
     override fun onDraw(canvas: Canvas) {

@@ -330,6 +330,14 @@ class Library(context: Context) {
     var danmakuEnabled: Boolean
         get() = state().settings.danmaku
         set(value) { if (value != danmakuEnabled) { state().settings = state().settings.copy(danmaku = value); put("danmaku", value) } }
+    /** 弹幕的字号档位。 */
+    var danmakuSize: DanmakuSize
+        get() = state().settings.danmakuSize
+        set(value) { if (value != danmakuSize) { state().settings = state().settings.copy(danmakuSize = value); put("danmakuSize", value.name) } }
+    /** 弹幕占几行。0 是自动（按屏幕高度算）。 */
+    var danmakuRows: Int
+        get() = state().settings.danmakuRows
+        set(value) { val next = DanmakuRows.normalize(value); if (next != danmakuRows) { state().settings = state().settings.copy(danmakuRows = next); put("danmakuRows", next) } }
     var contentType: ContentType
         get() = state().settings.type
         set(value) { if (value != contentType) { state().settings = state().settings.copy(type = value); put("contentType", value.storedValue) } }
@@ -345,7 +353,9 @@ class Library(context: Context) {
         index = LibraryIndex(merged, state().updates())
         persist("favorites", "later", "progress", "watched", "hidden", "searches", "favoriteUpdates")
         writes.submit(mapOf("quality" to { merged.settings.quality }, "playbackSpeed" to { merged.settings.speed },
-            "autoNext" to { merged.settings.autoNext }, "contentType" to { merged.settings.type.storedValue }, "frameMode" to { merged.settings.frame.name }))
+            "autoNext" to { merged.settings.autoNext }, "contentType" to { merged.settings.type.storedValue }, "frameMode" to { merged.settings.frame.name },
+            // 弹幕开关之前漏在这里了：恢复完备份内存里的开关变了，磁盘上还是老的，下次启动又变回去。
+            "danmaku" to { merged.settings.danmaku }, "danmakuSize" to { merged.settings.danmakuSize.name }, "danmakuRows" to { merged.settings.danmakuRows }))
         flush()
     }
     /** Requests prompt background commit, without lifecycle-thread disk waits. */

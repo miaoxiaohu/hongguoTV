@@ -29,6 +29,28 @@ class LibraryBackupTest {
         val off=data().copy(settings=BackupSettings(720,1.5f,false,ContentType.COMIC,VideoFrameMode.ZOOM,false))
         assertFalse(LibraryBackup.decode(LibraryBackup.encode(off)).settings.danmaku)
     }
+    @Test fun `the danmaku size and rows survive a backup round trip`() {
+        val styled=data().copy(settings=BackupSettings(720,1.5f,false,ContentType.COMIC,VideoFrameMode.ZOOM,true,DanmakuSize.LARGE,8))
+        val restored=LibraryBackup.decode(LibraryBackup.encode(styled)).settings
+        assertEquals(DanmakuSize.LARGE,restored.danmakuSize)
+        assertEquals(8,restored.danmakuRows)
+    }
+    @Test fun `a backup from before the danmaku size and rows still restores with the defaults`() {
+        // 老备份里没有这两个字段：按标准字号、自动行数算，而不是让整份备份读不出来。
+        val fromOldBuild=JSONObject(LibraryBackup.encode(data()))
+        fromOldBuild.getJSONObject("settings").remove("danmakuSize")
+        fromOldBuild.getJSONObject("settings").remove("danmakuRows")
+        val restored=LibraryBackup.decode(fromOldBuild.toString())
+        assertEquals(DanmakuSize.NORMAL,restored.settings.danmakuSize)
+        assertEquals(DanmakuRows.AUTO,restored.settings.danmakuRows)
+        assertEquals("测试 1",restored.favorites.single().title)
+    }
+    @Test fun `a danmaku row count the app never offered falls back to automatic`() {
+        // 备份是文件，字段可以被改过。认不出来的行数就当自动，别把整份备份读不出来。
+        val edited=JSONObject(LibraryBackup.encode(data()))
+        edited.getJSONObject("settings").put("danmakuRows",7)
+        assertEquals(DanmakuRows.AUTO,LibraryBackup.decode(edited.toString()).settings.danmakuRows)
+    }
     @Test fun `merge retains newer progress and watched state unless imported progress is newer`() {
         val local=data(); val incoming=data().copy(favorites=listOf(series("2"),series("1")),history=listOf(progress("1",50),progress("2",200)),watched=emptySet(),settings=BackupSettings(480,2f))
         val merged=LibraryBackup.merge(local,incoming,false)

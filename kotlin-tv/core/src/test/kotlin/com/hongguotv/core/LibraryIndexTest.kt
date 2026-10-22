@@ -91,6 +91,19 @@ class LibraryIndexTest {
         assertFalse(LibraryDisk.decode(values).settings.danmaku)
     }
 
+    @Test fun `the danmaku size and rows are read from the local state`() {
+        val values = mapOf("danmakuSize" to "HUGE", "danmakuRows" to 5)
+        val settings = LibraryDisk.decode(values).settings
+        assertEquals(DanmakuSize.HUGE, settings.danmakuSize)
+        assertEquals(5, settings.danmakuRows)
+    }
+
+    @Test fun `a local state from before the danmaku size and rows reads with the defaults`() {
+        val settings = LibraryDisk.decode(mapOf("danmaku" to true)).settings
+        assertEquals(DanmakuSize.NORMAL, settings.danmakuSize)
+        assertEquals(DanmakuRows.AUTO, settings.danmakuRows)
+    }
+
     @Test fun `malformed rows do not discard valid records`() {
         val favoriteJson = "[null,{},${series(1).toJson()},false]"
         val state = LibraryDisk.decode(mapOf("favorites" to favoriteJson, "progress" to "bad", "favoriteUpdates" to "bad"))

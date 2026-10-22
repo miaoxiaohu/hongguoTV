@@ -109,7 +109,9 @@ object LibraryDisk {
         val settings = BackupSettings(PlaybackQuality.normalize((values["quality"] as? Number)?.toInt() ?: 1080),
             PlaybackSpeed.normalize((values["playbackSpeed"] as? Number)?.toFloat() ?: 1f), values["autoNext"] as? Boolean ?: true,
             ContentType.fromStored(values["contentType"] as? String), VideoFrameMode.fromStored(values["frameMode"] as? String),
-            values["danmaku"] as? Boolean ?: true)
+            values["danmaku"] as? Boolean ?: true,
+            DanmakuSize.fromStored(values["danmakuSize"] as? String),
+            DanmakuRows.normalize((values["danmakuRows"] as? Number)?.toInt() ?: DanmakuRows.AUTO))
         return LibraryIndex(BackupData(series("favorites"), history, ids("watched"),
             SearchHistory.decode(values["searches"] as? String ?: "[]"), settings, series("later"), ids("hidden")), updates)
     }

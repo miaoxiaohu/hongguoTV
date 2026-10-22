@@ -1055,12 +1055,16 @@ class MainActivity: Activity() {
             danmakuButton.text="弹幕  ·  ${if(library.danmakuEnabled) "开启" else "关闭"}"
             applyDanmakuSetting()
         }
+        lateinit var danmakuSizeButton: TextView
+        danmakuSizeButton=setting(playback,"弹幕大小  ·  ${library.danmakuSize.label}") { showDanmakuSizePicker(danmakuSizeButton,false) }
+        lateinit var danmakuRowsButton: TextView
+        danmakuRowsButton=setting(playback,"弹幕行数  ·  ${DanmakuRows.label(library.danmakuRows)}") { showDanmakuRowsPicker(danmakuRowsButton,false) }
         lateinit var backup: TextView
         backup=setting(device,"手机备份与恢复") {
             runCatching { LibraryBackup.encode(library.snapshot()) }.onSuccess { encoded ->
                 tvTools.libraryTransfer(encoded,backup) { data,restoreSettings ->
                     favoriteMonitor.stop(); library.restore(data,restoreSettings)
-                    applyDanmakuSetting()
+                    applyDanmakuSetting(); applyDanmakuStyle()
                     tabState.clear(); tabFocus.clear(); catalogFocus=""; page=1
                     showCatalog(); favoriteMonitor.check()
                     Toast.makeText(this,"记录已合并恢复",Toast.LENGTH_LONG).show()
@@ -1364,6 +1368,11 @@ class MainActivity: Activity() {
                 setPositionSource { player?.currentPosition ?: 0L }
                 setSpeedSource { player?.playbackParameters?.speed ?: 1f }
                 setVideoRectProvider { videoRect() }
+                // 字号和行数先记着：画面尺寸这时候还没定，等 onSizeChanged 再排版。
+                setStyle(library.danmakuSize,library.danmakuRows)
+                // 屏幕放不下用户要的那么多行时说一声：界面上写着 12 行而屏幕上只有 7 行，
+                // 用户只会以为这个设置是坏的。
+                onClamped={ rows -> Toast.makeText(this@MainActivity,"屏幕放不下这么多行，实际显示 $rows 行",Toast.LENGTH_LONG).show() }
             }
             root.addView(danmakuOverlay,FrameLayout.LayoutParams(-1,-1))
             hud=column().apply { setPadding(dp(widthDp()*.05f),dp(20),dp(widthDp()*.05f),(resources.displayMetrics.heightPixels*.05f).toInt()); background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(Color.TRANSPARENT,Color.argb(240,11,15,21))) }
@@ -1581,6 +1590,15 @@ class MainActivity: Activity() {
         val episode=data.episodes.getOrNull(episodeIndex) ?: return
         danmakuSession.start(data.series.id,episode)
     }
+    /**
+     * 弹幕的字号和行数生效。
+     *
+     * 改了要立刻重排，不用退出播放再进来 —— 正在看的时候觉得字小，正是最想调它的时候。
+     * 屏幕放不下用户要的那么多行时，overlay 会自己喊一声（见 [DanmakuOverlay.onClamped]）。
+     */
+    private fun applyDanmakuStyle() {
+        danmakuOverlay?.setStyle(library.danmakuSize,library.danmakuRows)
+    }
     private fun frameResizeMode()=when(library.frameMode) {
         VideoFrameMode.FIT -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
         VideoFrameMode.ZOOM -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
@@ -1612,6 +1630,34 @@ class MainActivity: Activity() {
             if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "画面 " else "画面模式  ·  ")+library.frameMode.label
         })
     }
+    /**
+     * 弹幕的字号。
+     *
+     * 档位而不是倍数：倍数是相对「按屏高算出来的基准字号」而言的，换台电视同一个倍数
+     * 看起来完全不是一回事。存的是档位，跟着机器走。
+     */
+    private fun showDanmakuSizePicker(anchor: TextView,inPlayer: Boolean) {
+        val options=DanmakuSize.entries
+        tvTools.choose("弹幕大小",options.map { "${it.label} · ${(it.scale*100).toInt()}%" },anchor,{ index ->
+            val target=options[index]
+            library.danmakuSize=target; applyDanmakuStyle()
+            if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "弹幕大小 " else "弹幕大小  ·  ")+target.label
+        })
+    }
+    /**
+     * 弹幕占几行。
+     *
+     * 「自动」是按屏幕高度算，填满画面上半；写死行数就照他说的排 —— 画面放不下时少几行，
+     * 并且告诉用户实际是几行，不能让人对着屏幕数出来的行数找不着北。
+     */
+    private fun showDanmakuRowsPicker(anchor: TextView,inPlayer: Boolean) {
+        val options=DanmakuRows.options
+        tvTools.choose("弹幕行数",options.map { DanmakuRows.label(it) },anchor,{ index ->
+            val target=options[index]
+            library.danmakuRows=target; applyDanmakuStyle()
+            if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "弹幕行数 " else "弹幕行数  ·  ")+DanmakuRows.label(target)
+        })
+    }
     private fun seek(direction: Int,repeat: Int) {
         val p=player ?: return; if(!playbackReady) return
         val duration=p.duration; if(duration<=0) return
@@ -1631,7 +1677,7 @@ class MainActivity: Activity() {
         episodes=addButton(options,"选集") { showEpisodePanel(episodes) }
         lateinit var more: TextView
         more=addButton(options,"播放设置") {
-            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放","弹幕 ${if(library.danmakuEnabled) "开" else "关"}"),more,{ choice ->
+            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放","弹幕 ${if(library.danmakuEnabled) "开" else "关"}","弹幕大小 ${library.danmakuSize.label}","弹幕行数 ${DanmakuRows.label(library.danmakuRows)}"),more,{ choice ->
                 main.post {
                     if(screen=="player" && more.isAttachedToWindow) when(choice) {
                         0 -> showSpeedPicker(more)
@@ -1640,6 +1686,8 @@ class MainActivity: Activity() {
                         3 -> showSleepPicker(more)
                         4 -> { seekTo(0); hidePanel() }
                         5 -> { library.danmakuEnabled=!library.danmakuEnabled; applyDanmakuSetting() }
+                        6 -> showDanmakuSizePicker(more,true)
+                        7 -> showDanmakuRowsPicker(more,true)
                     }
                 }
             })
