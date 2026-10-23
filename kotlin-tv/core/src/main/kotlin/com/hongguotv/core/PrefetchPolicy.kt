@@ -10,12 +10,40 @@ object PrefetchPolicy {
     const val SETTLE_MS = 8_000L
 
     /**
-     * How far the current episode must be buffered ahead.
+     * How far the current episode must be buffered ahead before the next one may be prepared.
      *
-     * Preparing the next episode costs a signed stream lookup and a megabyte of the CDN. If the
-     * current episode is not buffered, that megabyte comes out of the picture.
+     * This is not a small "do not starve the picture" cushion. The player's own load control
+     * already keeps fifteen to thirty seconds of media buffered - see the DefaultLoadControl the
+     * player is built with - so a threshold of a few seconds never binds and never protected
+     * anything: it was not a guard, it was a delay of three seconds.
+     *
+     * What the number is really about is the moment the preparation starts. It starts a few
+     * seconds after the picture is up, and at that point the player is still filling its own
+     * buffer towards that target. The preparation takes a megabyte off the same uplink, so on a
+     * link that is only a little faster than the bitrate it lands exactly while the player is
+     * short of cushion, and the two compete. Waiting until the player's buffer has reached its
+     * own floor means the megabyte is only ever spent out of spare capacity.
+     *
+     * A link that never gets there cannot afford the megabyte either, so nothing is prepared -
+     * which is the honest answer for that link rather than a reason to interrupt the episode.
      */
-    const val BUFFER_AHEAD_MS = 3_000L
+    const val BUFFER_AHEAD_MS = 15_000L
+
+    /**
+     * How long one preparation may take before it is given up on.
+     *
+     * The deadline belongs to the preparation, not to the transport it borrows. The client that
+     * prepares the next episode is the client that plays it afterwards, so a timeout short
+     * enough for a preparation is also short enough to fail a slow chunk of the episode itself:
+     * the player pulls the video in 512 KiB ranges and each of those is one call that has to
+     * finish inside the call timeout.
+     *
+     * A minute is long enough for a megabyte on a link that is still worth watching - a
+     * megabyte takes about forty seconds at the slowest rate the video itself plays at - and
+     * short enough that a link which cannot manage it does not get a second and third try at
+     * the current episode's bandwidth.
+     */
+    const val BUDGET_MS = 60_000L
 
     /**
      * How long a prepared episode stays usable.

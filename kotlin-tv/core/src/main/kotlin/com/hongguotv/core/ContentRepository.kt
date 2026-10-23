@@ -88,8 +88,56 @@ internal fun mentions(title: String, keyword: String): Boolean {
     val needle = normalizeForSearch(keyword)
     return needle.isNotEmpty() && needle in normalizeForSearch(title)
 }
+
+/**
+ * Does this row answer what the user asked?
+ *
+ * The ordinary rule is that the row's title has to contain the word: the site answers every
+ * query with ten confident same-genre rows, and the client has to draw that line itself.
+ *
+ * The rule bends once, for a word the site will not take. The site caps a query at thirty
+ * characters - measured 2026-10-23, a longer one comes back `400 invalid_query`, "Provide one
+ * non-empty search query of at most 30 characters" - so a long word has to be cut before it
+ * is sent. The cut word is longer than any title that could answer it, because the title is
+ * the *beginning* of it, so the ordinary rule can never hold and nothing would ever match.
+ *
+ * A title that sits inside the word the user typed does answer it: the user typed the show's
+ * title and more, and the site answered with the show. Measured the same day - the forty
+ * character query 「我在末世打脸女主了第二季番外篇全集高清无删减完整版在线观看…」 comes back
+ * 400 as it stands, and cut to thirty it answers with 《我在末世打脸女主了》.
+ */
+internal fun answers(title: String, keyword: String, truncated: Boolean): Boolean {
+    if(mentions(title,keyword)) return true
+    if(!truncated) return false
+    val needle=normalizeForSearch(keyword)
+    val candidate=normalizeForSearch(title)
+    return candidate.isNotEmpty() && candidate in needle
+}
 data class RankPosition(val rank: Int?, val heat: String)
 data class HotRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
+
+/**
+ * What happened to the site's own ten rows.
+ *
+ * The two failures are not the same to the person searching, and telling them apart is the
+ * whole point. 「暂时不可用」 means a moment: the network hiccuped, the CDN answered 502, and
+ * the same question works again in a minute. 「用不了」 means the site did answer and the
+ * answer cannot be used - it refused the query, or it answered with a shape this client does
+ * not read. Calling that 「暂时」 sends the user off to wait for something that is not coming
+ * back on its own.
+ *
+ * Measured 2026-10-23 over roughly two hundred requests against the live endpoint: a 502
+ * shows up about once in a hundred, while a refusal is standing. So the first is worth
+ * waiting for and the second is worth saying out loud.
+ */
+enum class ServerSearchProblem {
+    /** The site's rows were fetched. */
+    NONE,
+    /** No answer at all: the network, a timeout, or a 5xx. */
+    UNAVAILABLE,
+    /** An answer that cannot be used: a refusal, or a shape this client does not read. */
+    REJECTED,
+}
 /**
  * [matchedCount] is how many of [items] the keyword actually found, [totalHits] how many exist in
  * total across pages, and [fuzzy] whether that came from the one-character typo fallback. All three
@@ -119,11 +167,25 @@ data class CatalogPage(
      * 2026-10-22 实测：站方把搜索页改成了纯前端渲染（首页、分类页、榜单页仍然服务端渲染），
      * HTML 里不再有 `_ROUTER_DATA`，于是那十行取不到了。此前它一失败，整页就变成
      * 「暂时无法加载」—— 本机索引里明明已经有一千多条命中。
+     *
+     * 取不到有两种，界面上得说不一样的话：见 [ServerSearchProblem]。
      */
-    val serverFailed: Boolean = false
-)
+    val serverProblem: ServerSearchProblem = ServerSearchProblem.NONE
+) {
+    /** 站方那十行是不是没拿到。 */
+    val serverFailed: Boolean get() = serverProblem != ServerSearchProblem.NONE
+}
 data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
+
+/**
+ * The site answered, but with a shape this client does not read.
+ *
+ * A standing failure, unlike a timeout or a 502: the site's search page moved on and this
+ * client was left behind. Waiting does not bring the old shape back, so the interface says
+ * 「用不了」 rather than 「暂时不可用」.
+ */
+class SearchShapeChangedException: IOException("搜索数据结构已变化")
 
 /** Carries the status code so callers can explain a 404 instead of showing a bare error. */
 class HttpStatusException(val code: Int): IOException("内容请求失败（HTTP $code）")
@@ -137,7 +199,7 @@ class HttpStatusException(val code: Int): IOException("内容请求失败（HTTP
  */
 private const val MAX_RANK_PAGES = 50
 
-class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis) {
+class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private val clock: () -> Long = System::currentTimeMillis) {
     private val signer = Signer()
     private val site = "https://hongguoduanju.com"
     /** The boards already fetched, per shelf, so turning the page costs nothing. */
@@ -309,14 +371,22 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      */
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT, local: CatalogueIndex? = null): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
+        // 站方的搜索接口只收 30 个字（2026-10-23 实测：超了回 400 invalid_query，
+        // "Provide one non-empty search query of at most 30 characters"）。超长的话只能截。
+        //
+        // 截的是**问站方的那一句**，不是用户打的那一句：本机索引是我们自己的数据，没有这个限制。
+        // 两侧各走各的路 —— 本机这一侧认「剧名是这几个字的开头」（[CatalogueIndex] 的 loose），
+        // 站方答回来的行按 [answers] 判是不是命中。
+        val siteKeyword=keyword.take(SITE_QUERY_LIMIT)
+        val truncated=siteKeyword.length<keyword.length
         var fuzzy=false
-        val localRows = if(local==null) emptyList() else local.searchAllowingTypo(keyword,SEARCH_LOCAL_LIMIT,type).let { (rows,relaxed) -> fuzzy=relaxed; rows }
+        val localRows = if(local==null) emptyList() else local.searchAllowingTypo(keyword,SEARCH_LOCAL_LIMIT,type,truncated).let { (rows,relaxed) -> fuzzy=relaxed; rows }
         // 命中的总数要单独数一遍，不能从手上这份列表数出来。列表是给一页用的，总数是给
         // 「第 X/Y 页 · 共 N 部」用的，两者的口径必须一致 —— 之前总数是列表长度，而列表被
         // 截断过，于是「都市」明明命中 1042 部却写成「共 400 部」，翻过 13 页之后剩下的
         // 600 多部再也走不到，翻页还会撞上一张「没有找到相关剧」的空白页。
         // 命中为零时走的是错字容错，那份列表才是用户看到的，所以总数就取它。
-        val localTotal=if(local==null) 0 else if(fuzzy) localRows.size else local.count(keyword,type)
+        val localTotal=if(local==null) 0 else if(fuzzy) localRows.size else local.count(keyword,type,truncated)
         // The server is asked on page one only. Its ten rows merely top up a page that the local
         // index has not filled, so re-asking on page two would spend a request to return rows that
         // are already merged in - and with no index at all it would spend one to answer nothing.
@@ -324,9 +394,11 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         // 取不到就算了，不能把整页拖下水：它只是补位，搜索的主体是本机索引。
         // 2026-10-22 实测站方把搜索页改成了纯前端渲染，这一路已经取不到了（首页/分类/榜单仍正常）。
         // 之前它一失败，整页就变成「暂时无法加载」，而本机索引里明明有上千条命中。
-        var serverFailed=false
-        val serverRows=if(page==1) try { publicSearch(keyword) }
-        catch(e: Exception) { serverFailed=true; emptyList() }
+        //
+        // 但「取不到」有两种，界面上不能都叫「暂时」：见 [ServerSearchProblem]。
+        var serverProblem=ServerSearchProblem.NONE
+        val serverRows=if(page==1) try { publicSearch(siteKeyword) }
+        catch(e: Exception) { serverProblem=classifyServerFailure(e); emptyList() }
         else emptyList()
         // 分类过滤只在索引真能分类时才生效。索引里的每部剧都记着自己属于哪套目录，才谈得上
         // 「只看漫剧」；索引还欠着标签时（刚装上、或正在补建），硬过滤会把服务端的补位行全判成
@@ -346,7 +418,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         // up with the server's fuzzy rows would bury nine unrelated dramas under it. When the index
         // finds nothing at all those rows are the only thing left to show, and they are shown whole
         // under the 「以下是同类推荐」 notice instead.
-        val filler = if(localRows.isEmpty()) unseen else unseen.filter { mentions(it.title,keyword) }
+        val filler = if(localRows.isEmpty()) unseen else unseen.filter { answers(it.title,keyword,truncated) }
         val window = when {
             // No index, or the index matched nothing: the ten server rows are all there is.
             localRows.isEmpty() -> if(page>1) emptyList() else scoped
@@ -362,11 +434,26 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         // A local hit counts even when the word is only in the tags — 《雾锁情迷》 carries a
         // 「总裁」 tag — otherwise the tab would claim 「站内没有《总裁》」 while listing exactly
         // the shows that matched it.
-        val matched = localTotal + filler.count { mentions(it.title,keyword) }
+        val matched = localTotal + filler.count { answers(it.title,keyword,truncated) }
         // What paging will walk in total. Server filler is counted only on page one, where it is
         // actually merged in, so the number does not change as the user turns pages.
         val total = localTotal + if(page==1) filler.size else 0
-        return CatalogPage(window.distinctBy { it.id },hasMore,null,matched,total,fuzzy,serverFailed=serverFailed)
+        return CatalogPage(window.distinctBy { it.id },hasMore,null,matched,total,fuzzy,serverProblem=serverProblem)
+    }
+    /**
+     * 站方那一路的失败，是「等一等就好」还是「等不来」。
+     *
+     * 站方用 5xx 说「现在不行，过会儿再来」（实测约百分之一），用 4xx 说「这个查询我不接」——
+     * 后者是常驻的，等下去也不会变。形状变了（答了但读不懂）同样是常驻的：等不会把站方改回去。
+     *
+     * 所以：5xx 归「暂时」，4xx 和读不懂归「用不了」。网络错误（超时、断线）也是暂时的 ——
+     * 它跟 5xx 是同一种事。
+     */
+    private fun classifyServerFailure(e: Exception): ServerSearchProblem = when {
+        e is SearchShapeChangedException -> ServerSearchProblem.REJECTED
+        e is HttpStatusException && e.code in 400..499 -> ServerSearchProblem.REJECTED
+        e is org.json.JSONException -> ServerSearchProblem.REJECTED
+        else -> ServerSearchProblem.UNAVAILABLE
     }
     /**
      * 站方搜索的十条补位行。
@@ -379,10 +466,12 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      * 字段形状和当年 SSR 那份一模一样（`searchList[].video_data.*`），所以解析照旧。
      * 这个接口还能翻页（请求参数 `page`，响应里是 `pageNum`/`totalPages`/`hasMore`），
      * 但 App 的搜索主体是本机索引，站方这一路仍然只问第一页 —— 它只是补位。
+     *
+     * 这个接口只收 30 个字（[SITE_QUERY_LIMIT]），超了回 400。截断在 [search] 里做。
      */
     private fun publicSearch(keyword: String): List<Series> {
         val body=text("$site/api/search/result?query=${Signer.encode(keyword)}")
-        val rows=JSONObject(body).optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
+        val rows=JSONObject(body).optJSONArray("searchList") ?: throw SearchShapeChangedException()
         return valid(rows.objects().map(::card))
     }
     fun detail(id: String): Detail {
@@ -491,8 +580,41 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     companion object {
         /** The only signed player endpoint that still answers; see [stream]. */
         const val VIDEO_MODEL_API = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/video_model/v1/"
+        /** How long a connection to the site or the CDN may take. */
+        const val CONNECT_TIMEOUT_S = 15L
+        /** How long a single socket may sit without data. */
+        const val READ_TIMEOUT_S = 30L
+        /** How long one request may take from start to finish. */
+        const val CALL_TIMEOUT_S = 45L
+        /**
+         * The transport every stream of this app uses.
+         *
+         * The client that prepares the next episode is the client that plays it afterwards, so
+         * this carries the timeouts a whole download needs. The player pulls the video in 512 KiB
+         * ranges and each of those is one call that has to finish inside [CALL_TIMEOUT_S]; a
+         * timeout short enough for a preparation would be short enough to fail a slow chunk of
+         * the episode it prepared.
+         *
+         * A preparation has its own deadline instead - see [PrefetchPolicy.BUDGET_MS] - which is
+         * what keeps a stalled preparation from holding the uplink.
+         */
+        fun playbackHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(CONNECT_TIMEOUT_S,TimeUnit.SECONDS)
+            .readTimeout(READ_TIMEOUT_S,TimeUnit.SECONDS)
+            .callTimeout(CALL_TIMEOUT_S,TimeUnit.SECONDS)
+            .build()
         /** One screen of search results, matching the 30 rows the list renders. */
         const val SEARCH_PAGE_SIZE = 30
+        /**
+         * The most characters the site's search endpoint takes.
+         *
+         * Measured 2026-10-23 against the live endpoint: a longer query comes back
+         * `400 {"code":"invalid_query","message":"Provide one non-empty search query of at most
+         * 30 characters."}` - a refusal, not a failure, and it does not go away by waiting. So a
+         * long word has to be cut before it is sent, and the cut has to be disclosed: the user
+         * typed forty characters and the site was asked about thirty of them.
+         */
+        const val SITE_QUERY_LIMIT = 30
         /**
          * How many local matches a search keeps.
          *

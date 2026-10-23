@@ -55,6 +55,7 @@ class MainActivity: Activity() {
     private val preparedNext=PreparedSlot<RemoteVideo>({ android.os.SystemClock.elapsedRealtime() },PrefetchPolicy.TTL_MS)
     private var prefetchJob: java.util.concurrent.Future<*>?=null
     private var prefetchScope: RequestScope?=null
+    @Volatile private var prefetchWatchdog: Runnable?=null
     private var readySince=0L
     private lateinit var artwork: ArtworkLoader
     private data class DeferredUi(val apply: ()->Unit,val discard: ()->Unit={})
@@ -198,8 +199,12 @@ class MainActivity: Activity() {
      *
      * 搜索的主体是本机索引，所以这不影响能不能搜到 —— 但界面得说清楚结果是从哪来的，
      * 更不能在这种时候说「站内没有《X》**：我们根本没问到站方，不能替它下结论。
+     *
+     * 「取不到」分两种，说的话也不一样：等一等就好的，和等不来的 —— 见 [ServerSearchProblem]。
      */
-    private var searchServerFailed=false
+    private var searchServerProblem=ServerSearchProblem.NONE
+    /** 站方那十行是不是没拿到。 */
+    private val searchServerFailed get() = searchServerProblem != ServerSearchProblem.NONE
     /** 上次重绘索引进度时已收录的部数，用于把 68 次回调压成每 400 部一次。 */
     private var cataloguePaintMark=0
     private var catalogFocus=""
@@ -373,11 +378,23 @@ class MainActivity: Activity() {
             // 回调可能落在别的页或别的查询上，回来时先确认自己没被顶掉。
             if(isDestroyed || at!=tab || q!=query || p!=page) return@work
             catalog=result.items; hasMore=result.hasMore
-            searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy; searchServerFailed=result.serverFailed
+            searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy; searchServerProblem=result.serverProblem
             val body=catalogBody ?: return@work
             body.removeAllViews(); catalogGrid(body,nav.any { it.hasFocus() },typeButtons.values.any { it.hasFocus() })
             // 失败就留着上一批结果：用户正在看的东西不该被一次网络抖动清空。
         }, { })
+    }
+    /**
+     * 站方那一路到底怎么了，说法要分开。
+     *
+     * 「暂时不可用」是等一等就好：网络抖了，站方回了 502，同一个问题过会儿再问就通了。
+     * 「用不了」是等不来的：站方拒了这个查询，或者答了一个这个客户端读不懂的形状 ——
+     * 等下去站方也不会变回原来的样子。把这两种都说成「暂时」，用户就会一直等一个不会来的结果。
+     */
+    private fun serverSearchPhrase(): String = when(searchServerProblem) {
+        ServerSearchProblem.UNAVAILABLE -> "站方搜索暂时不可用"
+        ServerSearchProblem.REJECTED -> "站方搜索用不了"
+        ServerSearchProblem.NONE -> ""
     }
     private fun base(title: String?=null): LinearLayout {
         root.removeAllViews(); root.setBackgroundColor(bg)
@@ -647,7 +664,7 @@ class MainActivity: Activity() {
         }
         val body=column(); catalogBody=body; container.addView(body,lp(-1,0).apply { weight=1f })
         if(localCatalog()) {
-            catalog=localItems(); ranking=null; searchMatched=null; searchTotal=null; searchFuzzy=false; searchServerFailed=false; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSizeFor(tab)-1)/pageSizeFor(tab))); hasMore=page*pageSizeFor(tab)<catalog.size
+            catalog=localItems(); ranking=null; searchMatched=null; searchTotal=null; searchFuzzy=false; searchServerProblem=ServerSearchProblem.NONE; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSizeFor(tab)-1)/pageSizeFor(tab))); hasMore=page*pageSizeFor(tab)<catalog.size
         }
         if(load) {
             if(tab==TAB_RANKING) {
@@ -683,7 +700,7 @@ class MainActivity: Activity() {
                     homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; catalogTotalPages=result.totalPages; showCatalog() }
                 } else {
                     catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; catalogTotalPages=result.totalPages
-                    searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy; searchServerFailed=result.serverFailed
+                    searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy; searchServerProblem=result.serverProblem
                     val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }
                     body.removeAllViews()
                     // keptFocusAnchor 优先：用户在加载期间用 D-pad 把焦点挪到「历史/手机输入/续建索引」
@@ -697,7 +714,7 @@ class MainActivity: Activity() {
                     homeScreen?.refresh?.setOnClickListener { showCatalog(true) }
                     return@work
                 }
-                catalog=emptyList(); hasMore=false; ranking=null; catalogTotalPages=null; searchMatched=null; searchServerFailed=false
+                catalog=emptyList(); hasMore=false; ranking=null; catalogTotalPages=null; searchMatched=null; searchServerProblem=ServerSearchProblem.NONE
                 if(problem is SearchSessionExpiredException) {
                     page=1; catalogFocus=""
                     Toast.makeText(this,"搜索结果已过期，已回到第 1 页刷新",Toast.LENGTH_LONG).show()
@@ -782,9 +799,10 @@ class MainActivity: Activity() {
                 // 说成「没有找到」是拿索引的结论冒充站方的结论 —— 那部剧可能真的有。
                 searchServerFailed -> {
                     val indexed=library.catalogueSize()
+                    val phrase=serverSearchPhrase()
                     // 索引还没建起来的时候，这一句才是要紧的：搜索不是没得搜，是还在建。
-                    if(library.isBuildingCatalogue()||indexed==0) "站方搜索暂时不可用 · 全库索引还在建立（已收录 $indexed 部）"
-                    else "站方搜索暂时不可用 · 本机索引里也没有《$query》"
+                    if(library.isBuildingCatalogue()||indexed==0) "$phrase · 全库索引还在建立（已收录 $indexed 部）"
+                    else "$phrase · 本机索引里也没有《$query》"
                 }
                 else -> "没有找到相关剧，换个关键词试试"
             }; TAB_FAVORITES -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; TAB_HISTORY -> "播放过的剧集会自动保存在这里"; else -> "本页没有更多内容" })
@@ -809,7 +827,12 @@ class MainActivity: Activity() {
             // 拿本机索引的结论冒充站方的结论 —— 用户会以为那部剧真的不存在。
             else if(searchMatched==0 && !searchServerFailed) list.addView(text("站内没有《$query》，以下是同类推荐",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(6)) },lp(-1,-2))
             // 说清楚结果是从哪来的：站方那十行取不到时，剩下的都是本机索引里的。
-            if(searchServerFailed) list.addView(text("站方搜索暂时不可用 · 以下结果来自本机索引",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(6)) },lp(-1,-2))
+            if(searchServerFailed) list.addView(text("${serverSearchPhrase()} · 以下结果来自本机索引",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(6)) },lp(-1,-2))
+            // 关键词太长，站方那边只收了前 30 个字 —— 这件事得说出来。用户打了四十个字，
+            // 拿到的却是按三十个字问出来的结果；不说明白，他就以为搜的是那四十个字。
+            // 只在第一页说：翻页的时候根本没问站方，这一句就不成立了。
+            if(page==1 && query.length>ContentRepository.SITE_QUERY_LIMIT)
+                list.addView(text("关键词超过 ${ContentRepository.SITE_QUERY_LIMIT} 字 · 已按前 ${ContentRepository.SITE_QUERY_LIMIT} 字搜索",15f,muted).apply { setPadding(dp(4),dp(2),dp(4),dp(6)) },lp(-1,-2))
             // Saying how much the index holds is the difference between "搜不出" and "还没建完".
             // Every state gets a line, including the one that used to say nothing at all - a silent
             // status is what left a user restarting the app with no idea whether it was working.
@@ -827,7 +850,7 @@ class MainActivity: Activity() {
                 indexed>0 && !library.isCatalogueLabelled() -> "正在给每部剧记下属于哪套目录 · 已收录 $indexed 部，分开搜要等这一步做完"
                 indexed>0 -> "全库索引还没建完 · 已收录 $indexed 部，下次打开自动继续"
                 // 索引是空的，站方那一路又取不到 —— 这时候「只能搜到站内的十条结果」是句假话。
-                else -> if(searchServerFailed) "全库索引还没建起来 · 站方搜索也暂时不可用" else "全库索引还没建起来 · 现在只能搜到站内的十条结果"
+                else -> if(searchServerFailed) "全库索引还没建起来 · ${serverSearchPhrase()}" else "全库索引还没建起来 · 现在只能搜到站内的十条结果"
             }
             list.addView(text(status,13f,muted).apply { setPadding(dp(4),0,dp(4),dp(12)) },lp(-1,-2))
         }
@@ -1135,7 +1158,7 @@ class MainActivity: Activity() {
         if(page==1) { showCatalog(true); return }
         val result=repository.search(query,page,library.contentType,local)
         catalog=result.items; hasMore=result.hasMore
-        searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy; searchServerFailed=result.serverFailed
+        searchMatched=result.matchedCount; searchTotal=result.totalHits; searchFuzzy=result.fuzzy; searchServerProblem=result.serverProblem
         showCatalog()
     }
 
@@ -1199,7 +1222,7 @@ class MainActivity: Activity() {
             catalogFocus=tabFocus[TAB_SEARCH].orEmpty()
         }
         page=1; catalogFocus=""; focusColumn=null
-        searchMatched=null; searchTotal=null; searchFuzzy=false; searchServerFailed=false; showCatalog(true)
+        searchMatched=null; searchTotal=null; searchFuzzy=false; searchServerProblem=ServerSearchProblem.NONE; showCatalog(true)
     }
     private fun showSearchHistory(anchor: View) {
         val history=library.searches()
@@ -1468,6 +1491,8 @@ class MainActivity: Activity() {
         networkCleanup.execute { http.dispatcher.cancelAll(); http.connectionPool.evictAll(); http.dispatcher.executorService.shutdown() }
     }
     private fun cancelPrefetch() {
+        // 先摘掉看门狗再拆别的：它要是在这中间触发，会去取消一个已经作废的 scope。
+        prefetchWatchdog?.let { main.removeCallbacks(it) }; prefetchWatchdog=null
         prefetchScope?.cancel(); prefetchScope=null
         preparedNext.clear(); prefetchJob?.cancel(true); prefetchJob=null
         closeTransport(prefetchHttp); prefetchHttp=null
@@ -1477,17 +1502,30 @@ class MainActivity: Activity() {
         if(!foreground || !p.isPlaying || !library.autoNext || playError || sleepStopped || episodeIndex>=data.episodes.lastIndex) return
         val now=android.os.SystemClock.elapsedRealtime()
         if(readySince==0L) return
-        // 下一集提前准备：本集一播稳就动手，而不是片尾 30 秒才动手 —— 那点时间不够取签名
-        // 地址加预热 1MB，下一集开始时往往还没准备好，于是每次自动连播都要先等一下。
+        // 下一集提前准备：本集一播稳、而且本集自己的缓冲已经填到位，就动手，而不是片尾 30 秒
+        // 才动手 —— 那点时间不够取签名地址加预热 1MB，下一集开始时往往还没准备好，于是每次
+        // 自动连播都要先等一下。缓冲这条门槛对齐的是播放器自己的缓冲目标：预取那 1MB 走的是
+        // 同一条上行，别在播放器自己还没填满缓冲的时候插队（见 PrefetchPolicy.BUFFER_AHEAD_MS）。
         if(!PrefetchPolicy.shouldPrepare(now-readySince,p.bufferedPosition-p.currentPosition)) return
         val id=data.episodes[episodeIndex+1]; val quality=library.maxQuality; val key="$id:$quality"
         if(preparedNext.isFresh(key) || prefetchJob?.isDone==false) return
         if(prefetchAttempts>=3 || (prefetchAttempts>0 && now-prefetchAttemptAt<15_000) || connectivity.isActiveNetworkMetered || !networkAvailable()) return
         cancelPrefetch(); prefetchAttemptAt=now; prefetchAttempts++
         val ticket=preparedNext.begin(key)
-        val http=okhttp3.OkHttpClient.Builder().connectTimeout(8,java.util.concurrent.TimeUnit.SECONDS).readTimeout(15,java.util.concurrent.TimeUnit.SECONDS).callTimeout(20,java.util.concurrent.TimeUnit.SECONDS).build()
+        // 准备下一集用的这个客户端，命中之后就是这一集自己的传输客户端 —— 所以它带的是播放的
+        // 超时，不是准备的超时。播放器按 512 KiB 一段拉，每一段都得在 callTimeout 内整段拿完；
+        // 准备用的那套紧超时会让慢一点的这一集先超时，那等于把预取的好处又吐回去。
+        val http=ContentRepository.playbackHttpClient()
         val source=ContentRepository(http); prefetchHttp=http
         val scope=RequestScope(); prefetchScope=scope
+        // 准备有自己的期限。不能拿客户端的超时来当这个期限 —— 那套超时之后要陪着整集播放。
+        val watchdog=Runnable {
+            // 超了预算就是这条链路掏不出这 1MB，别再拿本集的带宽试第二次第三次。
+            prefetchAttempts=3
+            scope.cancel()
+        }
+        prefetchWatchdog=watchdog
+        main.postDelayed(watchdog,PrefetchPolicy.BUDGET_MS)
         prefetchJob=prefetchWorker.submit {
             var remote: RemoteVideo?=null
             try {
@@ -1496,6 +1534,10 @@ class MainActivity: Activity() {
                 }
                 if(preparedNext.complete(ticket,key,prepared)) android.util.Log.i("HongguoTV","Next episode prepared")
             } catch(_: Exception) { remote?.close() }
+            finally {
+                main.removeCallbacks(watchdog)
+                if(prefetchWatchdog===watchdog) prefetchWatchdog=null
+            }
         }
     }
     private fun networkAvailable(): Boolean = connectivity.getNetworkCapabilities(connectivity.activeNetwork)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)==true

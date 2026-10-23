@@ -331,6 +331,38 @@ private fun run(args: Array<String>, report: ProbeReport) {
         return
     }
 
+    // Asks whether one specific episode of one specific show can actually be played.
+    //
+    // The site's search names two different shows under one title (measured 2026-10-23:
+    // 《亲姐是末世女主,我才是苟王》 exists as a 126-episode entry and as a 341-episode one,
+    // with different stories and different episode lists). The catalogue pages carry
+    // neither, so only the search reaches them. Whether an episode streams is a different
+    // question from whether the site lists it, and the answer decides whether the search
+    // should surface the second one at all.
+    //
+    // --stream=<series_id>,<video_id> asks that question for one episode.
+    if(args.any { it.startsWith("--stream=") }) {
+        val spec=args.first { it.startsWith("--stream=") }.removePrefix("--stream=").split(",")
+        require(spec.size==2) { "用法：--stream=<series_id>,<video_id>" }
+        val seriesId=spec[0].trim(); val videoId=spec[1].trim()
+        try {
+            val detail=repository.detail(seriesId)
+            say("title=${detail.series.title} 集数=${detail.episodes.size} 首集=${detail.episodes.firstOrNull()} 末集=${detail.episodes.lastOrNull()}")
+            say("要问的分集在不在这一部的分集表里：${videoId in detail.episodes}")
+            val stream=repository.stream(seriesId,videoId)
+            say("streamUrl=${stream.url}")
+            RemoteVideo(repository.http,stream).use { remote ->
+                remote.prepare(); val head=remote.read(0,1024*1024)
+                say("play OK  $seriesId/$videoId 画质=${stream.quality} 字节=${head.size}")
+            }
+        } catch(e: Exception) {
+            say("play FAIL $seriesId/$videoId ${e.javaClass.simpleName}: ${e.message?.take(120)}")
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
+
     // Walks every route end to end: two pages, a detail fetch and a real CDN byte read each.
     // This is the only way to prove the named routes are genuinely distinct and playable.
     if(args.contains("--catalogs")) {

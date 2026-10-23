@@ -80,13 +80,16 @@ class CatalogueIndex(entries: List<Series>, routes: List<Route?> = emptyList()) 
      * are 漫剧, 「穿越」 545 of which 476, 「重生」 358 of which 289. Searching the whole library for
      * a genre therefore buries most of what the user wanted. Null means no filter, which is also
      * what an index whose shows carry no catalogue label falls back to.
+     *
+     * [loose] admits one more shape of hit, and only for a word too long to be a title: the title
+     * may sit at the *front* of the word rather than inside it. See [rank].
      */
-    fun search(keyword: String, limit: Int = DEFAULT_LIMIT, type: ContentType? = null): List<Series> {
+    fun search(keyword: String, limit: Int = DEFAULT_LIMIT, type: ContentType? = null, loose: Boolean = false): List<Series> {
         val needle = normalizeForSearch(keyword)
         if (needle.isEmpty() || limit <= 0) return emptyList()
         val pool = if (type == null) ordered else ordered.filter { it.route == null || it.route.type == type }
         return pool.asSequence()
-            .mapIndexedNotNull { order, entry -> rank(entry, needle)?.let { Ranked(entry.series, it, order) } }
+            .mapIndexedNotNull { order, entry -> rank(entry, needle, loose)?.let { Ranked(entry.series, it, order) } }
             .sortedWith(compareBy({ it.rank }, { it.series.title.length }, { it.order }))
             .take(limit)
             .map { it.series }
@@ -103,11 +106,11 @@ class CatalogueIndex(entries: List<Series>, routes: List<Route?> = emptyList()) 
      * about the same catalogue. Counting the whole pool is what makes the number honest:
      * a count read off a capped list is a count of what was kept, not of what exists.
      */
-    fun count(keyword: String, type: ContentType? = null): Int {
+    fun count(keyword: String, type: ContentType? = null, loose: Boolean = false): Int {
         val needle = normalizeForSearch(keyword)
         if (needle.isEmpty()) return 0
         val pool = if (type == null) ordered else ordered.filter { it.route == null || it.route.type == type }
-        return pool.count { rank(it, needle) != null }
+        return pool.count { rank(it, needle, loose) != null }
     }
 
     /** The number of shows this index holds, for the settings line and the build progress. */
@@ -146,8 +149,8 @@ class CatalogueIndex(entries: List<Series>, routes: List<Route?> = emptyList()) 
      *
      * The boolean says whether the results came from the fallback, so the tab can say so.
      */
-    fun searchAllowingTypo(keyword: String, limit: Int = DEFAULT_LIMIT, type: ContentType? = null): Pair<List<Series>, Boolean> {
-        val literal = search(keyword, limit, type)
+    fun searchAllowingTypo(keyword: String, limit: Int = DEFAULT_LIMIT, type: ContentType? = null, loose: Boolean = false): Pair<List<Series>, Boolean> {
+        val literal = search(keyword, limit, type, loose)
         if (literal.isNotEmpty()) return literal to false
         val needle = normalizeForSearch(keyword)
         if (needle.length < TYPO_FLOOR) return emptyList<Series>() to false
@@ -201,14 +204,33 @@ class CatalogueIndex(entries: List<Series>, routes: List<Route?> = emptyList()) 
 
     private data class Ranked(val series: Series, val rank: Int, val order: Int)
 
-    private fun rank(entry: Entry, needle: String): Int? {
-        // Tags are a genuine fallback: 「总裁」 is a tag on 《雾锁情迷》 even though its title does
-        // not contain the word, and the site's own search ranks such rows first too.
+    /**
+     * How well one entry answers the word, or null when it does not answer it at all.
+     *
+     * The first three shapes are the ordinary ones: the title is the word, the title starts with
+     * the word (the user typed part of a title), or the title carries the word somewhere inside
+     * it. Tags come next, because a tag is a genuine hit too - 「总裁」 is a tag on 《雾锁情迷》
+     * even though its title does not contain the word, and the site's own search ranks such rows
+     * first as well.
+     *
+     * [loose] admits one shape the others miss, and only for a word too long to be a title: the
+     * title sits at the **front** of the word. The user typed the show's title and then more -
+     * 「我在末世打脸女主了第二季番外篇全集高清无删减完整版在线观看…」 - and the title they
+     * meant is the beginning of what they typed. Measured 2026-10-23: the site refuses that
+     * query outright (it takes at most thirty characters), and the local index matched nothing
+     * for it either, because a forty character word is not inside a twelve character title.
+     *
+     * It stays behind the three ordinary shapes on purpose. A word that merely happens to start
+     * with some short title is a weaker hit than one the title contains outright, and the loose
+     * shape is only offered for words long enough that the user plainly typed more than a title.
+     */
+    private fun rank(entry: Entry, needle: String, loose: Boolean): Int? {
         return when {
             entry.title == needle -> 0
             entry.title.startsWith(needle) -> 1
             needle in entry.title -> 2
-            needle in entry.tags -> 3
+            loose && entry.title.isNotEmpty() && needle.startsWith(entry.title) -> 3
+            needle in entry.tags -> 4
             else -> null
         }
     }

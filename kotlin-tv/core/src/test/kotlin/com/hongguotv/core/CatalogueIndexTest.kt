@@ -56,6 +56,28 @@ class CatalogueIndexTest {
         assertTrue(index(show("1", "雾锁情迷"), show("2", "京夜诱温")).search("庆余年").isEmpty())
     }
 
+    @Test fun `a title at the front of a long word is found only when the word is loose`() {
+        // The user typed the show's title and then more. The site refuses such a word outright
+        // (it takes at most thirty characters), and the index matched nothing for it either: a
+        // forty character word is not inside a twelve character title.
+        val library = index(show("1", "我在末世打脸女主了"))
+        val word = "我在末世打脸女主了第二季番外篇全集高清无删减完整版在线观看全集完整版官方首发独家"
+        assertTrue("不松开的时候找不到", library.search(word).isEmpty())
+        assertEquals(0, library.count(word))
+        assertEquals(listOf("1"), library.search(word, loose = true).map { it.id })
+        assertEquals(1, library.count(word, loose = true))
+    }
+
+    @Test fun `the loose shape finds every title the word begins with`() {
+        val library = index(show("1", "我在末世打脸女主了第二季"), show("2", "我在末世打脸女主了"))
+        val word = "我在末世打脸女主了第二季番外篇全集高清无删减完整版在线观看全集完整版官方首发独家"
+        // Both titles sit at the front of what the user typed, so both answer it.
+        assertEquals(2, library.search(word, loose = true).size)
+        // The shorter one leads, the same way every other tie is broken here: the user typed more
+        // than one title, and the site itself answers this word with the shorter one too.
+        assertEquals(listOf("2", "1"), library.search(word, loose = true).map { it.id })
+    }
+
     @Test fun `browse walks the catalogue in pages for an empty search box`() {
         val library = index(show("1", "第一部"), show("2", "第二部"), show("3", "第三部"), show("4", "第四部"), show("5", "第五部"))
         assertEquals(listOf("1", "2"), library.browse(0, 2).map { it.id })

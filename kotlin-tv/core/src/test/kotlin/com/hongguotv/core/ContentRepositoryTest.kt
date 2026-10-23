@@ -434,6 +434,92 @@ class ContentRepositoryTest {
         assertEquals("测试",asked.single().second)
     }
 
+    /**
+     * 站方的搜索接口只收 30 个字。
+     *
+     * 2026-10-23 实测：超了回 `400 {"code":"invalid_query","message":"Provide one non-empty
+     * search query of at most 30 characters."}` —— 是「不接」，不是「慢一点」，等下去也不会变。
+     * 所以超长的关键词必须截，截了要问出去的是前 30 个字。
+     */
+    @Test fun aKeywordTooLongForTheSiteIsCutBeforeItIsAsked() {
+        val asked=mutableListOf<String?>()
+        val repo=repository { request ->
+            asked+=request.url.queryParameter("query")
+            searchPage(searchRow("456","测试短剧"))
+        }
+        val word="测试短剧第二季番外篇全集高清无删减完整版在线观看全集完整版官方首发独家"
+        assertTrue("这个用例得真的是超长的", word.length>ContentRepository.SITE_QUERY_LIMIT)
+        repo.search(word,1)
+        assertEquals(1,asked.size)
+        assertEquals(word.take(ContentRepository.SITE_QUERY_LIMIT),asked.single())
+    }
+
+    /**
+     * 长关键词背后那部剧，两条路都得认出它。
+     *
+     * 用户打了四十个字，前十二个是剧名，后面是别的。站方按前 30 个字答，本机索引按「剧名是
+     * 这几个字的开头」认 —— 两条路认出同一部剧，长关键词才不等于搜不到。
+     */
+    @Test fun aShowBehindALongKeywordIsStillFound() {
+        val local=CatalogueIndex(listOf(Series("7669833984855002137","我在末世打脸女主了")))
+        val word="我在末世打脸女主了第二季番外篇全集高清无删减完整版在线观看全集完整版官方首发独家"
+        val repo=repository { searchPage(searchRow("7669833984855002137","我在末世打脸女主了")) }
+        val result=repo.search(word,1,ContentType.SHORT,local)
+        assertEquals(listOf("7669833984855002137"),result.items.map { it.id })
+        assertEquals(1,result.matchedCount)
+    }
+
+    @Test fun theLocalIndexAloneFindsTheShowBehindALongKeyword() {
+        // 站方那一路断着的时候，本机索引也得能把这部长关键词搜出来 —— 搜索的主体是它。
+        val local=CatalogueIndex(listOf(Series("1","我在末世打脸女主了")))
+        val word="我在末世打脸女主了第二季番外篇全集高清无删减完整版在线观看全集完整版官方首发独家"
+        val result=repository { throw IOException("no network") }.search(word,1,ContentType.SHORT,local)
+        assertEquals(listOf("1"),result.items.map { it.id })
+        assertEquals(1,result.matchedCount)
+    }
+
+    @Test fun aShortKeywordIsNotMatchedByTheLooseShape() {
+        // 「城市」恰好是「城市修仙」的开头，但两个字不该匹配上所有以它开头的剧名 ——
+        // 一个错字就变成一个笃定的错答案。松开的那条路只给长到不可能是剧名的关键词用。
+        val local=CatalogueIndex(listOf(Series("1","城市")))
+        val result=repository { searchPage() }.search("城市修仙",1,ContentType.SHORT,local)
+        assertTrue(result.items.isEmpty())
+        assertEquals(0,result.matchedCount)
+    }
+
+    /**
+     * 站方按前 30 个字答回来的那一行，剧名是用户那串字的开头 —— 它答的是这个问题。
+     *
+     * 用普通规则（剧名要包含整个关键词）判，它是判不上的：关键词比剧名长，剧名装不下它。
+     * 所以补位那一行要按松开的那条路来算，否则用户就看不到站方给出的答案。
+     */
+    @Test fun aServerRowThatAnswersALongKeywordIsKeptAsAFillerRow() {
+        val local=CatalogueIndex(listOf(Series("1","我在末世打脸女主了第二季")))
+        val word="我在末世打脸女主了第二季番外篇全集高清无删减完整版在线观看全集完整版官方首发独家"
+        val repo=repository { searchPage(searchRow("2","我在末世打脸女主了")) }
+        val result=repo.search(word,1,ContentType.SHORT,local)
+        // 本机索引先给一部，站方补位的那一行也在，两部都算命中。
+        assertEquals(listOf("1","2"),result.items.map { it.id })
+        assertEquals(2,result.matchedCount)
+    }
+
+    /**
+     * 「取不到」分两种，界面上不能都叫「暂时」。
+     *
+     * 5xx 和网络错误是等一等就好；4xx 是站方不接这个查询，形状变了也是等不来的 —— 等下去
+     * 站方也不会变回原来的样子。把两种都说成「暂时不可用」，用户就会一直等一个不会来的结果。
+     */
+    @Test fun aTransientServerFailureIsNotTheSameAsAStandingOne() {
+        assertEquals(ServerSearchProblem.UNAVAILABLE,repository { throw IOException("no network") }.search("测试").serverProblem)
+        assertEquals(ServerSearchProblem.UNAVAILABLE,failingRepository(503).search("测试").serverProblem)
+        assertEquals(ServerSearchProblem.REJECTED,failingRepository(400).search("测试").serverProblem)
+        assertEquals(ServerSearchProblem.REJECTED,repository { "<html>没有数据</html>" }.search("测试").serverProblem)
+        assertEquals(ServerSearchProblem.NONE,repository { searchPage() }.search("测试").serverProblem)
+        // 两种取不到都还是「没拿到」，所以那句「结果来自本机索引」照说不误。
+        assertTrue(failingRepository(400).search("测试").serverFailed)
+        assertTrue(repository { throw IOException("no network") }.search("测试").serverFailed)
+    }
+
     @Test fun searchNeverAdvertisesANextPageBecauseTheSiteRendersOnlyPageOne() {
         val paths=mutableListOf<String>()
         val repo=repository { request ->
@@ -630,12 +716,14 @@ class ContentRepositoryTest {
     }
 
     @Test fun aServerSearchThatIsGoneStillLeavesTheLocalIndexToAnswer() {
-        // 站方搜索取不到、而且本机也没有索引时：页面要如实说是「站方搜索暂时不可用」，
+        // 站方搜索取不到、而且本机也没有索引时：页面要如实说是「站方搜索用不了」，
         // 不能显示成「没有找到相关剧」—— 那部剧可能真的存在，只是我们没问到站方。
         val result=repository { "<html>没有数据</html>" }.search("庆余年")
         assertTrue(result.items.isEmpty())
         assertTrue(result.serverFailed)
         assertEquals(0,result.matchedCount)
+        // 站方答了、但答的是这个客户端读不懂的形状 —— 这是等不来的那种，不是「暂时」。
+        assertEquals(ServerSearchProblem.REJECTED,result.serverProblem)
     }
 
     @Test fun aWorkingServerSearchIsNotReportedAsBroken() {
