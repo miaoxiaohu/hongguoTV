@@ -1405,7 +1405,7 @@ class MainActivity: Activity() {
             root.removeAllViews(); root.setBackgroundColor(Color.BLACK)
             val view=PlayerView(this).apply {
                 useController=false; resizeMode=frameResizeMode(); isFocusable=false
-                setKeepContentOnPlayerReset(true); setShutterBackgroundColor(Color.BLACK); setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
+                setKeepContentOnPlayerReset(true); setShutterBackgroundColor(Color.TRANSPARENT); setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
             }
             playerView=view; root.addView(view,FrameLayout.LayoutParams(-1,-1))
             // 弹幕画在画面上：加在播放器之上、HUD 之下。位置取自播放进度，所以暂停、跳转、
