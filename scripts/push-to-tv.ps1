@@ -87,14 +87,23 @@ Write-Output ("install -> " + $ins.StatusCode + " " + (Format-Safe $ins.Content)
 # 3. Read the TV's view of the queue and of what is installed.
 #    The queue entry carries the version of the file that was just uploaded. That is the version
 #    the TV has to end up with, and it is the yardstick for step 4.
+#
+#    Installing restarts the service: measured 2026-10-21, three probes eight seconds apart all
+#    failed and the fourth came back - about half a minute of not answering. That is an in-between
+#    state, not a failure, so a probe that cannot connect says "no answer yet" instead of ending
+#    the run. The version to watch for is read again in step 4, where the service is back.
 Start-Sleep -Seconds 3
-$apks = Invoke-RestMethod -Uri "$base/api/apks?k=$Key" -TimeoutSec 60
-$mine = $apks.items | Where-Object { $_.name -eq $stored }
-if ($mine) { Write-Output ("queued  -> " + (Format-Safe ($mine | ConvertTo-Json -Compress))) } else { Write-Output "queued  -> NOT FOUND in the TV's list" }
+function Get-Safely([string]$uri) {
+    try { return Invoke-RestMethod -Uri $uri -TimeoutSec 60 } catch { return $null }
+}
+$mine = $null
+$apks = Get-Safely "$base/api/apks?k=$Key"
+if ($apks) { $mine = $apks.items | Where-Object { $_.name -eq $stored } }
+if ($mine) { Write-Output ("queued  -> " + (Format-Safe ($mine | ConvertTo-Json -Compress))) } else { Write-Output "queued  -> NOT READ (the service is restarting after the install)" }
 $wanted = if ($mine) { $mine.versionCode } else { $null }
 
-$installed = Invoke-RestMethod -Uri "$base/api/installed?k=$Key" -TimeoutSec 60
-$app = $installed.items | Where-Object { $_.package -eq $Package }
+$installed = Get-Safely "$base/api/installed?k=$Key"
+$app = if ($installed) { $installed.items | Where-Object { $_.package -eq $Package } } else { $null }
 if ($app) {
   Write-Output ("onTV    -> " + (Format-Safe ($app | ConvertTo-Json -Compress)))
 } else {
@@ -115,12 +124,18 @@ if ($WaitSeconds -gt 0) {
   $deadline = (Get-Date).AddSeconds($WaitSeconds)
   while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 5
-    $queued = (Invoke-RestMethod -Uri "$base/api/apks?k=$Key" -TimeoutSec 60).items | Where-Object { $_.name -eq $stored }
+    # Same as step 3: the service restarts itself after the install and is unreachable for about
+    # half a minute. A probe that cannot connect is not an error, it is the service still coming
+    # back - so the loop keeps waiting instead of reporting a failure that is not one.
+    $queued = $null; $now = $null
+    $apksNow = Get-Safely "$base/api/apks?k=$Key"
+    if ($apksNow) { $queued = $apksNow.items | Where-Object { $_.name -eq $stored } }
+    $installedNow = Get-Safely "$base/api/installed?k=$Key"
+    if ($installedNow) { $now = $installedNow.items | Where-Object { $_.package -eq $Package } }
     if ($queued -and $queued.error) {
       Write-Output ("onTV    -> the TV reported an install failure: " + (Format-Safe $queued.error))
       exit 1
     }
-    $now = (Invoke-RestMethod -Uri "$base/api/installed?k=$Key" -TimeoutSec 60).items | Where-Object { $_.package -eq $Package }
     if ($now -and ($null -eq $wanted -or $now.versionCode -eq $wanted)) {
       Write-Output ("onTV    -> installed: " + (Format-Safe ($now | ConvertTo-Json -Compress)))
       exit 0
