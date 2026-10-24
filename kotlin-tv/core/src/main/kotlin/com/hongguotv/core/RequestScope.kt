@@ -5,6 +5,15 @@ import okhttp3.Call
 import okhttp3.Response
 import java.io.IOException
 
+/**
+ * The work was called off on purpose.
+ *
+ * It is its own kind of failure: the site and the network are both fine, the person just went
+ * somewhere else. Code that would otherwise retry or fall back has to be able to tell this
+ * apart from a real error - see [isCancellation].
+ */
+class CancelledException(message: String = "请求已取消") : IOException(message)
+
 /** Cancels only the work owned by one navigation/playback intent, including body reads. */
 class RequestScope {
     private var cancelled = false
@@ -19,7 +28,7 @@ class RequestScope {
     @Synchronized private fun attach(call: Call) {
         if (cancelled || Thread.currentThread().isInterrupted) {
             call.cancel()
-            throw IOException("请求已取消")
+            throw CancelledException()
         }
         calls += call
     }
@@ -30,7 +39,7 @@ class RequestScope {
         val previous = current.get()
         current.set(this)
         try {
-            synchronized(this) { if (cancelled) throw IOException("请求已取消") }
+            synchronized(this) { if (cancelled) throw CancelledException() }
             return action()
         } finally {
             if (previous == null) current.remove() else current.set(previous)

@@ -137,6 +137,75 @@ class ContentRepositoryTest {
             e.suppressed.orEmpty().any { it is org.json.JSONException })
     }
 
+    /**
+     * A dead network must not be asked twice.
+     *
+     * The public player page is another door to the same site, so it helps when the signed
+     * endpoint *answered* with something unusable. When the network itself is gone, the page is
+     * the same dead network: asking it as well doubled the silence before the user learned that
+     * the episode cannot be played, and the retry counter does not start until the attempt
+     * returns. Two attempts of the same dead network are one attempt too many.
+     */
+    @Test fun aDeadNetworkDoesNotAskThePublicPageAsWell() {
+        val paths=mutableListOf<String>()
+        val repo=repository { request -> paths+=request.url.encodedPath; throw java.net.ConnectException("timeout") }
+        val e=assertThrows(IOException::class.java) { repo.stream("456","123") }
+        assertEquals(listOf(MODEL_PATH),paths)
+        assertTrue(e.javaClass.simpleName,e is java.net.ConnectException)
+    }
+
+    /** A dropped handshake is the case that used to sit there for the whole connect timeout. */
+    @Test fun aDroppedHandshakeDoesNotAskThePublicPageAsWell() {
+        val paths=mutableListOf<String>()
+        val repo=repository { request -> paths+=request.url.encodedPath; throw java.net.SocketTimeoutException("timeout") }
+        assertThrows(IOException::class.java) { repo.stream("456","123") }
+        assertEquals(listOf(MODEL_PATH),paths)
+    }
+
+    /** A lookup the person called off must not turn into another request for nobody. */
+    @Test fun aCancelledLookupDoesNotAskThePublicPageAsWell() {
+        val paths=mutableListOf<String>()
+        val repo=repository { request -> paths+=request.url.encodedPath; throw CancelledException() }
+        assertThrows(IOException::class.java) { repo.stream("456","123") }
+        assertEquals(listOf(MODEL_PATH),paths)
+    }
+
+    /**
+     * The address lookup has its own deadlines.
+     *
+     * The video transport has to carry 512 KiB chunks of a whole episode, so its connect
+     * timeout cannot be tightened. An address lookup is one small JSON, and the person is
+     * looking at 「正在获取播放地址…」 while it runs - the retry counter does not start until it
+     * comes back, so every second here is a second before the first retry.
+     *
+     * The call timeout is the one that matters: it bounds the whole lookup, every route
+     * included, and it is what the person is waiting for.
+     */
+    @Test fun theAddressLookupHasItsOwnShortDeadlines() {
+        val client=ContentRepository.addressHttpClient()
+        assertEquals(5_000,client.connectTimeoutMillis)
+        assertEquals(10_000,client.callTimeoutMillis)
+    }
+
+    /**
+     * OkHttp's own retry stays on.
+     *
+     * These hosts resolve to several addresses and not all of them answer - one black hole
+     * among them must not kill the lookup, or the episode stops playing for a reason nobody can
+     * see. The wait is bounded by the call timeout instead.
+     */
+    @Test fun theAddressLookupStillLetsOkHttpTryAnotherAddress() {
+        assertTrue(ContentRepository.addressHttpClient().retryOnConnectionFailure)
+    }
+
+    /** An injected client keeps its interceptors, so a test double still answers the lookup. */
+    @Test fun theAddressLookupKeepsTheInterceptorsOfTheClientItIsBuiltFrom() {
+        val base=OkHttpClient.Builder().addInterceptor { chain -> chain.proceed(chain.request()) }.build()
+        val address=ContentRepository.addressHttpClient(base)
+        assertEquals(5_000,address.connectTimeoutMillis)
+        assertTrue("the interceptors have to survive the shorter deadlines",address.interceptors.isNotEmpty())
+    }
+
     @Test fun streamUnescapesJsonSlashEscapesInEmbeddedUrl() {
         val repo=playerRepository("""{"contentUrl":"https:\u002F\u002Fhongguoduanju.com\u002Fvideo\u002Fpublic\u002F123\u002F360p.mp4"}""")
         assertEquals("https://hongguoduanju.com/video/public/123/360p.mp4",repo.stream("456","123").url)

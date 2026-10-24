@@ -204,11 +204,18 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
     private val site = "https://hongguoduanju.com"
     /** The boards already fetched, per shelf, so turning the page costs nothing. */
     private val rankingCache=mutableMapOf<ContentType,HotRank.HotList>()
-    private fun text(url: String, signed: Signer.Request? = null): String {
+    /**
+     * The transport for one playback attempt's address lookup.
+     *
+     * Derived from [http], so an injected client (and the interceptors on it) still applies, but
+     * with the deadlines an address lookup should have: see [addressHttpClient].
+     */
+    private val addressHttp=addressHttpClient(http)
+    private fun text(url: String, signed: Signer.Request? = null, client: OkHttpClient = http): String {
         val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
         signed?.headers?.forEach { (k,v) -> request.header(k,v) }
         signed?.body?.let { request.post(it.toRequestBody("application/json; charset=utf-8".toMediaType())) }
-        return RequestScope.execute(http.newCall(request.build())) { response ->
+        return RequestScope.execute(client.newCall(request.build())) { response ->
             if (!response.isSuccessful) throw HttpStatusException(response.code)
             val body = response.body ?: throw IOException("内容响应为空")
             if (body.contentLength() > 16*1024*1024) throw IOException("内容响应过大")
@@ -531,6 +538,12 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             // Must be Exception, not IOException: the signed endpoint now answers HTTP 200 with a
             // zero-byte body, so `JSONObject(text(...))` throws org.json.JSONException - a
             // RuntimeException - which an IOException-only catch lets escape past the fallback.
+            //
+            // The fallback is only worth making when the signed endpoint *answered* with
+            // something unusable. When the network is gone, the public page is the same dead
+            // network: asking it as well doubles the silence before the user learns that the
+            // episode cannot be played, and the retry counter does not start until it returns.
+            if(fallbackCannotHelp(signed)) throw signed
             try { return webStream(seriesId,id,maxQuality) }
             catch(web: Exception) { web.addSuppressed(signed); throw web }
         }
@@ -540,7 +553,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         // A fresh identity per signed request: the previously hardcoded pair is shared by every
         // client built from the drpys sources and is now silently blocked (HTTP 200, empty body).
         val signed=signer.sign(VIDEO_MODEL_API,VendorConstants.newDevice(),payload)
-        val data=JSONObject(text(signed.url,signed))
+        val data=JSONObject(text(signed.url,signed,addressHttp))
         val code=if(data.has("code")) data.optInt("code",-1) else data.optInt("Code",-1)
         if(code!=0) throw IOException("播放接口暂不可用")
         val map=data.optJSONObject("data") ?: throw IOException("播放信息为空")
@@ -549,7 +562,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         val raw=model.opt("fallback_api")
         val fallback=when(raw) { is JSONObject -> raw.str("fallback_api"); is JSONArray -> raw.optString(0); else -> runCatching { JSONObject(raw.toString()).str("fallback_api") }.getOrDefault(raw.toString()) }
         if(!fallback.startsWith("https://")) throw IOException("播放地址格式异常")
-        val info=JSONObject(text(fallback)).optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
+        val info=JSONObject(text(fallback,client=addressHttp)).optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
         val videoList=info.optJSONObject("video_list") ?: throw IOException("没有可用清晰度")
         // ByteVC2 renditions declare themselves as `bvc2` and ship no avcC/hvcC record at all, so
         // Android's extractor finds an audio track and no video track. Only ByteVC1 (HEVC) plays.
@@ -565,7 +578,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         return StreamInfo(url,key,quality)
     }
     private fun webStream(seriesId: String, id: String, maxQuality: Int): StreamInfo {
-        val html=try { text("$site/player/$seriesId/$id") }
+        val html=try { text("$site/player/$seriesId/$id",client=addressHttp) }
         catch(e: HttpStatusException) { if(e.code==404) throw IOException("该来源每部剧只提供前 3 集，本集暂无资源"); throw e }
         val raw=Regex("\"contentUrl\"\\s*:\\s*\"([^\"]+)\"").find(html)?.groupValues?.get(1)
             ?: Regex("\"main_url\"\\s*:\\s*\"([^\"]+)\"").find(html)?.groupValues?.get(1)
@@ -602,6 +615,42 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             .connectTimeout(CONNECT_TIMEOUT_S,TimeUnit.SECONDS)
             .readTimeout(READ_TIMEOUT_S,TimeUnit.SECONDS)
             .callTimeout(CALL_TIMEOUT_S,TimeUnit.SECONDS)
+            .build()
+        /**
+         * How long one route of the address lookup may take.
+         *
+         * The player is a box in the living room, and the person is looking at 「正在获取播放地址…」.
+         * The retry counter does not start until this call comes back, so every second spent
+         * here is a second before the first retry. A dropped handshake used to sit there for the
+         * whole 15-second connect timeout of the video transport - a transport that has to carry
+         * 512 KiB chunks of a whole episode, and therefore cannot be tightened. An address lookup
+         * is one small JSON, so it gets its own, much shorter leash.
+         */
+        const val ADDRESS_CONNECT_TIMEOUT_S = 5L
+        /**
+         * How long one address lookup may take from start to finish.
+         *
+         * This is the number the person actually waits, so this is the one that has to be small.
+         * It bounds the whole lookup - every route, the DNS, the handshake and the response -
+         * because it is the call timeout, not the connect timeout, that ends the call.
+         */
+        const val ADDRESS_CALL_TIMEOUT_S = 10L
+        /**
+         * The transport one playback attempt's address lookup uses.
+         *
+         * Derived from the transport it is given, so an injected client and its interceptors
+         * still apply - only the deadlines change.
+         *
+         * OkHttp's own retry stays on. These hosts resolve to several addresses and not all of
+         * them answer - measured on the phone: the same name came back as a working address and
+         * as a black hole within a minute. One dead address must not kill the lookup, or the
+         * episode stops playing for a reason nobody can see. The wait is bounded by
+         * [ADDRESS_CALL_TIMEOUT_S] instead, which is the only bound the person watching the
+         * screen can feel.
+         */
+        fun addressHttpClient(base: OkHttpClient = playbackHttpClient()): OkHttpClient = base.newBuilder()
+            .connectTimeout(ADDRESS_CONNECT_TIMEOUT_S,TimeUnit.SECONDS)
+            .callTimeout(ADDRESS_CALL_TIMEOUT_S,TimeUnit.SECONDS)
             .build()
         /** One screen of search results, matching the 30 rows the list renders. */
         const val SEARCH_PAGE_SIZE = 30

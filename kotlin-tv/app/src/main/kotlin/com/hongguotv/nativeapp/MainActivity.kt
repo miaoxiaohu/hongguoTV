@@ -1557,7 +1557,14 @@ class MainActivity: Activity() {
         playError=true; player?.pause(); progressBar.visibility=View.GONE; hud.visibility=View.VISIBLE; controls.removeAllViews(); controls.visibility=View.VISIBLE; panel=true
         val decoding=problem is PlaybackException && problem.errorCode in 3000..4999
         val retryable=if(problem is PlaybackException) problem.errorCode in 2000..2999 || problem.errorCode==PlaybackException.ERROR_CODE_TIMEOUT else problem is java.io.IOException
-        playbackText.text=if(decoding) "电视无法解码当前视频，可尝试更低清晰度。" else "播放失败，可重试或切换清晰度。"
+        // 「播放失败」和「网络断了」是两回事：前者要换清晰度或换剧，后者等一会儿就好。
+        // 说错了，用户就会去按「尝试 720P」——那一下跟网络一点关系都没有。
+        val offline=isNetworkFailure(problem)
+        playbackText.text=when {
+            decoding -> "电视无法解码当前视频，可尝试更低清晰度。"
+            offline -> "网络连接失败，可重试或切换清晰度。"
+            else -> "播放失败，可重试或切换清晰度。"
+        }
         val actions=row(); controls.addView(actions)
         addButton(actions,"立即重试") { playEpisode(episodeIndex,retryPosition,retryAutoplay) }.requestFocus()
         addButton(actions,"尝试 720P") { library.maxQuality=720; playEpisode(episodeIndex,retryPosition,retryAutoplay) }
