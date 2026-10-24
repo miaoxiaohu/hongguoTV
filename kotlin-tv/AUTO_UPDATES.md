@@ -221,7 +221,18 @@ Kotlin 会把 `BuildConfig.VERSION_NAME` / `VERSION_CODE` 当常量**内联进�
 
 - 改过版本号后请先 `./kotlin-tv/gradlew -p kotlin-tv :app:clean` 再构建；
 - 推给电视或上传 release 前，跑一遍 `scripts/publish-tv-update.py` 的
-  `dex_carries_version()` 检查，它会在 APK 的 dex 里确认版本号确实存在。
+  `dex_carries_version()` 检查，它会在 APK 的 dex 里确认版本号确实存在；
+- 本地单独出包时用 `scripts/check-apk-version.py <apk> <versionName> <versionCode>`
+  独立查一遍：它读 dex 而不读 manifest，所以能看见 Kotlin 真正内联进去的那个常量。
+
+**实测 2026-10-25**：这个坑又咬了一次 —— 出一版 0.9.62，manifest 是 0.9.62，
+dex 里却同时留着 **0.9.60** 和 0.9.62（Kotlin 类还是上一次编译的）。当时
+`check-apk-version.py` 之所以放行，是因为要调用方自己说出「上一个版本号」，
+而这次说的是 0.9.61、dex 里实际留着的却是 0.9.60。
+
+所以这个检查现在**不再依赖调用方记得住**：它会把 dex 里**同 major 的所有版本号**
+都扫出来，多于一个就报错（`FAIL dex also carries 0.9.60 next to 0.9.62`）。
+干净重建出来的包会打印 `OK dex carries no other 0.x.y version`。
 
 CI 每次都是全新 checkout、不存在增量缓存，所以云端构建不受影响；**这个坑只咬本地发版**。
 
