@@ -308,10 +308,19 @@ object CatalogueIndexDisk {
     /**
      * How long an index is served before a rebuild is due.
      *
-     * A week is a guess, and the point of the number is not the exact value: the site lists shows
-     * that come and go, so an index that never refreshes stops finding the new ones.
+     * A day, because the site lists shows that come and go **every day**, and an index that
+     * refreshes only once a week is a week behind the thing it is for. Measured 2026-10-24:
+     * 《我刚穿越，校花竟是重生女帝》 was listed that day, it sits on page 15 of the comic
+     * catalogue, and a week-old index had never heard of it — the search could not reach it
+     * except through the site's own suggestion endpoint, which was the only path that ranks by
+     * show name rather than by popularity.
+     *
+     * The rebuild is 102 serial requests, and it runs behind the index that is already being
+     * served, so a daily one costs the user nothing they can see. What it does not do is run
+     * more often than a day: the number is a day, and a build that is interrupted is resumed
+     * from its cursor rather than started over.
      */
-    const val MAX_AGE = 7 * 24 * 60 * 60 * 1000L
+    const val MAX_AGE = 24 * 60 * 60 * 1000L
     private const val MAX_CHARS = 1_500_000
 
     fun encode(entries: List<Series>, now: Long): String =

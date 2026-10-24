@@ -352,7 +352,7 @@ class MainActivity: Activity() {
         // A finished index is already on disk. Re-walking 102 serial pages on every launch would buy
         // nothing and keep hammering an endpoint that is already sensitive to call rate.
         //
-        // 一份建完又放了一周的索引该重建了：站方不断上新，旧索引搜不到没见过的剧。
+        // 一份建完又放了一天的索引该重建了：站方天天上新，旧索引搜不到没见过的剧。
         // 但过期不等于作废 —— 重建期间旧的那份照常用着，数字不会掉到 0 再爬回来。
         if(library.isBuildingCatalogue()) return
         if(!force && library.isCatalogueComplete() && !library.isCatalogueStale()) return

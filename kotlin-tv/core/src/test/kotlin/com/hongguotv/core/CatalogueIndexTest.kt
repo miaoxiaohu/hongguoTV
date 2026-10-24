@@ -266,18 +266,33 @@ class CatalogueIndexTest {
 
     @Test fun `a corrupt index is dropped, but an old one still reads and says it is old`() {
         val fresh = CatalogueIndexDisk.encode(listOf(show("1", "雾锁情迷")), 1_000L)
-        val week = 7 * 24 * 60 * 60 * 1000L
-        assertNotNull(CatalogueIndexDisk.decode(fresh, 1_000L + week - 1))
+        // 用常量本身算，别写死天数 —— 过期窗口改一次，这条用例就得跟着改一次。
+        val age = CatalogueIndexDisk.MAX_AGE
+        assertNotNull(CatalogueIndexDisk.decode(fresh, 1_000L + age - 1))
         // 过期不等于作废：它还是这个应用手上最好的一份答案。把它扔掉，正是「重建看得见」的
         // 原因 —— 数字掉到 0，搜索退化成站方那十条，再花几分钟爬回来。
-        val old = CatalogueIndexDisk.decode(fresh, 1_000L + week + 1)
+        val old = CatalogueIndexDisk.decode(fresh, 1_000L + age + 1)
         assertNotNull("过期索引不该被丢掉", old)
-        assertTrue("过期索引该被标记为该刷新了", old!!.isStale(1_000L + week + 1))
-        assertFalse("刚写的索引不该算过期", CatalogueIndexDisk.decode(fresh, 1_000L + week - 1)!!.isStale(1_000L + week - 1))
+        assertTrue("过期索引该被标记为该刷新了", old!!.isStale(1_000L + age + 1))
+        assertFalse("刚写的索引不该算过期", CatalogueIndexDisk.decode(fresh, 1_000L + age - 1)!!.isStale(1_000L + age - 1))
         assertNull("损坏数据不该抛异常", CatalogueIndexDisk.decode("{not json", 1_000L))
         assertNull(CatalogueIndexDisk.decode("""{"savedAt":1000,"count":0,"items":[]}""", 1_000L))
         // A clock that went backwards must not read as infinitely fresh.
         assertNull(CatalogueIndexDisk.decode(fresh, 999L))
+    }
+
+    /**
+     * 过期窗口是一天。
+     *
+     * 站方天天上新，一份放一周的索引就是一周 behind —— 实测 2026-10-24，当天上架的
+     * 《我刚穿越，校花竟是重生女帝》在旧索引里根本没有。
+     */
+    @Test fun `an index goes stale after a day, not after a week`() {
+        val day = 24 * 60 * 60 * 1000L
+        assertEquals(day, CatalogueIndexDisk.MAX_AGE)
+        val index = CatalogueIndexDisk.decode(CatalogueIndexDisk.encode(listOf(show("1", "雾锁情迷")), 1_000L), 1_000L)!!
+        assertFalse("一天的索引还新鲜", index.isStale(1_000L + day - 1))
+        assertTrue("过了一天就该重建了", index.isStale(1_000L + day + 1))
     }
 
     @Test fun `a rewalk replaces the shows it saw again instead of doubling them`() {
