@@ -20,9 +20,18 @@ multi-megabyte dex. So the check also takes the *previous* version name and
 asserts it is gone, which is the actual failure signature - a stale build
 carries the old string even when the manifest is right.
 
+Asking the caller for the previous version name is a trap of its own: the
+caller has to remember which build was on the device, and a wrong guess makes
+the check pass on a stale dex. Measured 2026-10-25: a build that still carried
+0.9.60 passed the check because the caller said the previous version was
+0.9.61. So the check also looks for *every* version of our own major in the dex
+and fails when more than one is there. The manifest cannot catch this - only the
+dex knows what the Kotlin classes really inlined.
+
 Usage: python check-apk-version.py <apk> <versionName> <versionCode> [previousVersionName]
 Exit 0 when the dex carries the version, 1 when it does not, 2 when the arguments are wrong.
 """
+import re
 import struct
 import sys
 import zipfile
@@ -37,6 +46,27 @@ def _dex_blobs(apk: str):
 def dex_carries_string(blobs, needle: str) -> bool:
     """VERSION_NAME is a String constant, so it appears verbatim in the dex."""
     return any(needle.encode() in blob for blob in blobs.values())
+
+
+def dex_versions_of_our_major(blobs, major: int) -> set:
+    """Every x.y.z in the dex that belongs to our own major version.
+
+    A stale build keeps the old version name inlined in the Kotlin classes, so
+    the dex holds two of them. Only our major is considered: the libraries in
+    this APK carry their own version numbers ("4.12.0", "1.8.0"), and those are
+    not evidence of anything.
+    """
+    found = set()
+    for blob in blobs.values():
+        for match in re.findall(rb"\d{1,3}\.\d{1,3}\.\d{1,3}", blob):
+            text = match.decode("ascii")
+            major_text, minor_text, patch_text = text.split(".")
+            if int(major_text) != major:
+                continue
+            if int(minor_text) > 999 or int(patch_text) > 999:
+                continue
+            found.add(text)
+    return found
 
 
 def dex_carries_int(blobs, value: int) -> bool:
@@ -105,6 +135,21 @@ def main() -> int:
             print("\nThe manifest and the dex disagree - this is the stale build, not a probe problem.")
             return 1
         print(f"OK   dex no longer carries the old versionName={previous}")
+
+    # The check above only knows about the one version the caller remembered. The dex
+    # knows all of them: a stale build inlines the old name next to the new one, so
+    # more than one version of our major in the dex means the classes were not rebuilt.
+    parts = version_name.split(".")
+    if len(parts) == 3 and all(part.isdecimal() for part in parts):
+        ours = dex_versions_of_our_major(blobs, int(parts[0]))
+        others = sorted(ours - {version_name})
+        if others:
+            print(f"FAIL dex also carries {', '.join(others)} next to {version_name}")
+            print("\nThe Kotlin classes still hold an older version name: this is the stale")
+            print("build, whatever the caller thought the previous version was.")
+            print("Run `gradlew :app:clean` and rebuild. Do NOT ship this APK.")
+            return 1
+        print(f"OK   dex carries no other {parts[0]}.x.y version")
 
     print("\nBoth version constants are present in classes.dex.")
     return 0
