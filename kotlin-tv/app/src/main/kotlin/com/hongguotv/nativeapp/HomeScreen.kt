@@ -12,15 +12,20 @@ import com.hongguotv.core.Series
 
 /** Fixed text slots keep D-pad movement from resizing the content below the preview. */
 class SeriesPreview(context: Context): LinearLayout(context) {
+    private val density=resources.displayMetrics.density
+    /**
+     * 720p 这一类矮屏放不下 1080p 那套尺寸：预览块自己就吃掉四分之一的屏高，
+     * 底下的货架没地方放海报。矮屏上把预览收紧，让位给海报。
+     */
+    private val compact=resources.displayMetrics.heightPixels/density<500
     private fun label(size: Float,color: Int)=TextView(context).apply { textSize=size; setTextColor(color); includeFontPadding=false }
-    private val title=label(27f,TvStyle.text).apply { minLines=1; maxLines=1; ellipsize=TextUtils.TruncateAt.END; typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL) }
-    private val meta=label(12f,TvStyle.muted).apply { minLines=1; maxLines=1; ellipsize=TextUtils.TruncateAt.END }
+    private val title=label(if(compact) 20f else 27f,TvStyle.text).apply { minLines=1; maxLines=1; ellipsize=TextUtils.TruncateAt.END; typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL) }
+    private val meta=label(if(compact) 11f else 12f,TvStyle.muted).apply { minLines=1; maxLines=1; ellipsize=TextUtils.TruncateAt.END }
     init {
         orientation=VERTICAL
-        val dp=resources.displayMetrics.density
-        setPadding(0,(7*dp).toInt(),0,(12*dp).toInt())
+        setPadding(0,((if(compact) 4 else 7)*density).toInt(),0,((if(compact) 8 else 12)*density).toInt())
         addView(title)
-        addView(meta,LayoutParams(-1,-2).apply { topMargin=(5*dp).toInt() })
+        addView(meta,LayoutParams(-1,-2).apply { topMargin=((if(compact) 3 else 5)*density).toInt() })
         show(null,"")
     }
     fun show(series: Series?,status: String) {
@@ -242,8 +247,14 @@ class HomeScreen(
                 val view=item.view.getChildAt(child); val params=view.layoutParams as LayoutParams
                 view.measuredHeight+params.topMargin+params.bottomMargin
             } }
-            val desired=((row.cards.first().view.width-dp(8))/TvStyle.POSTER_ASPECT).toInt()
-            val imageHeight=minOf(desired,(height-row.block.getChildAt(0).measuredHeight-textHeight-dp(8)).coerceAtLeast(dp(48)))
+            // 海报按卡片自己的宽度算比例，宽度取创建时就定下的布局宽，不取量出来的宽。
+            // 量出来的宽在这一刻可能还没有：后到的货架刚加进来，卡片还没量过，
+            // 那个宽度是 0 或者上一轮的旧值，海报就会算成几像素高的一条线。
+            val cardWidth=(row.cards.first().view.layoutParams as LayoutParams).width
+            val desired=((cardWidth-dp(8))/TvStyle.POSTER_ASPECT).toInt()
+            // 海报保持自己的比例。屏不够高时这一屏装不下一整排，页面往下滚就是了 ——
+            // 把海报压扁成横条，图片在里面缩成一小块，比滚动难看得多。
+            val imageHeight=desired
             row.cards.forEach { card -> card.view.getChildAt(0).let { artwork -> if(artwork.layoutParams.height!=imageHeight) artwork.layoutParams=artwork.layoutParams.apply { height=imageHeight } } }
         }
     }
