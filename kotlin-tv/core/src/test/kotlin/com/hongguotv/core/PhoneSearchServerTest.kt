@@ -39,6 +39,33 @@ class PhoneSearchServerTest {
             assertFalse(submitted)
         }
     }
+    @Test fun `a browser that cannot name the origin still submits the search`() {
+        // Chromium turns the Origin into "null" for a form POST under
+        // "Referrer-Policy: no-referrer", so the phone used to get "来源不匹配" for a
+        // search it had typed correctly. A null origin is not proof of a cross-site
+        // request: the one-shot token in the URL is the secret.
+        val received=CountDownLatch(1); var query=""
+        PhoneSearchServer("127.0.0.1",{ query=it;received.countDown() }).use { server ->
+            val reply=request(server,"POST",URI(server.url).path+"/submit","query="+URLEncoder.encode("剧名","UTF-8"),"Origin: null\r\n")
+            assertTrue(reply,reply.startsWith("HTTP/1.1 200"))
+            assertTrue(received.await(2,TimeUnit.SECONDS)); assertEquals("剧名",query)
+        }
+    }
+    @Test fun `a request the browser calls cross site is refused even without an origin`() {
+        var submitted=false
+        PhoneSearchServer("127.0.0.1",{ submitted=true }).use { server ->
+            assertTrue(request(server,"POST",URI(server.url).path+"/submit","query=test","Origin: null\r\nSec-Fetch-Site: cross-site\r\n").startsWith("HTTP/1.1 403"))
+            assertFalse(submitted)
+        }
+    }
+    @Test fun `the page does not ask the browser to hide the origin`() {
+        // "no-referrer" is what makes Chromium answer a form POST with Origin: null.
+        PhoneSearchServer("127.0.0.1",{}).use { server ->
+            val page=request(server)
+            assertTrue(page.contains("Referrer-Policy: same-origin"))
+            assertFalse(page.contains("Referrer-Policy: no-referrer"))
+        }
+    }
     @Test fun `invalid and oversized input does not consume the session`() {
         PhoneSearchServer("127.0.0.1",{}).use { server ->
             for(body in listOf("query=","query="+"x".repeat(81),"query=a&query=b","query=hello%0Aworld","query=%zz")) {
