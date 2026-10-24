@@ -481,6 +481,25 @@ class ContentRepositoryTest {
     private fun searchRow(id: String, title: String, episodes: Int = 8) =
         """{"video_data":{"series_id":"$id","series_title":"$title","episode_cnt":$episodes}}"""
 
+    /** 站方的联想建议：字段形状和搜索结果不是一回事，剧 id 藏的地方也不同。 */
+    private fun suggestionPage(vararg rows: String) = """{"suggestionList":[${rows.joinToString(",")}]}"""
+
+    private fun suggestionRow(id: String, title: String, episodes: Int = 322, wordType: String = "short_play_name") =
+        """{"name":"$title","keyword":"$id","word_type":"$wordType","video_data":{"series_id":"$id","series_title":"$title","episode_cnt":$episodes,"series_cover":"https://example.com/$id.jpg"}}"""
+
+    /** video_data 空着的那一行：站方给同一部剧的第二个条目，详情页是 404。 */
+    private fun suggestionRowWithoutData(id: String, title: String) =
+        """{"name":"$title","keyword":"$id","word_type":"short_play_name","video_data":{}}"""
+
+    /** 两条路分别作答；站方对它们给的是完全不同的东西。 */
+    private fun searchAndSuggestion(result: String, suggestion: String) = repository { request ->
+        when(request.url.encodedPath) {
+            "/api/search/result" -> result
+            "/api/search/suggestion/" -> suggestion
+            else -> throw AssertionError("unexpected request ${request.url}")
+        }
+    }
+
     @Test fun searchReadsSeriesIdFromNestedVideoData() {
         val repo=repository { searchPage(searchRow("456","测试短剧",12)) }
         val result=repo.search("测试",1,ContentType.SHORT)
@@ -492,15 +511,105 @@ class ContentRepositoryTest {
     @Test fun theSearchAsksTheSitesOwnApiWithTheQueryParameter() {
         // 2026-10-22：站方把搜索页改成了纯前端渲染，数据改由 /api/search/result 下发。
         // **参数名是 query，不是 keyword** —— 用 keyword 回 400，用 query 才回 200。
+        // 2026-10-24：索引没答上来时，联想建议那一条路也要问，它同样是 query。
         val asked=mutableListOf<Pair<String,String?>>()
         val repo=repository { request ->
             asked+=(request.url.encodedPath to request.url.queryParameter("query"))
             searchPage(searchRow("456","测试短剧"))
         }
         repo.search("测试",1)
-        assertEquals(1,asked.size)
-        assertEquals("/api/search/result",asked.single().first)
-        assertEquals("测试",asked.single().second)
+        assertEquals(listOf("/api/search/result","/api/search/suggestion/"),asked.map { it.first })
+        assertTrue("两条路都得用 query 这个参数名",asked.all { it.second=="测试" })
+    }
+
+    /**
+     * 站上新剧按半截词找不到，是站方搜索结果那条路自己的毛病。
+     *
+     * 实测 2026-10-24：《我刚穿越，校花竟是重生女帝》（当天上架，站方漫剧目录第 15 页）用
+     * 「我刚穿越」查，搜索结果那一条路**翻完 22 页（220 行）也不出现**；联想建议那一条路
+     * 按剧名排，同一个词把它排在**第一行**。所以索引没答上来的时候，两条路都得问。
+     */
+    @Test fun aShowListedTodayIsFoundByTheFragmentOfItsTitle() {
+        val repo=searchAndSuggestion(
+            searchPage(searchRow("1","同类热门剧"),searchRow("2","另一部同类剧")),
+            suggestionPage(suggestionRow("7699683154444946457","我刚穿越，校花竟是重生女帝"))
+        )
+        val result=repo.search("我刚穿越",1)
+        // 命中的那一行排在同类推荐前面 —— 排在十条不相干的后面，就等于没有。
+        assertEquals(listOf("7699683154444946457","1","2"),result.items.map { it.id })
+        assertEquals(1,result.matchedCount)
+        assertEquals(ServerSearchProblem.NONE,result.serverProblem)
+    }
+
+    /** 索引答上来了就不必再问站方一次：页面上已经有三十条本机索引的结果了。 */
+    @Test fun theSuggestionPathIsAskedOnlyWhenTheLocalIndexDidNotAnswer() {
+        val asked=mutableListOf<String>()
+        val repo=repository { request ->
+            asked+=request.url.encodedPath
+            when(request.url.encodedPath) {
+                "/api/search/result" -> searchPage()
+                "/api/search/suggestion/" -> suggestionPage()
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+        }
+        repo.search("我刚穿越",1,ContentType.SHORT,CatalogueIndex(listOf(Series("1","我刚穿越"))))
+        assertEquals(listOf("/api/search/result"),asked)
+        asked.clear()
+        repo.search("我刚穿越",1,ContentType.SHORT,CatalogueIndex(emptyList()))
+        assertEquals(listOf("/api/search/result","/api/search/suggestion/"),asked)
+    }
+
+    /**
+     * video_data 空着的那一行不能收。
+     *
+     * 实测 2026-10-24：「我刚穿越，校花竟是重生女帝第二季」（id 7699791879176473662）的详情页
+     * 回 **404** —— 站方给同一部剧的两个条目里，有一个是死的。收进来就是一部点开就报错的剧。
+     */
+    @Test fun aSuggestionRowWithoutItsOwnDataIsNotTaken() {
+        val repo=searchAndSuggestion(
+            searchPage(),
+            suggestionPage(suggestionRowWithoutData("7699791879176473662","我刚穿越，校花竟是重生女帝第二季"))
+        )
+        val result=repo.search("我刚穿越",1)
+        assertTrue("死条目不能进列表",result.items.isEmpty())
+        assertEquals(0,result.matchedCount)
+    }
+
+    /** `title` 型的建议行，id 藏在 keyword 里，但那是另一部剧的 id —— 进来就是笃定的错答案。 */
+    @Test fun aSuggestionRowOfAnotherShapeIsNotTaken() {
+        val repo=searchAndSuggestion(
+            searchPage(),
+            suggestionPage(suggestionRow("7647159490281737278","我刚穿越",wordType="title"))
+        )
+        assertTrue(repo.search("我刚穿越",1).items.isEmpty())
+    }
+
+    /** 两条路各坏各的：只坏一条的时候手上还有站方的行，不能说成「站方不可用」。 */
+    @Test fun oneServerPathFailingIsNotTheSiteFailing() {
+        val repo=repository { request ->
+            when(request.url.encodedPath) {
+                "/api/search/result" -> throw IOException("no network")
+                "/api/search/suggestion/" -> suggestionPage(suggestionRow("7699683154444946457","我刚穿越，校花竟是重生女帝"))
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+        }
+        val result=repo.search("我刚穿越",1)
+        assertEquals(ServerSearchProblem.NONE,result.serverProblem)
+        assertEquals(listOf("7699683154444946457"),result.items.map { it.id })
+    }
+
+    /** 站方对一个没有的剧回一个空列表 —— 那是答案，不是故障，界面上不该说「站方不可用」。 */
+    @Test fun anEmptyAnswerFromTheSiteIsNotAFailure() {
+        val repo=repository { request ->
+            when(request.url.encodedPath) {
+                "/api/search/result" -> searchPage()
+                "/api/search/suggestion/" -> suggestionPage()
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+        }
+        val result=repo.search("没有这部剧",1)
+        assertEquals(ServerSearchProblem.NONE,result.serverProblem)
+        assertTrue(result.items.isEmpty())
     }
 
     /**
@@ -519,8 +628,9 @@ class ContentRepositoryTest {
         val word="测试短剧第二季番外篇全集高清无删减完整版在线观看全集完整版官方首发独家"
         assertTrue("这个用例得真的是超长的", word.length>ContentRepository.SITE_QUERY_LIMIT)
         repo.search(word,1)
-        assertEquals(1,asked.size)
-        assertEquals(word.take(ContentRepository.SITE_QUERY_LIMIT),asked.single())
+        // 两条路问出去的都是前 30 个字 —— 站方两条路都只收 30 个字。
+        assertEquals(2,asked.size)
+        assertTrue("两条路问出去的都该是截过的那一句",asked.all { it==word.take(ContentRepository.SITE_QUERY_LIMIT) })
     }
 
     /**
@@ -598,7 +708,8 @@ class ContentRepositoryTest {
         assertFalse(repo.search("测试",1).hasMore)
         // 站方这一路只是补位，翻页是本机索引的事 —— 所以不该为翻页再问站方一次。
         assertTrue(repo.search("测试",2).items.isEmpty())
-        assertEquals(1,paths.size)
+        // 第 1 页问了两条路（搜索结果 + 联想建议），第 2 页一次都没问。
+        assertEquals(listOf("/api/search/result","/api/search/suggestion/"),paths)
     }
 
     @Test fun comicSearchUsesTheSameWorkingSourceAsShortDrama() {

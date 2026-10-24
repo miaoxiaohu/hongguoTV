@@ -363,6 +363,13 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * seen is appended when the page has room. That keeps newly listed shows reachable without
      * letting ten unranked rows outrank a local exact match.
      *
+     * Two server paths are used, and the difference between them is the whole reason a show
+     * listed today is findable at all: the search-result path ranks by popularity and only hits
+     * the show when the word is its whole title, while the suggestion path ranks by show name and
+     * hits it on a fragment — measured 2026-10-24 on 《我刚穿越，校花竟是重生女帝》, which the
+     * result path does not return on any of its 22 pages for 「我刚穿越」 or 「校花竟是重生女帝」,
+     * and the suggestion path puts first for both. See [siteRows].
+     *
      * [type] narrows the local index to one catalogue, and only when [local] can actually classify
      * its shows — see [CatalogueIndex.labelled]. It cannot narrow the server: the public search page
      * accepts no category parameter at all. That is not a loss in practice, because the server only
@@ -403,8 +410,12 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         // 之前它一失败，整页就变成「暂时无法加载」，而本机索引里明明有上千条命中。
         //
         // 但「取不到」有两种，界面上不能都叫「暂时」：见 [ServerSearchProblem]。
+        //
+        // 站方有两条路：搜索结果（十条同类热门）和联想建议（按剧名找）。索引没答上来的时候
+        // 两条都问 —— 索引答不上来的时候，多半正是站上新剧还没被走查收进去的时候，
+        // 而搜索结果那一条路对半截词是找不到它的（见 [siteRows]）。
         var serverProblem=ServerSearchProblem.NONE
-        val serverRows=if(page==1) try { publicSearch(siteKeyword) }
+        val serverRows=if(page==1) try { siteRows(siteKeyword,localRows.isEmpty()) }
         catch(e: Exception) { serverProblem=classifyServerFailure(e); emptyList() }
         else emptyList()
         // 分类过滤只在索引真能分类时才生效。索引里的每部剧都记着自己属于哪套目录，才谈得上
@@ -427,8 +438,14 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         // under the 「以下是同类推荐」 notice instead.
         val filler = if(localRows.isEmpty()) unseen else unseen.filter { answers(it.title,keyword,truncated) }
         val window = when {
-            // No index, or the index matched nothing: the ten server rows are all there is.
-            localRows.isEmpty() -> if(page>1) emptyList() else scoped
+            // No index, or the index matched nothing: the server rows are all there is.
+            // 命中的排前面，同类推荐排后面。站方搜索结果那一条路给的是十条同类热门，
+            // 而新剧常常只在联想建议那一行里 —— 排在十条不相干的后面，就等于没有。
+            localRows.isEmpty() -> if(page>1) emptyList() else {
+                val hits=scoped.filter { answers(it.title,keyword,truncated) }
+                val hitIds=hits.mapTo(HashSet()) { it.id }
+                hits + scoped.filterNot { it.id in hitIds }
+            }
             else -> {
                 val slice = localRows.drop((page-1)*SEARCH_PAGE_SIZE).take(SEARCH_PAGE_SIZE).toMutableList()
                 // Only the first page borrows room from the server, so paging never drifts between
@@ -480,6 +497,56 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         val body=text("$site/api/search/result?query=${Signer.encode(keyword)}")
         val rows=JSONObject(body).optJSONArray("searchList") ?: throw SearchShapeChangedException()
         return valid(rows.objects().map(::card))
+    }
+    /**
+     * 站方的两条路，合起来才是「新剧搜得到」的那一条路。
+     *
+     * 搜索结果那条路（`/api/search/result`）**只在用户打了完整剧名时才命中**：站方是模糊排序、
+     * 固定十条，同类的热门剧挤在前面。实测 2026-10-24：《我刚穿越，校花竟是重生女帝》（当天上架，
+     * 站方漫剧目录第 15 页）用完整剧名查是**第一行**，用「我刚穿越」或「校花竟是重生女帝」查，
+     * **翻完 22 页（220 行）也不出现**。新剧还没进本机索引时，这条路等于没有。
+     *
+     * 联想建议那条路（`/api/search/suggestion/`）是**按剧名**排的，半截词就够得着：同样这两个
+     * 半截词，它都把这部剧排在**第一行**（同一天实测）。新剧还没进本机索引时，这是唯一一条
+     * 能找到它的路 —— 而本机索引要等走查目录才收得到，站上新到目录里得再等一天。
+     *
+     * 只在索引没答上来的时候问它：索引答上来了，页面上已经有三十条本机索引的结果，
+     * 再多问一次只是多一个请求；索引答不上来，正是「站上新剧还没收录」的时候。
+     *
+     * 两条路各坏各的：只坏一条的时候，手上还有站方的行，说「站方不可用」就是把有的东西说成没有。
+     * 两条都空才算站方没答上来。
+     */
+    private fun siteRows(keyword: String, askSuggestion: Boolean): List<Series> {
+        val rows=mutableListOf<Series>()
+        var failure: Exception?=null
+        // 「答了」和「答回几行」是两件事：站方对一个没有的剧回一个空列表，那是答案，不是故障。
+        var answered=false
+        try { rows+=publicSearch(keyword); answered=true } catch(e: Exception) { failure=e }
+        if(askSuggestion) {
+            try { rows+=suggestionSearch(keyword); answered=true } catch(e: Exception) { if(failure==null) failure=e }
+        }
+        if(!answered && failure!=null) throw failure
+        return rows.distinctBy { it.id }
+    }
+    /**
+     * 站方的联想建议：比搜索结果更会找新剧的那一条路。
+     *
+     * 建议里的行分好几种，只一种能进列表：
+     * - `short_play_name` 且 video_data 齐全 —— 剧名、id、集数、封面都在，能直接用。
+     * - `title` 型的行，id 藏在 `keyword` 里，但那是**另一部剧**的 id，收进来就是个笃定的错答案。
+     * - `common_query` / `category` / `short_play_actor` 型的行根本没有剧。
+     *
+     * video_data 空着的 `short_play_name` 行同样不能要：实测「我刚穿越，校花竟是重生女帝第二季」
+     * （id 7699791879176473662）的详情页回 **404**，收进来就是一部点开就报错的剧 ——
+     * 站方给同一部剧的两个条目里，有一个是死的（见 docs/research/2026-10-23-hongguo-search-api.md）。
+     */
+    private fun suggestionSearch(keyword: String): List<Series> {
+        val body=text("$site/api/search/suggestion/?query=${Signer.encode(keyword)}")
+        val rows=JSONObject(body).optJSONArray("suggestionList") ?: throw SearchShapeChangedException()
+        return valid(rows.objects()
+            .filter { it.optString("word_type")=="short_play_name" }
+            .filter { (it.optJSONObject("video_data")?.optInt("episode_cnt",0) ?: 0) > 0 }
+            .map(::card))
     }
     fun detail(id: String): Detail {
         require(id.matches(Regex("[0-9]{1,30}")))
