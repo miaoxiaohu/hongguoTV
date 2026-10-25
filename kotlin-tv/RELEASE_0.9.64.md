@@ -73,5 +73,6 @@
 
 ## 发布状态
 
-- 代码已改好并通过测试。
+- **已发布**：<https://github.com/miaoxiaohu/hongguoTV/releases/tag/kotlin-v0.9.64>（2026-10-25）。
 - **发布由 CI 完成**：tag 一推，CI 就会按本文件出包发布（版本号、签名证书、附件完整性都由 CI 校验）。本文件就是发布页正文，电视更新弹窗的短说明出自 `<!-- notes -->` 块。
+- 线上产物核对过：`update.json` 的 `versionCode=9064`、`versionName=0.9.64`、`minSdk=26`、`sourceCommit=d7461f0` 都对；APK 的 SHA-256 与 `update.json` 里写的一致；签名证书仍是 `4f4cf502…`，所以电视上已有的 0.9.62 可以直接覆盖升级，本机记录不丢。
