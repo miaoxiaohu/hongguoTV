@@ -48,14 +48,41 @@ class MainActivity: Activity() {
     private val main=Handler(Looper.getMainLooper())
     private val io=Executors.newFixedThreadPool(3)
     private val repository=ContentRepository()
-    private val networkCleanup=Executors.newSingleThreadExecutor()
     private val prefetchWorker=Executors.newSingleThreadExecutor()
-    private var prefetchHttp: okhttp3.OkHttpClient?=null
-    private var playbackHttp: okhttp3.OkHttpClient?=null
+    private val pageWorker=Executors.newSingleThreadExecutor()
+    /**
+     * 一次备集的活：自己的期限、自己的句柄、自己的取消。
+     *
+     * 备集有两种：用户马上要看的那一集，和本集播着的时候备的下一集。**两种不能互相取消** ——
+     * 用户按下播放的时候，下一集那份还早得很；本集播完要换下一集的时候，页面那份早就没人要了。
+     */
+    private inner class Preparation {
+        var scope: RequestScope?=null
+        var job: java.util.concurrent.Future<*>?=null
+        var watchdog: Runnable?=null
+        fun cancel() {
+            watchdog?.let { main.removeCallbacks(it) }; watchdog=null
+            scope?.cancel(); scope=null
+            job?.cancel(true); job=null
+        }
+    }
+    /** 用户马上要看的那一集的备集（首页「接着看」、详情页）。 */
+    private val pagePreparation=Preparation()
+    /** 本集播着的时候备下一集。 */
+    private val nextPreparation=Preparation()
+    /**
+     * 本集播着的时候备下的下一集。
+     *
+     * 备好的是流本身：它带着地址、首包和解好的索引，播的时候不用再问一遍地址。
+     */
     private val preparedNext=PreparedSlot<RemoteVideo>({ android.os.SystemClock.elapsedRealtime() },PrefetchPolicy.TTL_MS)
-    private var prefetchJob: java.util.concurrent.Future<*>?=null
-    private var prefetchScope: RequestScope?=null
-    @Volatile private var prefetchWatchdog: Runnable?=null
+    /**
+     * 用户马上要看的那一集：首页「接着看」或者详情页刚打开的时候备下的。
+     *
+     * 它和 [preparedNext] 分开放，因为两件事会同时发生：详情页在备着用户要按的那一集，
+     * 本集播着的时候又在备下一集。
+     */
+    private val preparedPage=PreparedSlot<RemoteVideo>({ android.os.SystemClock.elapsedRealtime() },PrefetchPolicy.TTL_MS)
     private var readySince=0L
     private lateinit var artwork: ArtworkLoader
     private data class DeferredUi(val apply: ()->Unit,val discard: ()->Unit={})
@@ -980,6 +1007,7 @@ class MainActivity: Activity() {
         val hot=catalog.filterNot { it.id in library.hidden() }
         home.render(homeShelves(),catalogFocus,!focusNav && !focusType,
             if(hasMore) { { page=2; catalogFocus=""; showCatalog(true) } } else null,homePosition)
+        prepareResumeEpisode()
         home.refresh.text=if(loading) if(homeFromCache) "已显示上次内容 · 正在更新热门…" else "正在更新热门…" else "刷新热门"
         home.refresh.setOnClickListener { showCatalog(true) }
         if(focusNav) nav[TAB_HOME].requestFocus() else if(focusType) typeButtons.getValue(library.contentType).requestFocus()
@@ -991,6 +1019,21 @@ class MainActivity: Activity() {
             val started=launchStarted; launchStarted=0
             body.post { android.util.Log.i("HongguoTV","Home displayed cached=$homeFromCache elapsedMs=${android.os.SystemClock.elapsedRealtime()-started}") }
         }
+    }
+    /**
+     * 备下首页「接着看」的那一集。
+     *
+     * 它是用户最可能按下去的那一集，而首页摆出来到用户按下去之间总有一两秒 —— 那一刻画面
+     * 还没开始播，网络是空的。按下去就不用再问一遍地址、等一遍首包。
+     *
+     * 看完一整部的不备：下一集的地址得先有分集表才知道，而分集表要等进了详情页才有。
+     * 计费网络也不备：那一兆是白花的。
+     */
+    private fun prepareResumeEpisode() {
+        if(connectivity.isActiveNetworkMetered) return
+        val progress=library.history().firstOrNull { !library.watched(it.series.id) } ?: return
+        if(progress.completed) return
+        prepareEpisode(progress.series.id,progress.episodeId,library.maxQuality,preparedPage,pagePreparation)
     }
     private fun homeShelves(): List<HomeScreen.Shelf> {
         val recent=library.history().filterNot { library.watched(it.series.id) }
@@ -1249,6 +1292,10 @@ class MainActivity: Activity() {
             val progress=library.progress(series.id)
             val target=ResumePlayback.target(result.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true)
             episodeIndex=target.index; group=episodeIndex/20
+            // 详情页一打开就把用户马上要看的那一集备上：这一刻网络是空的，画面还没开始播。
+            // 按播放的时候地址和首包都已经在手上了，不必再从头问一遍地址、等一遍首包。
+            // 计费网络不备：那一兆是白花的，用户还没说要播。
+            if(!resume&&result.episodes.isNotEmpty()&&!connectivity.isActiveNetworkMetered) prepareEpisode(result.series.id,result.episodes[target.index],library.maxQuality,preparedPage,pagePreparation)
             if(resume) playEpisode(target.index,target.position,autoplay=detailAutoplay) else showDetail(false)
         }, { problem -> error(body,problem) { openDetail(series,resume,detailAutoplay) } })
     }
@@ -1379,19 +1426,24 @@ class MainActivity: Activity() {
         val reuse=screen=="player" && player!=null && playerView!=null && !recovering && !playError
         library.setWatched(data.series.id,false)
         val selectedIndex=index.coerceIn(0,data.episodes.lastIndex)
-        val prefetched=if(position==0L && !recovering) preparedNext.take("${data.episodes[selectedIndex]}:${library.maxQuality}") else null
-        val claimedHttp=if(prefetched!=null) prefetchHttp.also { prefetchHttp=null } else null
+        // 备好的那一集直接拿走：详情页备下的那一集，或者本集播着的时候备下的下一集。
+        // 位置不为零也能用 —— 备好的流从头到尾都在，播放器要从哪里读，它就从哪里读。
+        val preparedKey="${data.episodes[selectedIndex]}:${library.maxQuality}"
+        val prepared=if(!recovering) (preparedPage.take(preparedKey) ?: preparedNext.take(preparedKey)) else null
+        val prefetched=prepared
+        // 画面开始了，页面那份备集就停掉：它再拉那一兆是在跟画面抢带宽。
+        pagePreparation.cancel()
         saveProgress(); library.flush(); invalidatePage(); favoriteMonitor.stop(); releaseCatalogViews()
         if(reuse) {
             cancelRecovery(); cancelPrefetch(); tvTools.close()
             episodePanel?.dismiss(); episodePanel=null; speedDialog?.dismiss(); speedDialog=null
             playerListener?.let { player?.removeListener(it) }; playerListener=null
             player?.stop(); player?.clearMediaItems()
-            video?.close(); video=null; closeTransport(playbackHttp); playbackHttp=null
+            video?.close(); video=null
             main.removeCallbacks(hideHud); main.removeCallbacks(seekRunnable); pendingSeek=null
         } else releasePlayer()
         artwork.cancelPage(clearMemory=true)
-        playbackHttp=claimedHttp; video=prefetched
+        video=prefetched
         var firstReady=true; var firstFrame=true
         if(!recovering) recovery.reset()
         autoRecovery=false; readySince=0; startPosition=position.coerceAtLeast(0); requestedAutoplay=autoplay
@@ -1485,17 +1537,10 @@ class MainActivity: Activity() {
             if(library.danmakuEnabled) danmakuSession.start(data.series.id,requestedId)
         }, { problem -> playerFailure(problem) })
     }
-    private fun closeTransport(http: okhttp3.OkHttpClient?) {
-        if(http==null) return
-        // Closing an idle TLS connection can write close_notify; keep it off the UI thread.
-        networkCleanup.execute { http.dispatcher.cancelAll(); http.connectionPool.evictAll(); http.dispatcher.executorService.shutdown() }
-    }
     private fun cancelPrefetch() {
-        // 先摘掉看门狗再拆别的：它要是在这中间触发，会去取消一个已经作废的 scope。
-        prefetchWatchdog?.let { main.removeCallbacks(it) }; prefetchWatchdog=null
-        prefetchScope?.cancel(); prefetchScope=null
-        preparedNext.clear(); prefetchJob?.cancel(true); prefetchJob=null
-        closeTransport(prefetchHttp); prefetchHttp=null
+        // 只停下一集那份：用户马上要看的那一集还在备着，按播放时还要用它。
+        nextPreparation.cancel()
+        preparedNext.clear()
     }
     private fun maybePrefetch() {
         val p=player ?: return; val data=detail ?: return
@@ -1508,35 +1553,50 @@ class MainActivity: Activity() {
         // 同一条上行，别在播放器自己还没填满缓冲的时候插队（见 PrefetchPolicy.BUFFER_AHEAD_MS）。
         if(!PrefetchPolicy.shouldPrepare(now-readySince,p.bufferedPosition-p.currentPosition)) return
         val id=data.episodes[episodeIndex+1]; val quality=library.maxQuality; val key="$id:$quality"
-        if(preparedNext.isFresh(key) || prefetchJob?.isDone==false) return
+        if(preparedNext.isFresh(key) || nextPreparation.job?.isDone==false) return
         if(prefetchAttempts>=3 || (prefetchAttempts>0 && now-prefetchAttemptAt<15_000) || connectivity.isActiveNetworkMetered || !networkAvailable()) return
         cancelPrefetch(); prefetchAttemptAt=now; prefetchAttempts++
-        val ticket=preparedNext.begin(key)
-        // 准备下一集用的这个客户端，命中之后就是这一集自己的传输客户端 —— 所以它带的是播放的
-        // 超时，不是准备的超时。播放器按 512 KiB 一段拉，每一段都得在 callTimeout 内整段拿完；
-        // 准备用的那套紧超时会让慢一点的这一集先超时，那等于把预取的好处又吐回去。
-        val http=ContentRepository.playbackHttpClient()
-        val source=ContentRepository(http); prefetchHttp=http
-        val scope=RequestScope(); prefetchScope=scope
+        prepareEpisode(data.series.id,id,quality,preparedNext,nextPreparation,giveUpOnTimeout=true)
+    }
+    /**
+     * 提前备好一集：地址、首包、1MB 预热，三样都齐了才算备好。
+     *
+     * 两个地方叫它：用户还在页面上的时候备下他马上要看的那一集 —— 那一刻网络是空的，画面
+     * 还没开始播，按播放的时候地址和首包都已经在手上了；以及本集播着的时候备下下一集。
+     *
+     * 备好的东西放在槽里：一次只备一集，备下一集的时候上一集已经被取走了。
+     */
+    private fun prepareEpisode(seriesId: String,id: String,quality: Int,slot: PreparedSlot<RemoteVideo>,preparation: Preparation,giveUpOnTimeout: Boolean=false) {
+        val key="$id:$quality"
+        if(isDestroyed||slot.isFresh(key)) return
+        // 同一件事只备一集：已经在备的那份停掉，用户马上要按的这一集更重要。
+        preparation.cancel()
+        val scope=RequestScope(); preparation.scope=scope
+        val ticket=slot.begin(key)
         // 准备有自己的期限。不能拿客户端的超时来当这个期限 —— 那套超时之后要陪着整集播放。
         val watchdog=Runnable {
             // 超了预算就是这条链路掏不出这 1MB，别再拿本集的带宽试第二次第三次。
-            prefetchAttempts=3
+            if(giveUpOnTimeout) prefetchAttempts=3
             scope.cancel()
         }
-        prefetchWatchdog=watchdog
+        preparation.watchdog=watchdog
         main.postDelayed(watchdog,PrefetchPolicy.BUDGET_MS)
-        prefetchJob=prefetchWorker.submit {
+        val worker=if(preparation===pagePreparation) pageWorker else prefetchWorker
+        preparation.job=worker.submit {
             var remote: RemoteVideo?=null
             try {
                 val prepared=scope.run {
-                    RemoteVideo(http,source.stream(data.series.id,id,quality)).also { remote=it; it.warm() }
+                    // 地址和首包都走仓库那个客户端：它的连接池是热的，握手不用重来一遍。
+                    // 每集另起一个客户端，看着干净，实则每集都要重新握手一次 CDN。
+                    val info=repository.stream(seriesId,id,quality)
+                    RemoteVideo(repository.http,info).also { remote=it; it.warm() }
                 }
-                if(preparedNext.complete(ticket,key,prepared)) android.util.Log.i("HongguoTV","Next episode prepared")
+                if(slot.complete(ticket,key,prepared)) android.util.Log.i("HongguoTV","Episode prepared")
+                else remote?.close()
             } catch(_: Exception) { remote?.close() }
             finally {
                 main.removeCallbacks(watchdog)
-                if(prefetchWatchdog===watchdog) prefetchWatchdog=null
+                if(preparation.watchdog===watchdog) preparation.watchdog=null
             }
         }
     }
@@ -1846,7 +1906,6 @@ class MainActivity: Activity() {
         video?.close(); video=null; playerView?.player=null; playerView=null; player?.release(); player=null; playbackReady=false; transportPlay=null; sleepButton=null
         // 弹幕也要停：不然它会接着按上一集的位置往下画，而画面已经不是那一集了。
         danmakuSession.stop(); danmakuOverlay?.stop(); danmakuOverlay=null
-        closeTransport(playbackHttp); playbackHttp=null
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
     private fun returnToDetail(forceDetail: Boolean=false) {
@@ -1944,8 +2003,11 @@ class MainActivity: Activity() {
         generation++; cancelWork()
         if(networkRegistered) connectivity.unregisterNetworkCallback(networkCallback)
         favoriteMonitor.destroy(); tvTools.destroy(); updater.destroy(); saveProgress(); releasePlayer(); library.close()
+        // 备着的那两集放掉：活动没了，它们也没人要了。
+        pagePreparation.cancel(); nextPreparation.cancel()
+        preparedPage.clear()
         artwork.close(); releaseCatalogViews(); mediaSession.release(); main.removeCallbacksAndMessages(null)
-        io.shutdownNow(); prefetchWorker.shutdownNow(); networkCleanup.shutdown()
+        io.shutdownNow(); prefetchWorker.shutdownNow(); pageWorker.shutdownNow()
         danmakuSession.close()
         Thread({ repository.http.dispatcher.cancelAll(); repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown() },"hongguotv-network-cleanup").start()
         super.onDestroy()
