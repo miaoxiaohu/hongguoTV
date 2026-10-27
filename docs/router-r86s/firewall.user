@@ -1,0 +1,45 @@
+# This file is interpreted as shell script.
+# Put your custom iptables rules here, they will
+# be executed with each firewall (re-)start.
+
+# Internal uci firewall chains are flushed and recreated on reload, so
+# put custom rules into the root chains e.g. INPUT or FORWARD or into the
+# special user chains, e.g. input_wan_rule or postrouting_lan_rule.
+ip6tables -t filter -I FORWARD 1 -d 2606:4700::/44 -j REJECT
+ip6tables -t filter -I FORWARD 1 -d 2a03:2880:f112::/48 -j REJECT
+ip6tables -t filter -I FORWARD 1 -d 2607:6bc0::10 -j REJECT
+
+# docker0 ULA IPv6 NAT66 for hermes
+ip6tables -t nat -C POSTROUTING -s fd00:192:168:1::/64 -o pppoe-wan -j MASQUERADE 2>/dev/null || ip6tables -t nat -A POSTROUTING -s fd00:192:168:1::/64 -o pppoe-wan -j MASQUERADE
+
+# docker0 ULA IPv6 forward rules
+ip6tables -C FORWARD -i docker0 -o pppoe-wan -s fd00:192:168:1::/64 -j ACCEPT 2>/dev/null || ip6tables -I FORWARD 1 -i docker0 -o pppoe-wan -s fd00:192:168:1::/64 -j ACCEPT
+ip6tables -C FORWARD -i pppoe-wan -o docker0 -d fd00:192:168:1::/64 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || ip6tables -I FORWARD 1 -i pppoe-wan -o docker0 -d fd00:192:168:1::/64 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+# docker0 ULA IPv6 source route
+ip -6 route replace default from fd00:192:168:1::/64 dev pppoe-wan metric 512 2>/dev/null || true
+
+# LAN GUA IPv6 default route fix
+WAN6_DEV="$(ifstatus wan_6 2>/dev/null | jsonfilter -e '@["l3_device"]' 2>/dev/null)"
+[ -n "$WAN6_DEV" ] || WAN6_DEV="$(ifstatus wan6 2>/dev/null | jsonfilter -e '@["l3_device"]' 2>/dev/null)"
+[ -n "$WAN6_DEV" ] || WAN6_DEV="pppoe-wan"
+LAN6_PREFIX="$(ifstatus lan 2>/dev/null | jsonfilter -e '@["ipv6-prefix-assignment"][0].address' 2>/dev/null)"
+LAN6_MASK="$(ifstatus lan 2>/dev/null | jsonfilter -e '@["ipv6-prefix-assignment"][0].mask' 2>/dev/null)"
+[ -n "$WAN6_DEV" ] && ip -6 route replace default dev "$WAN6_DEV" metric 256 2>/dev/null || true
+[ -n "$LAN6_PREFIX" ] && [ -n "$LAN6_MASK" ] && [ -n "$WAN6_DEV" ] && ip -6 route replace default from "$LAN6_PREFIX/$LAN6_MASK" dev "$WAN6_DEV" metric 512 2>/dev/null || true
+
+# BEGIN quest3_ntp_redirect_codex
+# Redirect Quest3 NTP to the router's local NTP server; keeps Passwall for TCP/blocked sites but avoids proxied UDP/123 failures.
+iptables -t nat -C PREROUTING -s 192.168.1.22 -p udp --dport 123 -j REDIRECT --to-ports 123 2>/dev/null || iptables -t nat -A PREROUTING -s 192.168.1.22 -p udp --dport 123 -j REDIRECT --to-ports 123
+# END quest3_ntp_redirect_codex
+
+
+# BEGIN lan_ipv6_open_codex
+# Whole-LAN IPv6 egress (2026-10-26): the old block 'lan_ipv6_only_192_168_1_11_codex'
+# allowed IPv6 from LAN to WAN only for 192.168.1.11 (MAC 52:54:00:20:D6:62) and
+# REJECTed every other LAN client. The TV (192.168.1.26) therefore could not reach
+# IPv6-only CDN hosts (the redfruit 302 target *.jspcdn.cn has AAAA only, no A record),
+# so playback failed with "network connection failed".
+# LAN -> WAN IPv6 is now allowed for every LAN client; passwall still decides the
+# per-destination routing (direct for chn6/gfw6 lists, proxy for the rest).
+# END lan_ipv6_open_codex
