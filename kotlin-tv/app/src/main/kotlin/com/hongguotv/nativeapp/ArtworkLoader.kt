@@ -16,6 +16,7 @@ import okhttp3.Call
 import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import com.hongguotv.core.PreferIpv4Dns
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.lang.ref.WeakReference
@@ -86,7 +87,8 @@ class ArtworkLoader(context: Context) {
     private val disk = ArtworkCache(File(context.applicationContext.cacheDir, "artwork-v1"))
     // This client owns its dispatcher and pool; cancelling artwork never cancels video or catalog calls.
     private val http = OkHttpClient.Builder().connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS).callTimeout(12, TimeUnit.SECONDS).dns(PublicDns).build()
+        .readTimeout(8, TimeUnit.SECONDS).callTimeout(12, TimeUnit.SECONDS)
+        .dns(PreferIpv4Dns(PublicDns)).build()
     private val workers = Executors.newFixedThreadPool(if (lowRam) 1 else 2) { runnable ->
         Thread(runnable, "hongguotv-artwork").apply { priority = Thread.NORM_PRIORITY - 1 }
     }

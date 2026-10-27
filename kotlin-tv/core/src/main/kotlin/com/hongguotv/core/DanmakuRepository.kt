@@ -27,7 +27,8 @@ import java.util.concurrent.TimeUnit
  */
 class DanmakuRepository(
     private val http: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10,TimeUnit.SECONDS).readTimeout(15,TimeUnit.SECONDS).callTimeout(25,TimeUnit.SECONDS).build(),
+        .connectTimeout(10,TimeUnit.SECONDS).readTimeout(15,TimeUnit.SECONDS).callTimeout(25,TimeUnit.SECONDS)
+        .dns(PreferIpv4Dns()).build(),
     private val clock: () -> Long = System::currentTimeMillis
 ) {
     private val signer=Signer()

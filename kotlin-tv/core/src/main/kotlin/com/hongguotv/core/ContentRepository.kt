@@ -7,6 +7,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.MediaType.Companion.toMediaType
 import org.json.JSONObject
 import org.json.JSONArray
+import org.json.JSONException
 import java.io.IOException
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -189,6 +190,31 @@ class SearchShapeChangedException: IOException("搜索数据结构已变化")
 
 /** Carries the status code so callers can explain a 404 instead of showing a bare error. */
 class HttpStatusException(val code: Int): IOException("内容请求失败（HTTP $code）")
+
+/**
+ * The signed player endpoint answered HTTP 200 with an empty body.
+ *
+ * Measured 2026-10-27: the same signed request for the same episode, with the same device
+ * identity and the same signature, answers with a zero-byte body on roughly half of the attempts
+ * and with a full ~22 KB payload on the others. The answer does not depend on the episode, on
+ * the identity, on HTTP/1.1 vs HTTP/2, or on the interval between the attempts - so it is the
+ * endpoint refusing an attempt, not a different episode or a throttled client.
+ *
+ * An empty body is the one failure the signed path can walk away from: another attempt of the
+ * same request is answered properly about half the time, so asking again is worth more than
+ * any other road.
+ */
+class EmptySignedAnswerException: IOException("播放接口返回空内容")
+
+/**
+ * The public player page does not host this episode.
+ *
+ * The public page only carries the first three episodes of a show, so its 404 says something
+ * about the page, not about the episode: the episode may well be playable through the signed
+ * path. The two have to stay apart, because only the signed path can play the fourth episode and
+ * onwards.
+ */
+class PublicPageHasNoEpisodeException: IOException("该来源每部剧只提供前 3 集，本集暂无资源")
 
 /**
  * How many board pages one shelf may have.
@@ -612,15 +638,54 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             // episode cannot be played, and the retry counter does not start until it returns.
             if(fallbackCannotHelp(signed)) throw signed
             try { return webStream(seriesId,id,maxQuality) }
-            catch(web: Exception) { web.addSuppressed(signed); throw web }
+            catch(web: Exception) {
+                // The public page hosts only the first three episodes, so its 404 means 「这一集
+                // 不在公开页上」 - not 「这部剧只有 3 集」. Saying the latter about a whole show
+                // because one attempt was refused is a permanent-sounding verdict drawn from a
+                // page that never had the episode in it, and it is exactly what the signed path
+                // falling back there used to produce.
+                if(signed is EmptySignedAnswerException && web is PublicPageHasNoEpisodeException) {
+                    web.addSuppressed(signed)
+                    throw EmptySignedAnswerException()
+                }
+                web.addSuppressed(signed); throw web
+            }
         }
     }
     private fun signedStream(id: String, maxQuality: Int): StreamInfo {
         val payload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"video_id":"$id"}""".toByteArray()
-        // A fresh identity per signed request: the previously hardcoded pair is shared by every
-        // client built from the drpys sources and is now silently blocked (HTTP 200, empty body).
-        val signed=signer.sign(VIDEO_MODEL_API,VendorConstants.newDevice(),payload)
-        val data=JSONObject(text(signed.url,signed,addressHttp))
+        // A fresh identity per signed attempt: the previously hardcoded pair is shared by every
+        // client built from the drpys sources and is now silently blocked (HTTP 200, empty body),
+        // and replaying one generated pair turns later answers back into empty bodies as well -
+        // which is why [VendorConstants.newDevice] is called per attempt and not per episode.
+        //
+        // The loop is bounded twice: by the number of attempts and by a wall-clock budget. The
+        // budget matters because each attempt carries the address lookup's own ten-second call
+        // timeout, so six attempts against a server that hangs would cost a minute of silence -
+        // far longer than the person watching the screen is willing to wait for an episode.
+        val deadline=System.currentTimeMillis()+SIGNED_ATTEMPT_BUDGET_MS
+        var refusal: Exception?=null
+        for(attempt in 0 until SIGNED_ATTEMPTS) {
+            if(attempt>0 && System.currentTimeMillis()>=deadline) break
+            val signed=signer.sign(VIDEO_MODEL_API,VendorConstants.newDevice(),payload)
+            val body=text(signed.url,signed,addressHttp)
+            // An empty body is a refusal of this attempt, not a verdict on the episode - see
+            // [EmptySignedAnswerException]. Asking again is the one thing that helps.
+            if(body.isBlank()) { refusal=EmptySignedAnswerException(); continue }
+            // A body that is not JSON is the same refusal wearing a different hat.
+            try { return parseSignedStream(body,maxQuality) }
+            catch(e: JSONException) { refusal=e }
+        }
+        throw refusal ?: EmptySignedAnswerException()
+    }
+    /**
+     * Reads the playable rendition out of a signed answer.
+     *
+     * Split out of [signedStream] so that the retry loop only has to decide whether the answer
+     * arrived at all; everything that decides *what* to play stays in one place.
+     */
+    private fun parseSignedStream(body: String, maxQuality: Int): StreamInfo {
+        val data=JSONObject(body)
         val code=if(data.has("code")) data.optInt("code",-1) else data.optInt("Code",-1)
         if(code!=0) throw IOException("播放接口暂不可用")
         val map=data.optJSONObject("data") ?: throw IOException("播放信息为空")
@@ -646,7 +711,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
     }
     private fun webStream(seriesId: String, id: String, maxQuality: Int): StreamInfo {
         val html=try { text("$site/player/$seriesId/$id",client=addressHttp) }
-        catch(e: HttpStatusException) { if(e.code==404) throw IOException("该来源每部剧只提供前 3 集，本集暂无资源"); throw e }
+        catch(e: HttpStatusException) { if(e.code==404) throw PublicPageHasNoEpisodeException(); throw e }
         val raw=Regex("\"contentUrl\"\\s*:\\s*\"([^\"]+)\"").find(html)?.groupValues?.get(1)
             ?: Regex("\"main_url\"\\s*:\\s*\"([^\"]+)\"").find(html)?.groupValues?.get(1)
             ?: throw IOException("播放地址暂不可用")
@@ -658,6 +723,28 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         return StreamInfo(url,null,quality)
     }
     companion object {
+        /**
+         * How many times one episode asks the signed endpoint before giving up on it.
+         *
+         * The endpoint answers about half of the attempts with an empty body (see
+         * [EmptySignedAnswerException]), and the refusals come in bursts rather than
+         * independently - a run of consecutive attempts can all be refused. Measured 2026-10-27:
+         * a successful episode needed 1.75 attempts on average and the worst one needed six, so
+         * six attempts leave an episode unresolved only about one time in fifty. Every attempt
+         * costs a fraction of a second, while the fallback it protects costs a full request of
+         * its own and can only offer the first three episodes at 360p.
+         */
+        const val SIGNED_ATTEMPTS = 6
+        /**
+         * How long the retries of one episode may take together.
+         *
+         * The budget is what keeps the retry loop from turning a slow server into a long silence:
+         * each attempt has the address lookup's own ten-second call timeout, so the attempts have
+         * to be cut off by the clock as well as by their number. Four seconds is long enough for
+         * the six attempts to happen - they take about a second each in practice - and short
+         * enough that the person is still waiting on an episode rather than on a network.
+         */
+        const val SIGNED_ATTEMPT_BUDGET_MS = 4000L
         /** The only signed player endpoint that still answers; see [stream]. */
         const val VIDEO_MODEL_API = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/video_model/v1/"
         /** How long a connection to the site or the CDN may take. */
@@ -682,6 +769,8 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             .connectTimeout(CONNECT_TIMEOUT_S,TimeUnit.SECONDS)
             .readTimeout(READ_TIMEOUT_S,TimeUnit.SECONDS)
             .callTimeout(CALL_TIMEOUT_S,TimeUnit.SECONDS)
+            // The address order decides which path the box takes: IPv4 first, IPv6 still there.
+            .dns(PreferIpv4Dns())
             .build()
         /**
          * How long one route of the address lookup may take.

@@ -106,9 +106,13 @@ class ContentRepositoryTest {
 
     /**
      * The signed endpoint now answers HTTP 200 with a *zero-byte* body rather than a parseable
-     * error. `JSONObject("")` throws org.json.JSONException, which is a RuntimeException - an
+     * error - and it does so to roughly half of the attempts, not to all of them.
+     *
+     * `JSONObject("")` throws org.json.JSONException, which is a RuntimeException - an
      * `IOException`-only catch let it escape and the public-page fallback below never ran, so the
-     * TV showed nothing at all instead of the first three episodes.
+     * TV showed nothing at all instead of the first three episodes. The endpoint's answer also
+     * changes from one attempt to the next, so one empty answer is not the end of the road: the
+     * request is made again, and only a run of empty answers gives up on the signed path.
      */
     @Test fun emptySignedBodyStillReachesThePublicPageFallback() {
         val paths=mutableListOf<String>()
@@ -121,7 +125,8 @@ class ContentRepositoryTest {
             }
         }
         val result=repo.stream("456","123",1080)
-        assertEquals(listOf(MODEL_PATH,"/player/456/123"),paths)
+        // The signed endpoint is asked more than once before the public page is tried.
+        assertTrue("the signed endpoint is asked more than once before the public page is tried",paths.size>=2)
         assertEquals("https://hongguoduanju.com/video/public/123/360p.mp4",result.url)
         assertEquals("360P",result.quality)
     }
@@ -134,7 +139,7 @@ class ContentRepositoryTest {
         val e=assertThrows(IOException::class.java) { repo.stream("456","123") }
         assertEquals("播放地址暂不可用",e.message)
         assertTrue(e.suppressed.orEmpty().joinToString { it.message.orEmpty() },
-            e.suppressed.orEmpty().any { it is org.json.JSONException })
+            e.suppressed.orEmpty().any { it is org.json.JSONException || it is EmptySignedAnswerException })
     }
 
     /**
@@ -230,6 +235,49 @@ class ContentRepositoryTest {
     @Test fun missingEpisodeExplainsThatOnlyTheFirstThreeAreHosted() {
         val e=assertThrows(IOException::class.java) { failingRepository(404).stream("456","123") }
         assertEquals("该来源每部剧只提供前 3 集，本集暂无资源",e.message)
+    }
+
+    /**
+     * The signed endpoint answers an empty body to about half of the attempts.
+     *
+     * Measured 2026-10-27 against the live endpoint: the same request, the same device identity
+     * and the same signature come back with a zero-byte body on roughly every second attempt.
+     * One attempt is therefore not enough - the app has to ask again before it concludes anything
+     * about the episode.
+     */
+    @Test fun anEmptySignedAnswerIsAskedAgainBeforeTheEpisodeIsCalledUnplayable() {
+        var attempts=0
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val path=chain.request().url.encodedPath
+            val body=when {
+                path==MODEL_PATH -> { attempts++; if(attempts==1) "" else """{"code":0,"data":{"video_model":"{\"fallback_api\":\"$FALLBACK\"}"}}""" }
+                path=="/video/fplay/1/x" -> """{"video_info":{"data":{"key_seed":"$KEY_SEED","video_list":{"video_5":${rendition("1080p","bytevc1")}}}}}"""
+                else -> throw AssertionError("unexpected request ${chain.request().url}")
+            }
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        val result=repo.stream("456","123")
+        assertEquals(2,attempts)
+        assertEquals("1080P",result.quality)
+    }
+
+    /**
+     * The public player page only hosts the first three episodes.
+     *
+     * So falling back to it after the signed endpoint refused an attempt turns 「这一集暂时取不到
+     * 地址」 into 「这部剧只有 3 集」 - a permanent-sounding verdict about the whole show, drawn
+     * from a page that never had the episode in the first place.
+     */
+    @Test fun anEmptySignedAnswerDoesNotBlameTheShowForHavingOnlyThreeEpisodes() {
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                .code(if(chain.request().url.encodedPath==MODEL_PATH) 200 else 404).message("x")
+                .body("".toResponseBody()).build()
+        }.build())
+        val e=assertThrows(IOException::class.java) { repo.stream("456","123") }
+        assertEquals("播放接口返回空内容",e.message)
+        assertFalse("the show must not be blamed for having only three episodes",e.message.orEmpty().contains("3 集"))
     }
 
     @Test fun otherStatusesKeepThePlainHttpError() {

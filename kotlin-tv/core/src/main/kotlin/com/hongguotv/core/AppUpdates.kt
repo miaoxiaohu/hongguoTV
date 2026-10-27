@@ -73,7 +73,7 @@ object UpdateFiles {
 
 class AppUpdateRepository : java.io.Closeable {
     private val http = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
-        .callTimeout(5, TimeUnit.MINUTES).addNetworkInterceptor { chain ->
+        .callTimeout(5, TimeUnit.MINUTES).dns(PreferIpv4Dns()).addNetworkInterceptor { chain ->
             val url = chain.request().url
             // Follow GitHub's CDN redirects, never cleartext or arbitrary manifest-provided hosts.
             if (url.scheme != "https" || url.host !in setOf("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"))
