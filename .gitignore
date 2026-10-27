@@ -47,6 +47,10 @@ keystore.properties
 /probe/
 /upstream/
 
+# 本机的临时测量脚本和抓取结果：一次性排查用，不是源码
+/.tmp-*
+/.workbuddy/
+
 # 测量脚本的产物：每次跑都重新生成，不是源码
 /search-ceiling.json
 /kotlin-tv/core/probe-report.txt
