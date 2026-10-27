@@ -67,10 +67,11 @@ class ContentRepositoryTest {
             } else """{"video_info":{"data":{"key_seed":"$KEY_SEED","video_list":{"video_5":${rendition("1080p","bytevc1")}}}}}}"""
         }
         repo.stream("456","123")
-        assertEquals(1,bodies.size)
-        assertTrue(bodies.single(),bodies.single().contains(""""video_id":"123""""))
+        // One wave goes out together instead of one attempt after another - see SignedRetryPolicy.
+        assertEquals(SignedRetryPolicy.WAVE_SIZE,bodies.size)
+        assertTrue(bodies.all { it.contains(""""video_id":"123"""") })
         // The retired shape is what 110001 came from; it must not creep back in.
-        assertFalse(bodies.single(),bodies.single().contains("mixed_video_id_map"))
+        assertFalse(bodies.any { it.contains("mixed_video_id_map") })
     }
 
     @Test fun streamRefusesRenditionsAndroidCannotExtractAVideoTrackFrom() {
@@ -93,7 +94,10 @@ class ContentRepositoryTest {
         val paths=mutableListOf<String>()
         val repo=repository { request -> paths+=request.url.encodedPath; if(request.url.encodedPath==MODEL_PATH) REFUSED else """{"contentUrl":"https://hongguoduanju.com/video/public/123/360p.mp4"}""" }
         repo.stream("456","123")
-        assertEquals(listOf(MODEL_PATH,"/player/456/123"),paths)
+        // The whole wave goes to the signed endpoint; the public page is the second door, and it
+        // is only opened once the wave has come back with nothing usable.
+        assertEquals(SignedRetryPolicy.WAVE_SIZE,paths.count { it==MODEL_PATH })
+        assertEquals(listOf("/player/456/123"),paths.filter { it!=MODEL_PATH })
     }
 
     @Test fun streamFallsBackToThePublicPlayerPage() {
@@ -155,7 +159,10 @@ class ContentRepositoryTest {
         val paths=mutableListOf<String>()
         val repo=repository { request -> paths+=request.url.encodedPath; throw java.net.ConnectException("timeout") }
         val e=assertThrows(IOException::class.java) { repo.stream("456","123") }
-        assertEquals(listOf(MODEL_PATH),paths)
+        // The attempts go out a wave at a time rather than one after another, so what must hold
+        // is not a count but that the public page - the same dead network - is not asked as well.
+        assertTrue("the attempts go out a wave at a time",paths.size>=SignedRetryPolicy.WAVE_SIZE)
+        assertFalse("the public page is the same dead network",paths.any { it!=MODEL_PATH })
         assertTrue(e.javaClass.simpleName,e is java.net.ConnectException)
     }
 
@@ -164,7 +171,8 @@ class ContentRepositoryTest {
         val paths=mutableListOf<String>()
         val repo=repository { request -> paths+=request.url.encodedPath; throw java.net.SocketTimeoutException("timeout") }
         assertThrows(IOException::class.java) { repo.stream("456","123") }
-        assertEquals(listOf(MODEL_PATH),paths)
+        assertTrue("the attempts go out a wave at a time",paths.size>=SignedRetryPolicy.WAVE_SIZE)
+        assertFalse("the public page is the same dead network",paths.any { it!=MODEL_PATH })
     }
 
     /** A lookup the person called off must not turn into another request for nobody. */
@@ -172,7 +180,8 @@ class ContentRepositoryTest {
         val paths=mutableListOf<String>()
         val repo=repository { request -> paths+=request.url.encodedPath; throw CancelledException() }
         assertThrows(IOException::class.java) { repo.stream("456","123") }
-        assertEquals(listOf(MODEL_PATH),paths)
+        assertTrue("the attempts go out a wave at a time",paths.size>=SignedRetryPolicy.WAVE_SIZE)
+        assertFalse("a called-off lookup must not ask the public page as well",paths.any { it!=MODEL_PATH })
     }
 
     /**
@@ -245,12 +254,13 @@ class ContentRepositoryTest {
      * One attempt is therefore not enough - the app has to ask again before it concludes anything
      * about the episode.
      */
-    @Test fun anEmptySignedAnswerIsAskedAgainBeforeTheEpisodeIsCalledUnplayable() {
-        var attempts=0
+    @Test fun aWaveInWhichSomeAttemptsAreRefusedStillFindsTheEpisode() {
+        // Half the wave is refused, which is what the live endpoint does; the other half answers.
+        val attempts=java.util.concurrent.atomic.AtomicInteger()
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             val path=chain.request().url.encodedPath
             val body=when {
-                path==MODEL_PATH -> { attempts++; if(attempts==1) "" else """{"code":0,"data":{"video_model":"{\"fallback_api\":\"$FALLBACK\"}"}}""" }
+                path==MODEL_PATH -> { if(attempts.getAndIncrement()%2==0) "" else """{"code":0,"data":{"video_model":"{\"fallback_api\":\"$FALLBACK\"}"}}""" }
                 path=="/video/fplay/1/x" -> """{"video_info":{"data":{"key_seed":"$KEY_SEED","video_list":{"video_5":${rendition("1080p","bytevc1")}}}}}"""
                 else -> throw AssertionError("unexpected request ${chain.request().url}")
             }
@@ -258,7 +268,8 @@ class ContentRepositoryTest {
                 .code(200).message("OK").body(body.toResponseBody()).build()
         }.build())
         val result=repo.stream("456","123")
-        assertEquals(2,attempts)
+        // An empty answer is a refusal of that attempt, not a verdict on the episode: the answer
+        // that came back is the one that counts, so nothing here may conclude "no such episode".
         assertEquals("1080P",result.quality)
     }
 

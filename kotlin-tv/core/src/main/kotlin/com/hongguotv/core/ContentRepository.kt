@@ -659,24 +659,81 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         // and replaying one generated pair turns later answers back into empty bodies as well -
         // which is why [VendorConstants.newDevice] is called per attempt and not per episode.
         //
-        // The loop is bounded twice: by the number of attempts and by a wall-clock budget. The
+        // The attempts run at the same time rather than one after the other. The endpoint
+        // refuses an attempt with an empty body about seven times in eight, and that rate does
+        // not move with the request rate, the identity, the connection or the server address -
+        // so asking again is the only thing that helps, and asking a dozen times at once costs
+        // one round trip where asking six times in series cost six. See [SignedRetryPolicy].
+        //
+        // The loop is bounded twice: by the number of waves and by a wall-clock budget. The
         // budget matters because each attempt carries the address lookup's own ten-second call
-        // timeout, so six attempts against a server that hangs would cost a minute of silence -
-        // far longer than the person watching the screen is willing to wait for an episode.
-        val deadline=System.currentTimeMillis()+SIGNED_ATTEMPT_BUDGET_MS
+        // timeout, so waves against a server that hangs would cost a minute of silence - far
+        // longer than the person watching the screen is willing to wait for an episode.
+        val started=System.currentTimeMillis()
         var refusal: Exception?=null
-        for(attempt in 0 until SIGNED_ATTEMPTS) {
-            if(attempt>0 && System.currentTimeMillis()>=deadline) break
-            val signed=signer.sign(VIDEO_MODEL_API,VendorConstants.newDevice(),payload)
-            val body=text(signed.url,signed,addressHttp)
-            // An empty body is a refusal of this attempt, not a verdict on the episode - see
-            // [EmptySignedAnswerException]. Asking again is the one thing that helps.
-            if(body.isBlank()) { refusal=EmptySignedAnswerException(); continue }
-            // A body that is not JSON is the same refusal wearing a different hat.
-            try { return parseSignedStream(body,maxQuality) }
-            catch(e: JSONException) { refusal=e }
+        for(wave in 0 until SignedRetryPolicy.WAVES) {
+            if(!SignedRetryPolicy.waveAllowed(wave,System.currentTimeMillis()-started)) break
+            val answers=signedWave(payload)
+            val usable=answers.filter { it.body.isNotBlank() }
+            if(usable.isEmpty()) {
+                // Nothing came back with a body. Whether the fallback is worth making depends on
+                // which of the two that is: the endpoint answering with an empty body is a
+                // refusal (ask the public page), while every attempt dying of the network is a
+                // dead network (the public page is the same dead network).
+                refusal=if(answers.any { it.failure==null }) EmptySignedAnswerException()
+                    else answers.firstNotNullOfOrNull { it.failure } ?: EmptySignedAnswerException()
+                continue
+            }
+            for(answer in usable) {
+                // An empty body is a refusal of that attempt, not a verdict on the episode - see
+                // [EmptySignedAnswerException]. A body that is not JSON is the same refusal
+                // wearing a different hat, and the next answer in the wave may be a good one.
+                try { return parseSignedStream(answer.body,maxQuality) }
+                catch(e: JSONException) { refusal=e }
+            }
         }
         throw refusal ?: EmptySignedAnswerException()
+    }
+    /**
+     * One answer from the signed endpoint.
+     *
+     * A body that came back is kept even when it cannot be parsed: the next answer in the wave
+     * may be a good one. A failure is kept as well, so that a wave that died of the network
+     * says so instead of looking like a refusal.
+     */
+    private class SignedAnswer(val body: String, val failure: Exception?)
+    /**
+     * Asks the signed endpoint once per identity, all at the same time.
+     *
+     * The scope that owns the lookup travels with the requests: [RequestScope] is a thread
+     * local, so a request that ran on another thread without it could no longer be cancelled
+     * when the person walks away from the episode.
+     */
+    private fun signedWave(payload: ByteArray): List<SignedAnswer> {
+        val owner=RequestScope.owner()
+        val ask={
+            val signed=signer.sign(VIDEO_MODEL_API,VendorConstants.newDevice(),payload)
+            val body=text(signed.url,signed,addressHttp)
+            SignedAnswer(body,null)
+        }
+        val pool=http.dispatcher.executorService
+        val tasks=mutableListOf<java.util.concurrent.Future<SignedAnswer>>()
+        for(index in 0 until SignedRetryPolicy.WAVE_SIZE) {
+            val task=try {
+                pool.submit(java.util.concurrent.Callable {
+                    try { if(owner==null) ask() else owner.run { ask() } }
+                    catch(e: Exception) { SignedAnswer("",e) }
+                })
+            } catch(rejected: java.util.concurrent.RejectedExecutionException) {
+                // The transport is shutting down. One serial attempt is better than none.
+                return listOf(try { ask() } catch(e: Exception) { SignedAnswer("",e) })
+            }
+            tasks+=task
+        }
+        return tasks.map { task ->
+            try { task.get() }
+            catch(e: Exception) { SignedAnswer("",e) }
+        }
     }
     /**
      * Reads the playable rendition out of a signed answer.
@@ -723,28 +780,6 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         return StreamInfo(url,null,quality)
     }
     companion object {
-        /**
-         * How many times one episode asks the signed endpoint before giving up on it.
-         *
-         * The endpoint answers about half of the attempts with an empty body (see
-         * [EmptySignedAnswerException]), and the refusals come in bursts rather than
-         * independently - a run of consecutive attempts can all be refused. Measured 2026-10-27:
-         * a successful episode needed 1.75 attempts on average and the worst one needed six, so
-         * six attempts leave an episode unresolved only about one time in fifty. Every attempt
-         * costs a fraction of a second, while the fallback it protects costs a full request of
-         * its own and can only offer the first three episodes at 360p.
-         */
-        const val SIGNED_ATTEMPTS = 6
-        /**
-         * How long the retries of one episode may take together.
-         *
-         * The budget is what keeps the retry loop from turning a slow server into a long silence:
-         * each attempt has the address lookup's own ten-second call timeout, so the attempts have
-         * to be cut off by the clock as well as by their number. Four seconds is long enough for
-         * the six attempts to happen - they take about a second each in practice - and short
-         * enough that the person is still waiting on an episode rather than on a network.
-         */
-        const val SIGNED_ATTEMPT_BUDGET_MS = 4000L
         /** The only signed player endpoint that still answers; see [stream]. */
         const val VIDEO_MODEL_API = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/video_model/v1/"
         /** How long a connection to the site or the CDN may take. */

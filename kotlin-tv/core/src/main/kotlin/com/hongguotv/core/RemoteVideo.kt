@@ -110,6 +110,9 @@ class RemoteVideo(private val http: OkHttpClient, val info: StreamInfo): Closeab
         val size=total
         if(start>=size) return byteArrayOf()
         val cached=prefix; val end=minOf(size,start+length)
+        // 预热的那一段读完了就让它可回收：整集都挂在它上面，而播放器不会回头再读 —— 回头那
+        // 一下是跳转，那时候重新取一次，比让这一兆一直占着内存划算。
+        if(start>=cached.size && cached.isNotEmpty()) prefix=ByteArray(0)
         val available=(minOf(end,cached.size.toLong())-start).coerceAtLeast(0).toInt()
         val first=if(available>0) cached.copyOfRange(start.toInt(),start.toInt()+available) else byteArrayOf()
         val raw=if(start+available<end) first+range(start+available,end-1).bytes else first

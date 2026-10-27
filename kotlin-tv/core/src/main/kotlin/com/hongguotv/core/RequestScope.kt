@@ -48,6 +48,16 @@ class RequestScope {
 
     companion object {
         private val current = ThreadLocal<RequestScope>()
+        /**
+         * The scope that owns the calling thread.
+         *
+         * Work that is handed to another thread has to carry the scope with it, or the scope
+         * cannot cancel it any more: [current] is a thread local, and a thread that never set
+         * it has no scope to cancel. The playback address lookup fires a wave of requests at
+         * the same time and runs them on other threads, so it takes the owner here and
+         * re-establishes it on each of them.
+         */
+        fun owner(): RequestScope? = current.get()
         fun <T> execute(call: Call, consume: (Response) -> T): T {
             val owner = current.get()
             owner?.attach(call)

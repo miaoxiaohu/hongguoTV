@@ -60,12 +60,25 @@ class MainActivity: Activity() {
         var scope: RequestScope?=null
         var job: java.util.concurrent.Future<*>?=null
         var watchdog: Runnable?=null
+        /**
+         * 这一份在备哪一集，以及它已经问到的地址。
+         *
+         * 备集真正省下的是取地址那几波并发请求 —— 而用户常常就在这一份还在预热那一兆的时候
+         * 按下播放。那时最不该做的是把它停掉、再从头问一遍地址：地址它已经问到了，取走就是。
+         *
+         * 地址和「它属于哪一集」锁在同一个对象里、换一集就换一个对象，所以取的人不可能拿到
+         * 上一集的地址：备第二集的那份覆盖不了第一集刚问到的地址，只会把它换掉。
+         */
+        @Volatile var resolved: Resolved?=null
         fun cancel() {
             watchdog?.let { main.removeCallbacks(it) }; watchdog=null
             scope?.cancel(); scope=null
             job?.cancel(true); job=null
+            resolved=null
         }
     }
+    /** 一集备到一半的进展：哪一集，以及问到的地址。 */
+    private class Resolved(val key: String) { @Volatile var address: StreamInfo?=null }
     /** 用户马上要看的那一集的备集（首页「接着看」、详情页）。 */
     private val pagePreparation=Preparation()
     /** 本集播着的时候备下一集。 */
@@ -569,6 +582,9 @@ class MainActivity: Activity() {
     }
     private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false,focusInput: Boolean=false) {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
+        // 从详情页回到目录页：用户没按播放，那一兆不该接着拉。翻页、换标签、刷新热门不走这
+        // 条路（那时 screen 已经是 catalog），首页备着的「接着看」那一集因此不会白备。
+        if(screen=="detail") cancelPagePrefetch()
         // 异步加载期间用户可能把焦点挪到 searchRow 里的「搜索/历史/手机输入/续建索引」上。
         // releaseCatalogViews 之后这些 view 引用被清，加载回调里再读 hasFocus() 都是 false。
         // 在清引用前先记一个 anchor，加载完成时 catalogGrid 按它把焦点还原到同位置的 view。
@@ -1430,6 +1446,11 @@ class MainActivity: Activity() {
         // 位置不为零也能用 —— 备好的流从头到尾都在，播放器要从哪里读，它就从哪里读。
         val preparedKey="${data.episodes[selectedIndex]}:${library.maxQuality}"
         val prepared=if(!recovering) (preparedPage.take(preparedKey) ?: preparedNext.take(preparedKey)) else null
+        // 备着的正是这一集、只是还没备完：把它已经问到的地址取走，别再从头问一遍。
+        // 取地址是几波并发请求，那几百毫秒正是备集要替用户省掉的东西；那一兆留给播放器按
+        // 自己的节奏拉 —— 两边同时拉同一集的开头，正是备集本想避免的那种抢带宽。
+        val adopted=if(prepared==null && !recovering) adoptAddress("${data.series.id}:${data.episodes[selectedIndex]}:${library.maxQuality}") else null
+        if(adopted!=null) android.util.Log.i("HongguoTV","Episode address adopted episode=${selectedIndex+1}")
         val prefetched=prepared
         // 画面开始了，页面那份备集就停掉：它再拉那一兆是在跟画面抢带宽。
         pagePreparation.cancel()
@@ -1486,7 +1507,7 @@ class MainActivity: Activity() {
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
         syncMediaSession()
         val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
-        work({ prefetched ?: RemoteVideo(repository.http,repository.stream(data.series.id,requestedId,maxQuality)).prepare() }, { remote ->
+        work({ prefetched ?: RemoteVideo(repository.http,adopted ?: repository.stream(data.series.id,requestedId,maxQuality)).prepare() }, { remote ->
             video=remote; quality=remote.info.quality
             val p=player ?: run {
                 val load=DefaultLoadControl.Builder().setBufferDurationsMs(15000,30000,1000,2000).setTargetBufferBytes(12*1024*1024).build()
@@ -1542,6 +1563,26 @@ class MainActivity: Activity() {
         nextPreparation.cancel()
         preparedNext.clear()
     }
+    /**
+     * 停掉页面那份备集。
+     *
+     * 它只在「用户马上要按播放」的时候才有意义：人已经从详情页走开、或者应用已经退到后台，
+     * 那一兆就是在跟目录页和封面图抢带宽，而真正按下播放时它多半已经被槽判成过期了。
+     */
+    private fun cancelPagePrefetch() { pagePreparation.cancel() }
+    /**
+     * 取走正在备着的那一集的地址。
+     *
+     * 备着的那一份正好是用户刚按下的这一集时才有的取：地址它已经问到了，取走就不用再问一遍；
+     * 不是这一集就什么也没有 —— 别把上一集的地址当成这一集的。
+     */
+    private fun adoptAddress(key: String): StreamInfo? {
+        val fromPage=pagePreparation.resolved
+        if(fromPage!=null && fromPage.key==key) return fromPage.address
+        val fromNext=nextPreparation.resolved
+        if(fromNext!=null && fromNext.key==key) return fromNext.address
+        return null
+    }
     private fun maybePrefetch() {
         val p=player ?: return; val data=detail ?: return
         if(!foreground || !p.isPlaying || !library.autoNext || playError || sleepStopped || episodeIndex>=data.episodes.lastIndex) return
@@ -1572,6 +1613,9 @@ class MainActivity: Activity() {
         // 同一件事只备一集：已经在备的那份停掉，用户马上要按的这一集更重要。
         preparation.cancel()
         val scope=RequestScope(); preparation.scope=scope
+        // 地址一到手就挂出去：这一份还没预热完，用户也可能已经按了播放，那时取走地址就够了。
+        val resolved=Resolved("$seriesId:$id:$quality"); preparation.resolved=resolved
+        val started=android.os.SystemClock.elapsedRealtime()
         val ticket=slot.begin(key)
         // 准备有自己的期限。不能拿客户端的超时来当这个期限 —— 那套超时之后要陪着整集播放。
         val watchdog=Runnable {
@@ -1585,15 +1629,17 @@ class MainActivity: Activity() {
         preparation.job=worker.submit {
             var remote: RemoteVideo?=null
             try {
-                val prepared=scope.run {
-                    // 地址和首包都走仓库那个客户端：它的连接池是热的，握手不用重来一遍。
-                    // 每集另起一个客户端，看着干净，实则每集都要重新握手一次 CDN。
-                    val info=repository.stream(seriesId,id,quality)
-                    RemoteVideo(repository.http,info).also { remote=it; it.warm() }
-                }
-                if(slot.complete(ticket,key,prepared)) android.util.Log.i("HongguoTV","Episode prepared")
-                else remote?.close()
-            } catch(_: Exception) { remote?.close() }
+                val info=scope.run { repository.stream(seriesId,id,quality) }
+                resolved.address=info
+                // 首包和预热都走仓库那个客户端：它的连接池是热的，握手不用重来一遍。
+                // 每集另起一个客户端，看着干净，实则每集都要重新握手一次 CDN。
+                val prepared=scope.run { RemoteVideo(repository.http,info).also { remote=it; it.warm() } }
+                if(slot.complete(ticket,key,prepared)) android.util.Log.i("HongguoTV","Episode prepared key=$key elapsedMs=${android.os.SystemClock.elapsedRealtime()-started}")
+                else { remote?.close(); android.util.Log.i("HongguoTV","Episode preparation dropped key=$key elapsedMs=${android.os.SystemClock.elapsedRealtime()-started}") }
+            } catch(e: Exception) {
+                remote?.close()
+                if(e !is CancelledException) android.util.Log.i("HongguoTV","Episode preparation failed key=$key elapsedMs=${android.os.SystemClock.elapsedRealtime()-started} ${e.javaClass.simpleName}")
+            }
             finally {
                 main.removeCallbacks(watchdog)
                 if(preparation.watchdog===watchdog) preparation.watchdog=null
@@ -1985,7 +2031,7 @@ class MainActivity: Activity() {
     }
     override fun onPause() {
         updater.pause()
-        foreground=false; main.removeCallbacks(tick); cancelRecovery(); cancelPrefetch(); mediaSession.deactivate()
+        foreground=false; main.removeCallbacks(tick); cancelRecovery(); cancelPrefetch(); cancelPagePrefetch(); mediaSession.deactivate()
         sleepTimer.cancel(); favoriteMonitor.stop(); detailAutoplay=false; requestedAutoplay=false; pausedForLifecycle=true
         player?.pause(); saveProgress(); library.flush(); super.onPause()
     }
@@ -1997,7 +2043,8 @@ class MainActivity: Activity() {
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         if(::artwork.isInitialized) artwork.trimMemory(level)
-        if(level>=android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) cancelPrefetch()
+        // 内存吃紧：备着的那两集是猜的，画面和目录页是真的，先放掉猜的那一两兆。
+        if(level>=android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) { cancelPrefetch(); cancelPagePrefetch(); preparedPage.clear() }
     }
     override fun onDestroy() {
         generation++; cancelWork()
@@ -2005,7 +2052,7 @@ class MainActivity: Activity() {
         favoriteMonitor.destroy(); tvTools.destroy(); updater.destroy(); saveProgress(); releasePlayer(); library.close()
         // 备着的那两集放掉：活动没了，它们也没人要了。
         pagePreparation.cancel(); nextPreparation.cancel()
-        preparedPage.clear()
+        preparedPage.clear(); preparedNext.clear()
         artwork.close(); releaseCatalogViews(); mediaSession.release(); main.removeCallbacksAndMessages(null)
         io.shutdownNow(); prefetchWorker.shutdownNow(); pageWorker.shutdownNow()
         danmakuSession.close()
