@@ -1,6 +1,6 @@
 # Kotlin 独立 APK · 0.2.1
 
-> **本文是 0.2.1 当时的交付记录，保留作为历史。** 当前版本与现状见 [README.md](README.md)；各版本的变更说明也在那里。
+> **本文是 0.2.1 当时的交付记录，保留作为历史。** 当前版本与现状见 [README.md](README.md)；各版本的变更说明见 [CHANGELOG.md](CHANGELOG.md)。
 
 本分支把电视应用重构为 Kotlin 原生应用，内容接入和分段媒体处理均在 APK 内完成。安装后联网即可使用，不再要求用户部署内容服务。原 React Native 工程和 Docker 服务保留在仓库中，原生版不依赖它们。
 
@@ -16,12 +16,12 @@
 - 发布证书 SHA-256：`3579f7a8a91bbbc44688db60fb16a5561921784af23fa92f39b849086d76ca98`
 
 > **注：以上是 0.2.1 当时的发布证书，现已不再使用。**
-> 实测 kotlin-v0.9.9 的签名证书为
+> 当前发布证书（0.9.64 起到 0.9.69 都在用）为
 > `4f4cf502b9ea2b2cccada54ab62031de1ef4dc9aecdf3addbcf4099dd853cf08`
-> （自签，CN=HongguoTV Local Build）。
-> 因此本文件记录的旧证书**不能用于覆盖安装当前版本**，而
-> `distribution/publish-tv-update.py:13` 的签名断言仍指向这个已停用的旧值，
-> 恢复自动发布前必须先改过来。
+> （自签，CN=HongguoTV Local Build），已用 `apksigner verify --print-certs` 在 0.9.69 的
+> 发布包上核对过。所以本文件记录的旧证书**不能用于覆盖安装当前版本**。
+> 当前证书的断言在 `scripts/publish-tv-update.py` 的 `RELEASE_CERT`，每次发布都会校验，
+> 不用手工维护；换发布证书时才需要一起改它。**换证书会让老用户无法就地升级，只能卸载重装。**
 
 ## 0.2.1 修复
 
