@@ -40,6 +40,7 @@
 ## 发布状态
 
 - **发布由 CI 完成**：tag 一推，CI 就会按本文件出包发布（版本号、签名证书、附件完整性都由 CI 校验）。本文件就是发布页正文，电视更新弹窗的短说明出自 `<!-- notes -->` 块。
+- **已发布**：2026-10-27 推 tag `kotlin-v0.9.69`，CI 的测试、lint 与签名校验全绿，发布页为 https://github.com/miaoxiaohu/hongguoTV/releases/tag/kotlin-v0.9.69 ，附件含签名 APK、源码包、`SHA256SUMS` 与 `update.json`。
 - **发布前电视已经是 0.9.69**：包是本地构建后直接用 `scripts/push-to-tv.ps1` 推到电视上的；按 tag 发布时 CI 会用同一套签名重出一份同样的包。
 - 复现发布构建时设置 `HONGGUOTV_VERSION_CODE=9069` 和 `HONGGUOTV_VERSION_NAME=0.9.69`，并使用同一发布证书。
 - 上一版的记录见 [0.9.68 发布说明](RELEASE_0.9.68.md)。
