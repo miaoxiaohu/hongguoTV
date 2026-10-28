@@ -52,6 +52,7 @@
 
 ## 发布状态
 
+- **已发布**：2026-10-28 按 tag `kotlin-v0.9.70` 由 CI 出包，CI 的测试、release lint 与签名校验全绿。发布页 <https://github.com/miaoxiaohu/hongguoTV/releases/tag/kotlin-v0.9.70>，附件 `hongguotv-kotlin-0.9.70-android8.apk`（2 725 502 B）、`update.json`（versionCode 9070）、`SHA256SUMS`、源码包。线上 `update.json` 的 `sourceCommit` 为 `1b4a6df`。
 - **发布由 CI 完成**：tag 一推，CI 就会按本文件出包发布（版本号、签名证书、附件完整性都由 CI 校验）。本文件就是发布页正文，电视更新弹窗的短说明出自 `<!-- notes -->` 块。
 - 复现发布构建时设置 `HONGGUOTV_VERSION_CODE=9070` 和 `HONGGUOTV_VERSION_NAME=0.9.70`，并使用同一发布证书。
 - 完整背景与排查过程见 [站方取址接口实测](../docs/research/2026-10-28-hongguo-playback-endpoint.md)。
