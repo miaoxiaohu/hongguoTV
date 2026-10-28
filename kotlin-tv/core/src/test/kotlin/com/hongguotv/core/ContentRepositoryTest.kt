@@ -21,8 +21,59 @@ class ContentRepositoryTest {
     private val SPADE_A = "krwc9VC5HcNjvy31ZLgsxma9HPRNjAbxV74b8Ve7KvRguCihoQ=="
     private val MAIN_URL = "qAABAPdNq0KM5TsIOWwt0Jv4s3l5HGqIhhtwB4AtzaAtPvdhR+ZSyjNbUuS61n6oqlcrcHe//qEIZ8P2tPlRsTuuaOgt1NTU/m9L+qJ2R7Bt5dbJ5Q9kRSJlwODf7Ri3QEGJx9B5JZirp+5HLWx+OkxNMSwoLrcSyBPGD6/GP7SgEtolefySfVfmhJMa7zOfXUOmmSctTz2QoESQLblos5WrvONT6JvxGyH+dlHDTrO3vgtGAHxxu/Y+F3tJpi3ihBhM0cd+XzRvk4YJAE4BzgObWi/jSnVQTlT9BQB3DW9kIujrbz9+x4VOUG2Syj0NTtbYP9obhRMavrzBNwY9IoZJrBHBUxQccYPGNc03D4nv4A4LNViNVKUd+T4XEK97XUhWG/HPTNHooboMfT2e1H5s0XNW6w24ZyLOgBzJQfPkusfmiqSIlqGVuXSP69lTiQ28SWoc0KSScZL86/RxqCWIbmpXdI/EB3YvBy+WdWO/pY76pto8Y/OzkB+CFevCZqP8pTBzqRR37AYDob/BLeYIpyZwc8OsxVObvOpuTXXr0zKioDstY84EPH9nU/j/+2qfpUrem5fq0xrtUv2p5zihPNYOKBk3JL/4u5VHUgXLzsIaH6iaFDbmcLghx3mfImOFJJOhQ6OuS90B/RXmgZstXhu1zOeZDROQj9mJ0RWJzYd5ugxqSWxgH4/wgTJh8Fe6aIKtOcvPQLZxfSND/KxHm9rRIVE0eczb9nT8qpCz06U6UGGPQiPFe1c4R+WsaqnbZF6yC4ri913PdcDOKfd/ZDH1Oe2NLNQHCFcIG0zc3UFi31vURjjH68VIa0q7YdFMRzh2yu+OnTPA52Yco/2B5hLxel6/bjQLhqpQ3YJAzT3CisTXx1IEb6gVBkmMAB8gwzY7bAaTQH6g7vEkkbwnGZJBlFSGEgUQwEF1q22rvIZLdM6iMwGXR1GgVas0a5Fi3g=="
     private val PLAIN_HOST = "https://v26-reading-videocdn302.qznovelvod.com"
+    /**
+     * The address as the registered path hands it over.
+     *
+     * The registered path answers with the address in the clear - there is no key seed to
+     * decrypt it with - while the older shape encrypted the address and carried the seed
+     * beside it.
+     */
+    private val PLAIN_URL = "$PLAIN_HOST/ff3c66a1/video.mp4?mime_type=video_mp4&dr=0"
     private val FALLBACK = "https://vas-lf-x.snssdk.com/video/fplay/1/x"
     private val MODEL_PATH = "/novel/player/video_model/v1/"
+
+    /** The endpoint that answers today: a registered identity and no signature. */
+    private val PLAYBACK_PATH = "/novel/player/multi_video_model/v1/"
+    /** The registration the playback identity comes from. */
+    private val REGISTER_PATH = "/service/2/device_register/"
+    /** The public player page, the last of the three doors. */
+    private val PUBLIC_PATH = "/player/456/123"
+
+    /**
+     * What the registration answers.
+     *
+     * The live answer carries no status field at all - it is the identity itself, with a server
+     * time and a device token beside it. A fixture that dressed the answer up with a `code` made
+     * the test suite agree with a shape the server never sends, and the missing field was then
+     * read as a refusal: every registration that had succeeded was thrown away, and the app fell
+     * back to the signed endpoint and to the public page. The fixture therefore looks like the
+     * answer that arrives.
+     */
+    private val REGISTERED =
+        """{"server_time":1793148714,"device_id":3313301318833834,"install_id":3313301318833834,"new_user":1,""" +
+            """"device_id_str":"3313301318833834","install_id_str":"3313301318833834","device_token":"AAAA"}"""
+
+    /** The registration as a refusal looks: the answer says so and carries no identity. */
+    private val REGISTER_REFUSED = """{"code":110001,"message":"未知异常"}"""
+
+    /**
+     * The playback answer as the endpoint gives it: the model hangs under the episode that was
+     * asked for, and the renditions are inline in it.
+     */
+    private fun playbackAnswer(videoList: String) =
+        """{"code":0,"data":{"123":{"video_model":"${videoList.replace("\"","\\\"")}"}}}"""
+
+    /** One rendition as the endpoint describes it: the codec and the size live in the meta. */
+    private fun inlineRendition(definition: String, codec: String, url: String = PLAIN_URL, spade: String = SPADE_A) =
+        JSONObject().put("main_url",url)
+            .put("video_meta",JSONObject().put("definition",definition).put("vheight",definition.trimEnd('p').toInt()).put("codec_type",codec))
+            .put("encrypt_info",JSONObject().put("encrypt",true).put("spade_a",spade))
+
+    /** The playback answer with the renditions inline, the way the endpoint sends it today. */
+    private fun inlinePlaybackAnswer(vararg renditions: JSONObject) =
+        JSONObject().put("code",0)
+            .put("data",JSONObject().put("123",JSONObject().put("video_model",
+                JSONObject().put("video_list",JSONArray().apply { renditions.forEach { put(it) } }).toString())))
 
     private fun hex(s: String) = ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
 
@@ -42,7 +93,7 @@ class ContentRepositoryTest {
     private fun playerRepository(page: String) = repository { request ->
         when (request.url.encodedPath) {
             MODEL_PATH -> REFUSED
-            "/player/456/123" -> page
+            PUBLIC_PATH -> page
             else -> throw AssertionError("unexpected request ${request.url}")
         }
     }
@@ -59,7 +110,9 @@ class ContentRepositoryTest {
     }
 
     @Test fun streamAsksTheEndpointThatStillAnswersForATopLevelVideoId() {
-        val bodies=mutableListOf<String>()
+        // The wave fires a dozen attempts at the same time, so the bodies are collected in a
+        // thread-safe queue: an ordinary list loses entries when twelve threads append to it.
+        val bodies=java.util.concurrent.ConcurrentLinkedQueue<String>()
         val repo=repository { request ->
             if(request.url.encodedPath==MODEL_PATH) {
                 bodies+=Buffer().also { request.body?.writeTo(it) }.readUtf8()
@@ -80,7 +133,13 @@ class ContentRepositoryTest {
         val info="""{"video_info":{"data":{"key_seed":"$KEY_SEED","video_list":$list}}}"""
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             val request=chain.request(); val path=request.url.encodedPath
-            val payload=if(path==MODEL_PATH) model else if(path=="/video/fplay/1/x") info else ""
+            val payload=when {
+                path==REGISTER_PATH -> REGISTERED
+                path==PLAYBACK_PATH -> REFUSED
+                path==MODEL_PATH -> model
+                path=="/video/fplay/1/x" -> info
+                else -> ""
+            }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
                 .code(if(payload.isEmpty()) 404 else 200).message("r").body(payload.toResponseBody()).build()
         }.build())
@@ -88,6 +147,202 @@ class ContentRepositoryTest {
         // The signed attempt's own diagnosis is what must reject these, not the public page.
         assertTrue(e.suppressed.orEmpty().joinToString { it.message.orEmpty() },
             e.suppressed.orEmpty().any { it.message.orEmpty().contains("没有电视可播放的清晰度") })
+    }
+
+    /**
+     * The endpoint that answers today is the one that carries a registered identity and no
+     * signature, so it is asked first.
+     *
+     * The signed endpoint is the one that answered until 2026-10-27 and it may answer again, so
+     * it stays as the second door - but it is not the door that is asked first, because asking it
+     * first would spend a whole wave of attempts on an endpoint that answers with an empty body.
+     */
+    @Test fun streamAsksTheRegisteredPlaybackEndpointFirst() {
+        val paths=mutableListOf<String>()
+        val repo=repository(playback=inlinePlaybackAnswer(
+            inlineRendition("1080p","bytevc1")).toString()) { request ->
+            paths+=request.url.encodedPath
+            throw AssertionError("the signed endpoint must not be asked while the registered one answers")
+        }
+        val result=repo.stream("456","123")
+        assertEquals("1080P",result.quality)
+        assertTrue(result.url,result.url.startsWith(PLAIN_HOST))
+        // The signed endpoint was never touched, and neither was the public page.
+        assertTrue(paths.toString(),paths.none { it==MODEL_PATH || it==PUBLIC_PATH })
+    }
+
+    /**
+     * The playback request carries the identity the platform registered.
+     *
+     * A made-up identity is refused with an empty body - that is the whole reason the
+     * registration exists - so the request has to carry the two numbers the registration
+     * answered with, and it must not carry a signature: the endpoint tells a signed request
+     * apart from an unsigned one and refuses the signed one.
+     */
+    @Test fun thePlaybackRequestCarriesTheRegisteredIdentityAndNoSignature() {
+        val queries=mutableListOf<String>()
+        val headers=mutableListOf<String>()
+        val repo=repository(playback=inlinePlaybackAnswer(inlineRendition("1080p","bytevc1")).toString()) { request ->
+            throw AssertionError("unexpected request ${request.url}")
+        }
+        // The interceptor records the query and the headers of the playback request.
+        val recording=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request()
+            if(request.url.encodedPath==PLAYBACK_PATH) {
+                queries+=request.url.query.orEmpty()
+                headers+=request.headers.names().joinToString(",")
+            }
+            val body=when(request.url.encodedPath) {
+                REGISTER_PATH -> REGISTERED
+                PLAYBACK_PATH -> inlinePlaybackAnswer(inlineRendition("1080p","bytevc1")).toString()
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        recording.stream("456","123")
+        assertEquals(1,queries.size)
+        assertTrue(queries.first(),queries.first().contains("device_id=3313301318833834"))
+        assertTrue(queries.first(),queries.first().contains("iid=3313301318833834"))
+        // No signature: the endpoint refuses a request that carries one.
+        assertFalse(headers.first(),headers.first().contains("X-Argus",ignoreCase=true))
+        assertFalse(headers.first(),headers.first().contains("X-SS-STUB",ignoreCase=true))
+    }
+
+    /** The screen resolution is part of the query, so it has to be encoded the way the app does. */
+    @Test fun thePlaybackQueryEncodesTheScreenResolutionLikeTheAppDoes() {
+        assertEquals("1280%2A2772",ContentRepository.playbackEncode("1280*2772"))
+        assertEquals("wifi",ContentRepository.playbackEncode("wifi"))
+        assertEquals("%E4%B8%AD%E6%96%87",ContentRepository.playbackEncode("中文"))
+    }
+
+    /**
+     * The playback endpoint answers with the renditions inline, so no second address is fetched.
+     *
+     * The older shape pointed at a second address that had to be asked for; the answer that comes
+     * today carries the addresses itself, and asking for a second one would be a request that
+     * answers nothing.
+     */
+    @Test fun theInlineRenditionsArePlayedWithoutASecondAddress() {
+        val paths=mutableListOf<String>()
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            paths+=path
+            val body=when(path) {
+                REGISTER_PATH -> REGISTERED
+                PLAYBACK_PATH -> inlinePlaybackAnswer(
+                    inlineRendition("360p","bytevc1"),
+                    inlineRendition("1080p","bytevc1")).toString()
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        val result=repo.stream("456","123")
+        assertEquals("1080P",result.quality)
+        // Only the registration and the playback request went out.
+        assertEquals(listOf(REGISTER_PATH,PLAYBACK_PATH),paths)
+    }
+
+    /** The device is registered once, not once per episode. */
+    @Test fun theDeviceIsRegisteredOnlyOnceForTheWholeRepository() {
+        val registrations=java.util.concurrent.atomic.AtomicInteger()
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            val body=when(path) {
+                REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
+                PLAYBACK_PATH -> inlinePlaybackAnswer(inlineRendition("1080p","bytevc1")).toString()
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        repo.stream("456","123")
+        repo.stream("456","123")
+        assertEquals("the device is registered once and then reused",1,registrations.get())
+    }
+
+    /**
+     * A registration that failed is not retried on every attempt.
+     *
+     * The person turning the set on must not pay for a registration attempt on every episode,
+     * so a failed registration is remembered for a minute - and only as an attempt that is not
+     * repeated, not as a verdict.
+     */
+    @Test fun aFailedRegistrationIsNotRetriedWithinTheSameMinute() {
+        var now=1_000_000L
+        val registrations=java.util.concurrent.atomic.AtomicInteger()
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            val body=when(path) {
+                REGISTER_PATH -> { registrations.incrementAndGet(); throw java.net.ConnectException("timeout") }
+                PLAYBACK_PATH -> REFUSED
+                MODEL_PATH -> ""
+                else -> ""
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build(),{ now })
+        assertThrows(IOException::class.java) { repo.stream("456","123") }
+        assertThrows(IOException::class.java) { repo.stream("456","123") }
+        assertEquals("the registration is not repeated within the minute",1,registrations.get())
+        // A minute later it is tried again.
+        now+=ContentRepository.PLAYBACK_REGISTRATION_RETRY_MS
+        assertThrows(IOException::class.java) { repo.stream("456","123") }
+        assertEquals(2,registrations.get())
+    }
+
+    /**
+     * The registration answer carries no status field, and that is a success.
+     *
+     * The live answer is the identity itself - `server_time`, the two numbers, a device token -
+     * and no `code`. Reading the absent field as a refusal threw away every registration that
+     * had succeeded: the playback request never went out with a registered identity, the signed
+     * endpoint answered with an empty body and the app fell back to the public page, which holds
+     * three episodes at 360p. An answer without a status field is therefore an identity.
+     */
+    @Test fun aRegistrationAnswerWithoutAStatusFieldIsStillAnIdentity() {
+        val queries=mutableListOf<String>()
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            if(path==PLAYBACK_PATH) queries+=request.url.query.orEmpty()
+            val body=when(path) {
+                REGISTER_PATH -> REGISTERED
+                PLAYBACK_PATH -> inlinePlaybackAnswer(inlineRendition("1080p","bytevc1")).toString()
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        val result=repo.stream("456","123")
+        assertEquals("1080P",result.quality)
+        assertEquals("the playback request goes out with the registered identity",1,queries.size)
+        assertTrue(queries.first(),queries.first().contains("device_id=3313301318833834"))
+        assertTrue(queries.first(),queries.first().contains("iid=3313301318833834"))
+    }
+
+    /**
+     * A registration that says it failed is not an identity.
+     *
+     * The other end of the same reading: a status field that is there and says otherwise is a
+     * refusal, and the playback request must not go out with an identity that was never granted.
+     */
+    @Test fun aRegistrationThatIsRefusedIsNotUsedAsAnIdentity() {
+        val paths=mutableListOf<String>()
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            paths+=path
+            val body=when(path) {
+                REGISTER_PATH -> REGISTER_REFUSED
+                PLAYBACK_PATH -> REFUSED
+                MODEL_PATH -> ""
+                else -> ""
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        assertThrows(IOException::class.java) { repo.stream("456","123") }
+        assertTrue(paths.toString(),paths.none { it==PLAYBACK_PATH })
     }
 
     @Test fun streamTriesTheSignedEndpointBeforeFallingBackToThePublicPage() {
@@ -157,31 +412,37 @@ class ContentRepositoryTest {
      */
     @Test fun aDeadNetworkDoesNotAskThePublicPageAsWell() {
         val paths=mutableListOf<String>()
-        val repo=repository { request -> paths+=request.url.encodedPath; throw java.net.ConnectException("timeout") }
+        val repo=repository(register={ throw java.net.ConnectException("timeout") }) { request ->
+            paths+=request.url.encodedPath; throw java.net.ConnectException("timeout")
+        }
         val e=assertThrows(IOException::class.java) { repo.stream("456","123") }
         // The attempts go out a wave at a time rather than one after another, so what must hold
         // is not a count but that the public page - the same dead network - is not asked as well.
         assertTrue("the attempts go out a wave at a time",paths.size>=SignedRetryPolicy.WAVE_SIZE)
-        assertFalse("the public page is the same dead network",paths.any { it!=MODEL_PATH })
+        assertFalse("the public page is the same dead network",paths.any { it==PUBLIC_PATH })
         assertTrue(e.javaClass.simpleName,e is java.net.ConnectException)
     }
 
     /** A dropped handshake is the case that used to sit there for the whole connect timeout. */
     @Test fun aDroppedHandshakeDoesNotAskThePublicPageAsWell() {
         val paths=mutableListOf<String>()
-        val repo=repository { request -> paths+=request.url.encodedPath; throw java.net.SocketTimeoutException("timeout") }
+        val repo=repository(register={ throw java.net.SocketTimeoutException("timeout") }) { request ->
+            paths+=request.url.encodedPath; throw java.net.SocketTimeoutException("timeout")
+        }
         assertThrows(IOException::class.java) { repo.stream("456","123") }
         assertTrue("the attempts go out a wave at a time",paths.size>=SignedRetryPolicy.WAVE_SIZE)
-        assertFalse("the public page is the same dead network",paths.any { it!=MODEL_PATH })
+        assertFalse("the public page is the same dead network",paths.any { it==PUBLIC_PATH })
     }
 
     /** A lookup the person called off must not turn into another request for nobody. */
     @Test fun aCancelledLookupDoesNotAskThePublicPageAsWell() {
         val paths=mutableListOf<String>()
-        val repo=repository { request -> paths+=request.url.encodedPath; throw CancelledException() }
+        val repo=repository(register={ throw CancelledException() }) { request ->
+            paths+=request.url.encodedPath; throw CancelledException()
+        }
         assertThrows(IOException::class.java) { repo.stream("456","123") }
         assertTrue("the attempts go out a wave at a time",paths.size>=SignedRetryPolicy.WAVE_SIZE)
-        assertFalse("a called-off lookup must not ask the public page as well",paths.any { it!=MODEL_PATH })
+        assertFalse("a called-off lookup must not ask the public page as well",paths.any { it==PUBLIC_PATH })
     }
 
     /**
@@ -260,6 +521,8 @@ class ContentRepositoryTest {
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             val path=chain.request().url.encodedPath
             val body=when {
+                path==REGISTER_PATH -> REGISTERED
+                path==PLAYBACK_PATH -> REFUSED
                 path==MODEL_PATH -> { if(attempts.getAndIncrement()%2==0) "" else """{"code":0,"data":{"video_model":"{\"fallback_api\":\"$FALLBACK\"}"}}""" }
                 path=="/video/fplay/1/x" -> """{"video_info":{"data":{"key_seed":"$KEY_SEED","video_list":{"video_5":${rendition("1080p","bytevc1")}}}}}"""
                 else -> throw AssertionError("unexpected request ${chain.request().url}")
@@ -296,10 +559,29 @@ class ContentRepositoryTest {
         assertEquals("内容请求失败（HTTP 503）",e.message)
     }
 
-    private fun repository(clock: () -> Long = System::currentTimeMillis, respond: (Request) -> String) = ContentRepository(
+    /**
+     * The repository the playback tests drive.
+     *
+     * The two endpoints that came with the registered playback path answer here by default: the
+     * registration hands back an identity, and the playback endpoint refuses - which is what
+     * leaves the signed path and the public page to be tested. A test that wants to exercise the
+     * registered path itself passes its own answer.
+     */
+    private fun repository(
+        clock: () -> Long = System::currentTimeMillis,
+        playback: String = REFUSED,
+        register: (Request) -> String = { REGISTERED },
+        respond: (Request) -> String
+    ) = ContentRepository(
         OkHttpClient.Builder().addInterceptor { chain ->
-            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
-                .code(200).message("OK").body(respond(chain.request()).toResponseBody()).build()
+            val request = chain.request()
+            val body = when (request.url.encodedPath) {
+                REGISTER_PATH -> register(request)
+                PLAYBACK_PATH -> playback
+                else -> respond(request)
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
         }.build(),clock
     )
 

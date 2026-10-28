@@ -190,6 +190,8 @@ npm run build:android
 - [项目状态](docs/PROJECT_STATUS.md)
 - [React Native 与多平台架构](docs/ARCHITECTURE.md)
 - [接口研究](docs/research/2026-09-21-hongguo-open-source.md)
+- [站方搜索接口实测](docs/research/2026-10-23-hongguo-search-api.md)
+- [站方取址接口实测（注册身份 + 无签名）](docs/research/2026-10-28-hongguo-playback-endpoint.md)
 
 ## 来源与许可证
 

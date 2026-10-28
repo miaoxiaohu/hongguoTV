@@ -7,6 +7,12 @@
 - 本仓库对照源：`../server/vendor/hongguo.cjs`，取回于 2026-09-21。
 - 本版改动：完整 Kotlin 实现；签名只选择已验证的 hash branch 0；加密媒体通过 Media3 DataSource 直接读取；增加样本边界检查、子样本处理和 AVC 原始编码恢复。
 
+`core` 中匿名设备注册（`core/src/main/kotlin/com/hongguotv/core/PlaybackDevice.kt`：ttEncrypt 报文体、key 派生盐、device_register 请求头）与无签名播放取址请求的设备参数，是以下 GPL-3.0 源码的 Kotlin 移植：
+
+- tsukiyo-zero/hongguoTV, `DeviceRegister.kt`
+- https://github.com/tsukiyo-zero/hongguoTV
+- 本版改动：改为无状态 `register(http, now)`（不持有进程级单例），由调用方持有身份；注册响应没有状态字段时按成功处理；播放取址的降级顺序为 注册身份 → 旧签名接口 → 公开网页。
+
 `kotlin-tv/` 原生应用源码和派生实现以 GPL-3.0-only 发布，许可证全文见 `LICENSE`。发布 APK 时同时提供本分支对应源码、Gradle 包装器和构建说明。APK 不包含 Node、React Native、JavaScript 引擎或该 JavaScript 源文件。`tools/signing-oracle.cjs` 仅为开发期生成对照测试数据的工具，不参与应用构建或运行。
 
 其他依赖：

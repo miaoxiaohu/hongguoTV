@@ -16,7 +16,7 @@
 - 发布证书 SHA-256：`3579f7a8a91bbbc44688db60fb16a5561921784af23fa92f39b849086d76ca98`
 
 > **注：以上是 0.2.1 当时的发布证书，现已不再使用。**
-> 当前发布证书（0.9.64 起到 0.9.69 都在用）为
+> 当前发布证书（0.9.64 起到 0.9.70 都在用）为
 > `4f4cf502b9ea2b2cccada54ab62031de1ef4dc9aecdf3addbcf4099dd853cf08`
 > （自签，CN=HongguoTV Local Build），已用 `apksigner verify --print-certs` 在 0.9.69 的
 > 发布包上核对过。所以本文件记录的旧证书**不能用于覆盖安装当前版本**。

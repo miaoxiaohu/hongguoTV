@@ -237,6 +237,36 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * with the deadlines an address lookup should have: see [addressHttpClient].
      */
     private val addressHttp=addressHttpClient(http)
+    /**
+     * The registered playback identity, and the moment the last registration attempt failed.
+     *
+     * The identity belongs to this repository rather than to a process-wide singleton: the app
+     * makes one repository for the whole session, so the device is registered once either way,
+     * but a test that makes a repository of its own cannot inherit another test's identity.
+     *
+     * A failed registration is not retried for a minute. It is not remembered as a failure - it
+     * is only not retried - so that a playback attempt does not turn into a registration attempt
+     * every time the person turns the set on.
+     */
+    @Volatile private var registeredIdentity: PlaybackIdentity?=null
+    @Volatile private var registrationFailedAt=0L
+    /**
+     * Registers one anonymous device, or hands back the one this repository already has.
+     *
+     * @throws IOException when the registration cannot be made or does not answer with the two
+     *   numbers the playback request needs.
+     */
+    @Synchronized private fun playbackIdentity(): PlaybackIdentity {
+        registeredIdentity?.let { return it }
+        val now=clock()
+        if(registrationFailedAt>0 && now-registrationFailedAt<PLAYBACK_REGISTRATION_RETRY_MS) {
+            throw IOException("播放设备注册未成功，请稍后重试")
+        }
+        registrationFailedAt=now
+        val identity=PlaybackDevice.register(addressHttp,now)
+        registeredIdentity=identity
+        return identity
+    }
     private fun text(url: String, signed: Signer.Request? = null, client: OkHttpClient = http): String {
         val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
         signed?.headers?.forEach { (k,v) -> request.header(k,v) }
@@ -614,44 +644,163 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
     }
 
     /**
-     * Resolve a playable stream, preferring the signed App endpoint.
+     * Resolve a playable stream, asking the three doors in the order that answers today.
      *
-     * The signed endpoint that still answers is `novel/player/video_model/v1/` with a top-level
-     * `video_id` string. This used to call `multi_video_model/v1/` with a `mixed_video_id_map`
-     * payload; both the path and that parameter shape were retired server-side and now answer
-     * `Code 110001` for every host and payload, which is what stopped the app playing anything.
+     * The first door is the endpoint as it answers now: a registered identity and no signature -
+     * see [registeredStream]. It covers every episode of a show.
      *
-     * The public player page stays as a degraded fallback: it needs no signature and survives the
-     * signed API going away again, but it hosts only the first three episodes at 360p.
+     * The second is the signed endpoint `novel/player/video_model/v1/` with a top-level `video_id`
+     * string. It answered until 2026-10-27 and may answer again, so it stays - but a signed
+     * request that arrives with an identity made up on the spot is refused with HTTP 200 and a
+     * zero-byte body, which is why it is no longer the door that is asked first.
+     *
+     * The public player page is the last one: it needs no signature and survives the API going
+     * away again, but it hosts only the first three episodes at 360p.
      */
     fun stream(seriesId: String, id: String, maxQuality: Int = 1080): StreamInfo {
         require(seriesId.matches(Regex("[0-9]{1,30}")) && id.matches(Regex("[0-9]{1,30}")))
-        try { return signedStream(id,maxQuality) }
-        catch(signed: Exception) {
-            // Must be Exception, not IOException: the signed endpoint now answers HTTP 200 with a
-            // zero-byte body, so `JSONObject(text(...))` throws org.json.JSONException - a
-            // RuntimeException - which an IOException-only catch lets escape past the fallback.
-            //
-            // The fallback is only worth making when the signed endpoint *answered* with
-            // something unusable. When the network is gone, the public page is the same dead
-            // network: asking it as well doubles the silence before the user learns that the
-            // episode cannot be played, and the retry counter does not start until it returns.
-            if(fallbackCannotHelp(signed)) throw signed
-            try { return webStream(seriesId,id,maxQuality) }
-            catch(web: Exception) {
-                // The public page hosts only the first three episodes, so its 404 means 「这一集
-                // 不在公开页上」 - not 「这部剧只有 3 集」. Saying the latter about a whole show
-                // because one attempt was refused is a permanent-sounding verdict drawn from a
-                // page that never had the episode in it, and it is exactly what the signed path
-                // falling back there used to produce.
-                if(signed is EmptySignedAnswerException && web is PublicPageHasNoEpisodeException) {
-                    web.addSuppressed(signed)
-                    throw EmptySignedAnswerException()
+        // The endpoint that answers today is asked first: it wants a registered identity and no
+        // signature, which is the opposite of what the signed path sends - see
+        // [registeredStream]. The signed path stays as the second door because it is the one
+        // that answered until 2026-10-27 and may answer again.
+        try { return registeredStream(id,maxQuality) }
+        catch(registered: Exception) {
+            try { return signedStream(id,maxQuality) }
+            catch(signed: Exception) {
+                // Must be Exception, not IOException: the signed endpoint answers HTTP 200 with a
+                // zero-byte body, so `JSONObject(text(...))` throws org.json.JSONException - a
+                // RuntimeException - which an IOException-only catch lets escape past the fallback.
+                //
+                // The fallback is only worth making when the endpoint *answered* with
+                // something unusable. When the network is gone, the public page is the same dead
+                // network: asking it as well doubles the silence before the user learns that the
+                // episode cannot be played, and the retry counter does not start until it returns.
+                if(fallbackCannotHelp(signed) && fallbackCannotHelp(registered)) {
+                    signed.addSuppressed(registered); throw signed
                 }
-                web.addSuppressed(signed); throw web
+                try { return webStream(seriesId,id,maxQuality) }
+                catch(web: Exception) {
+                    // The public page hosts only the first three episodes, so its 404 means 「这一集
+                    // 不在公开页上」 - not 「这部剧只有 3 集」. Saying the latter about a whole show
+                    // because one attempt was refused is a permanent-sounding verdict drawn from a
+                    // page that never had the episode in it, and it is exactly what the signed path
+                    // falling back there used to produce.
+                    if(signed is EmptySignedAnswerException && web is PublicPageHasNoEpisodeException) {
+                        web.addSuppressed(signed)
+                        throw EmptySignedAnswerException()
+                    }
+                    web.addSuppressed(signed); throw web
+                }
             }
         }
     }
+    /**
+     * The playback endpoint as it answers today.
+     *
+     * Two things changed on 2026-10-27 and both of them are visible in the request this method
+     * makes. The endpoint stopped accepting a signed request - one that carries the signature
+     * headers and an identity that was made up on the spot is answered with HTTP 200 and a
+     * zero-byte body - and it started accepting an unsigned request that carries the identity
+     * the platform registered. So the signature is gone from this path, and the identity comes
+     * from [PlaybackDevice] rather than from a random generator.
+     *
+     * The answer holds one entry per episode that was asked for, and the model it carries usually
+     * has the renditions inline; only some answers point at a second address instead.
+     */
+    private fun registeredStream(id: String, maxQuality: Int): StreamInfo {
+        val identity=playbackIdentity()
+        val query=LinkedHashMap<String,String>(PLAYBACK_DEVICE_PARAMS)
+        query["device_id"]=identity.deviceId
+        query["iid"]=identity.iid
+        query["_rticket"]=clock().toString()
+        val encoded=query.entries.joinToString("&") { "${playbackEncode(it.key)}=${playbackEncode(it.value)}" }
+        val body="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}""".toByteArray()
+        val request=Request.Builder().url("$PLAYBACK_API?$encoded")
+            .header("User-Agent",PLAYBACK_UA)
+            .header("Accept","application/json; charset=utf-8,application/x-protobuf")
+            .header("Content-Type","application/json; charset=UTF-8")
+            .post(body.toRequestBody("application/json; charset=UTF-8".toMediaType()))
+            .build()
+        val text=RequestScope.execute(addressHttp.newCall(request)) { response ->
+            if(!response.isSuccessful) throw HttpStatusException(response.code)
+            response.body?.string() ?: throw IOException("播放信息为空")
+        }
+        // The same zero-byte answer the signed path gets when it is refused.
+        if(text.isBlank()) throw EmptySignedAnswerException()
+        val answer=JSONObject(text)
+        val code=if(answer.has("code")) answer.optInt("code",-1) else answer.optInt("Code",-1)
+        if(code!=0) throw IOException("播放接口暂不可用")
+        val data=answer.optJSONObject("data") ?: throw IOException("播放信息为空")
+        // The model hangs under the episode that was asked for; the older shape put it straight
+        // under `data`.
+        val raw=data.optJSONObject(id)?.opt("video_model") ?: data.opt("video_model")
+        val model=when(raw) {
+            is JSONObject -> raw
+            is String -> runCatching { JSONObject(raw) }.getOrNull() ?: throw IOException("播放信息为空")
+            else -> throw IOException("播放信息为空")
+        }
+        var info=model
+        if(renditions(model).isEmpty()) {
+            val fallback=fallbackApi(model)
+            if(!fallback.startsWith("https://")) throw IOException("播放地址格式异常")
+            val outer=JSONObject(text(fallback,client=addressHttp))
+            info=outer.optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
+        }
+        return pickStream(info,maxQuality)
+    }
+    /** The renditions a model carries, in either of the two shapes they arrive in. */
+    private fun renditions(info: JSONObject): List<JSONObject> {
+        val out=mutableListOf<JSONObject>()
+        info.optJSONArray("video_list")?.let { array -> for(i in 0 until array.length()) array.optJSONObject(i)?.let { out.add(it) } }
+        info.optJSONObject("video_list")?.let { map -> for(key in map.keys()) map.optJSONObject(key)?.let { out.add(it) } }
+        return out
+    }
+    /** The second address a model points at, in the shape it arrives in. */
+    private fun fallbackApi(model: JSONObject): String {
+        val raw=model.opt("fallback_api")
+        return when(raw) {
+            is JSONObject -> raw.str("fallback_api")
+            is JSONArray -> raw.optString(0)
+            is String -> runCatching { JSONObject(raw).str("fallback_api") }.getOrDefault(raw)
+            else -> ""
+        }
+    }
+    /**
+     * The playable rendition out of a video model.
+     *
+     * The model describes each rendition twice over: the codec and the size sit in `video_meta`
+     * while the address sits at the top of the entry, and the content key sits in `encrypt_info`.
+     * A model that arrives from the older endpoint has all of it at the top level instead, so
+     * every field is read from both places.
+     */
+    private fun pickStream(info: JSONObject, maxQuality: Int): StreamInfo {
+        val seed=info.str("key_seed")
+        val rows=renditions(info).mapNotNull { item ->
+            val meta=item.optJSONObject("video_meta")
+            val codec=item.str("codec_type").ifEmpty { meta?.str("codec_type").orEmpty() }.lowercase()
+            // ByteVC2 renditions declare themselves as `bvc2` and ship no avcC/hvcC record at all, so
+            // Android's extractor finds an audio track and no video track. Only ByteVC1 (HEVC) plays.
+            if(codec in setOf("bytevc2","bvc2")) return@mapNotNull null
+            val url=item.str("main_url").ifEmpty { item.str("backup_url") }
+            if(url.isEmpty()) return@mapNotNull null
+            val definition=item.str("definition").ifEmpty { meta?.str("definition").orEmpty() }
+            val height=qualityNumber(definition.ifEmpty {
+                item.str("quality_desc").ifEmpty { item.str("height").ifEmpty {
+                    item.str("vheight").ifEmpty { meta?.str("vheight").orEmpty() } } } })
+            Rendition(url,height,item)
+        }.sortedByDescending { it.height }
+        val selected=rows.firstOrNull { it.height<=maxQuality } ?: rows.lastOrNull()
+            ?: throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
+        var url=cleanUrl(selected.url)
+        if(seed.isNotEmpty()) url=MediaCrypto.decryptUrl(url,decode64(seed))
+        if(!url.startsWith("https://") && !url.startsWith("http://")) throw IOException("播放地址无效")
+        val spade=selected.item.str("spade_a").ifEmpty { selected.item.optJSONObject("encrypt_info")?.str("spade_a").orEmpty() }
+        val key=spade.takeIf { it.isNotEmpty() }?.let { runCatching { MediaCrypto.deriveKey(it) }.getOrNull() }
+        val quality=if(selected.height>0) "${selected.height}P"+(if(selected.height>maxQuality) "（兼容资源）" else "") else "自动"
+        return StreamInfo(url,key,quality)
+    }
+    /** One rendition of a model: where it is, how big it is, and what the entry said about it. */
+    private class Rendition(val url: String, val height: Int, val item: JSONObject)
     private fun signedStream(id: String, maxQuality: Int): StreamInfo {
         val payload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"video_id":"$id"}""".toByteArray()
         // A fresh identity per signed attempt: the previously hardcoded pair is shared by every
@@ -782,6 +931,62 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
     companion object {
         /** The only signed player endpoint that still answers; see [stream]. */
         const val VIDEO_MODEL_API = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/video_model/v1/"
+        /**
+         * The player endpoint as it answers today.
+         *
+         * It is the same endpoint the signed path used, and the same host, but the request is
+         * not the same: this one carries a registered identity and no signature at all.
+         */
+        const val PLAYBACK_API = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/"
+        /**
+         * The user agent the playback request wears.
+         *
+         * It is not the one the signed requests use: the endpoint tells the two apart, so a
+         * playback request that arrives in the signed request's clothes is refused with an empty
+         * body.
+         */
+        const val PLAYBACK_UA = "com.phoenix.read/71532 (Linux; U; Android 9; SM-N9860; Build/PQ3A.190705.10241111;tt-ok/3.12.13.20)"
+        /**
+         * How long a failed device registration is not retried.
+         *
+         * The failure is not remembered as a failure - only the attempt is not repeated - so
+         * that a person turning the set on does not pay for a registration attempt on every
+         * episode, while a single minute later the registration is tried again.
+         */
+        const val PLAYBACK_REGISTRATION_RETRY_MS = 60_000L
+        /**
+         * The device parameters the playback request carries beside the registered identity.
+         *
+         * They are written in the order the app writes them, and they are written the way the
+         * app writes them: `resolution` is the only value that is not a plain word, and the app
+         * percent-encodes its `*` rather than leaving it as it is.
+         */
+        val PLAYBACK_DEVICE_PARAMS: Map<String, String> = linkedMapOf(
+            "ac" to "wifi", "channel" to "update_64", "aid" to "8662", "app_name" to "novelread",
+            "version_code" to "71332", "version_name" to "7.1.3.32", "device_platform" to "android",
+            "os" to "android", "ssmix" to "a", "device_type" to "25053RT47C", "device_brand" to "Redmi",
+            "language" to "zh", "os_api" to "36", "os_version" to "16", "manifest_version_code" to "71332",
+            "resolution" to "1280*2772", "dpi" to "520", "update_version_code" to "71332",
+            "host_abi" to "arm64-v8a", "dragon_device_type" to "phone", "pv_player" to "71332",
+            "compliance_status" to "0", "need_personal_recommend" to "1", "player_so_load" to "1",
+            "is_android_pad_screen" to "0"
+        )
+        /**
+         * Percent-encoding for the playback query.
+         *
+         * Everything but the unreserved characters is encoded, including the `*` in the screen
+         * resolution - the app's own encoder does the same, and a query that encodes one
+         * character differently is a different query.
+         */
+        fun playbackEncode(value: String): String {
+            val out=StringBuilder()
+            for(byte in value.toByteArray(Charsets.UTF_8)) {
+                val v=byte.toInt() and 255
+                if(v in 65..90 || v in 97..122 || v in 48..57 || v==45 || v==95 || v==46 || v==126) out.append(v.toChar())
+                else out.append('%').append("%02X".format(v))
+            }
+            return out.toString()
+        }
         /** How long a connection to the site or the CDN may take. */
         const val CONNECT_TIMEOUT_S = 15L
         /** How long a single socket may sit without data. */
