@@ -338,6 +338,14 @@ class Library(context: Context) {
     var danmakuRows: Int
         get() = state().settings.danmakuRows
         set(value) { val next = DanmakuRows.normalize(value); if (next != danmakuRows) { state().settings = state().settings.copy(danmakuRows = next); put("danmakuRows", next) } }
+    /** 同屏最多几条弹幕。弹幕一多画面就被白字糊住，所以条数要能压下来。 */
+    var danmakuDensity: DanmakuDensity
+        get() = state().settings.danmakuDensity
+        set(value) { if (value != danmakuDensity) { state().settings = state().settings.copy(danmakuDensity = value); put("danmakuDensity", value.name) } }
+    /** 弹幕有多透明。描边始终比填充实 —— 亮画面上白字全靠那道黑边才看得清。 */
+    var danmakuAlpha: DanmakuAlpha
+        get() = state().settings.danmakuAlpha
+        set(value) { if (value != danmakuAlpha) { state().settings = state().settings.copy(danmakuAlpha = value); put("danmakuAlpha", value.name) } }
     var contentType: ContentType
         get() = state().settings.type
         set(value) { if (value != contentType) { state().settings = state().settings.copy(type = value); put("contentType", value.storedValue) } }
@@ -355,7 +363,8 @@ class Library(context: Context) {
         writes.submit(mapOf("quality" to { merged.settings.quality }, "playbackSpeed" to { merged.settings.speed },
             "autoNext" to { merged.settings.autoNext }, "contentType" to { merged.settings.type.storedValue }, "frameMode" to { merged.settings.frame.name },
             // 弹幕开关之前漏在这里了：恢复完备份内存里的开关变了，磁盘上还是老的，下次启动又变回去。
-            "danmaku" to { merged.settings.danmaku }, "danmakuSize" to { merged.settings.danmakuSize.name }, "danmakuRows" to { merged.settings.danmakuRows }))
+            "danmaku" to { merged.settings.danmaku }, "danmakuSize" to { merged.settings.danmakuSize.name }, "danmakuRows" to { merged.settings.danmakuRows },
+            "danmakuDensity" to { merged.settings.danmakuDensity.name }, "danmakuAlpha" to { merged.settings.danmakuAlpha.name }))
         flush()
     }
     /** Requests prompt background commit, without lifecycle-thread disk waits. */

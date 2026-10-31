@@ -118,7 +118,9 @@ class DanmakuTest {
     /** 弹幕很多的时候，可见的那一段不能把整集都扫一遍。 */
     @Test fun theVisibleRowsAreOnlyTheOnesInTheWindow() {
         val many=(0 until 500).map { at(it*100L) }
-        val timeline=DanmakuTimeline(many,trackCount=4,lifetimeMs=8_000L)
+        // 密度上限放开：这条测的是「看得见的只是窗口内那些」，同屏几条是另一回事
+        // （见 [DanmakuDensityTest]）。
+        val timeline=DanmakuTimeline(many,trackCount=4,lifetimeMs=8_000L,maxOnScreen=Int.MAX_VALUE)
         val visible=timeline.visibleAt(30_000L)
         assertTrue("30 秒那一处最多八十来条",visible.size<=90)
         assertEquals(30_000L,visible.last().danmaku.offsetMs)

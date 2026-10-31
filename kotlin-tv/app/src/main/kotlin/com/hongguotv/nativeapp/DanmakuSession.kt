@@ -3,7 +3,9 @@ package com.hongguotv.nativeapp
 
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import com.hongguotv.core.Danmaku
+import com.hongguotv.core.DanmakuAnchors
 import com.hongguotv.core.DanmakuRepository
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -30,11 +32,19 @@ class DanmakuSession(
     private var durationMs=0L
     /** 现在的倍速，决定要提前多少去问下一窗。 */
     private var speed=1f
-    /** 已经问到的位置：这一行之前的内容都有了。 */
+    /** 现在这一窗已经问到哪里了。 */
     private var loadedUntilMs=0L
     private var loading=false
     private var items=emptyList<Danmaku>()
     private var failed=false
+    /**
+     * 最近一次采样到的播放位置，和采样它时的真实时刻。
+     *
+     * 用来推算「数据到手的那一刻，播放到哪儿了」—— 决定哪些弹幕算晚到、要不要重新锚定。
+     * 采样是每秒一次，中间这一段按倍速往前推。
+     */
+    private var positionMs=0L
+    private var positionAt=0L
     /**
      * 换了集或关了开关就作废在飞的那次请求。
      *
@@ -52,17 +62,22 @@ class DanmakuSession(
      * 开始一集。
      *
      * @param durationMs 这一集多长。知道了才停得住 —— 不然会一直往后问。
+     * @param startMs 从哪儿开始问。续播、或者中途打开弹幕开关时，播放器已经播到中间了 ——
+     *  还从第 0 秒问起的话，这一窗的数据会晚到几分钟：那几分钟里的弹幕要么凭空出现在画面中间，
+     *  要么干脆对不上画面。直接从当前进度问，弹幕才是这一段的弹幕。
      */
-    fun start(seriesId: String,vid: String,durationMs: Long=0L) {
+    fun start(seriesId: String,vid: String,durationMs: Long=0L,startMs: Long=0L) {
+        val from=startMs.coerceAtLeast(0L)
         synchronized(lock) {
             this.seriesId=seriesId; this.vid=vid; this.durationMs=durationMs
-            loadedUntilMs=0L; loading=false; items=emptyList<Danmaku>(); failed=false
+            loadedUntilMs=from; loading=false; items=emptyList<Danmaku>(); failed=false
+            positionMs=from; positionAt=SystemClock.elapsedRealtime()
             epoch++
         }
         running.set(true)
         // 换集了：先把上一集的弹幕从画面上撤掉，别让它停在新集的开头。
         main.post { onItems?.invoke(emptyList()) }
-        fetch(0L)
+        fetch(from)
     }
 
     /** 播放器拿到了真实时长。 */
@@ -79,16 +94,31 @@ class DanmakuSession(
     /**
      * 播放到了哪儿。
      *
-     * 离已加载的末尾还剩不到两秒就去问下一窗：问一次要几百毫秒，晚了就断档。
+     * 离已加载的末尾还剩不到 [LEAD_MS] 毫秒就去问下一窗：问一次要一秒多，晚了就断档。
      */
     fun onPosition(positionMs: Long) {
         if(!running.get()) return
+        synchronized(lock) { this.positionMs=positionMs; this.positionAt=SystemClock.elapsedRealtime() }
         val need=synchronized(lock) {
             if(loading||failed) false
             else if(durationMs>0&&loadedUntilMs>=durationMs) false
             else positionMs+(LEAD_MS*speed).toLong()>=loadedUntilMs
         }
         if(need) fetch(synchronized(lock){ loadedUntilMs })
+    }
+
+    /**
+     * 现在播放到哪儿了。
+     *
+     * 采样是每秒一次，数据到手的那一刻正好落在两次采样中间 —— 用中间这一段的真实时间按倍速
+     * 往前推。差个一秒不要紧，差一秒就够把「晚到」判成「没晚到」，那一批弹幕就会凭空出现在
+     * 画面中间。
+     */
+    private fun nowPosition(): Long {
+        val pos: Long; val at: Long; val sp: Float
+        synchronized(lock) { pos=positionMs; at=positionAt; sp=speed }
+        val elapsed=SystemClock.elapsedRealtime()-at
+        return pos+(elapsed*sp).toLong()
     }
 
     private fun fetch(startMs: Long) {
@@ -100,9 +130,13 @@ class DanmakuSession(
         worker.execute {
             try {
                 val window=repository.window(series,episode,startMs,synchronized(lock){ durationMs })
+                // 数据到手时，这一窗开头那几秒可能已经过去了。晚到的那几条要重新锚定入场时间，
+                // 不然它们一出现就整条摆在画面中间 —— 像凭空冒出来，而不是从右边飞进来。
+                val est=nowPosition()
+                val arrived=DanmakuAnchors.reanchor(window.items,est)
                 val merged=synchronized(lock) {
                     if(mine!=epoch) return@synchronized null      // 换集或关了开关：这一批扔掉
-                    val all=(items+window.items).distinctBy { it.offsetMs to it.text }.sortedBy { it.offsetMs }
+                    val all=(items+arrived).distinctBy { it.offsetMs to it.text }.sortedBy { it.enterAtMs }
                     items=all
                     loadedUntilMs=maxOf(loadedUntilMs,window.nextStartMs)
                     loading=false
@@ -133,7 +167,15 @@ class DanmakuSession(
     fun snapshot(): List<Danmaku> = synchronized(lock) { items }
 
     companion object {
-        /** 离末尾还有这么多就提前问下一窗。 */
-        const val LEAD_MS=2_000L
+        /**
+         * 离末尾还有这么多就提前问下一窗。
+         *
+         * 六秒，不是两秒：问一次要一秒多（实测 2026-10-31，一次窗口约 1.5 秒），提前量只有两秒的话
+         * 数据经常是**这一窗已经开始之后**才到 —— 那几秒里的弹幕就晚了，一晚到就凭空出现在画面
+         * 中间。提前六秒问，数据在窗开始前就到手了。
+         *
+         * 问的频率没变（一窗一次），提前量变的是「什么时候问」，不是「问多频繁」。
+         */
+        const val LEAD_MS=6_000L
     }
 }

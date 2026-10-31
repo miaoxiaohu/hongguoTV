@@ -54,5 +54,9 @@ keystore.properties
 # 测量脚本的产物：每次跑都重新生成，不是源码
 /search-ceiling.json
 /kotlin-tv/core/probe-report.txt
+/kotlin-tv/probe-report.txt
 /out-probe-index.txt
 /out-build.txt
+
+# 每日源解析检测的日志与报告：每轮重写，不是源码
+/logs/

@@ -509,8 +509,49 @@ private fun run(args: Array<String>, report: ProbeReport) {
             say("第二窗：${next.items.size} 条, 起点 ${next.items.firstOrNull()?.offsetMs}ms")
             // And the track layout has to survive the real rows.
             val timeline=DanmakuTimeline(window.items,trackCount=6,lifetimeMs=8_000L)
-            say("排布：${timeline.placed.size} 条占了 ${timeline.placed.map { it.track }.toSet().size} 条轨道")
+            // The layout drops what does not fit on screen on purpose, so say so: a smaller number
+            // here is the density limit at work, not lost data.
+            say("排布：${timeline.placed.size} 条占了 ${timeline.placed.map { it.track }.toSet().size} 条轨道（同屏上限 ${DanmakuDensity.MEDIUM.maxOnScreen} 条，本窗 ${window.items.size} 条）")
             say("在 3 秒处看得见的：${timeline.visibleAt(3_000L).size} 条")
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
+    // How dense is the danmaku really, and what does the density limit do to it?
+    //
+    // Real windows from the platform, through the same timeline the app draws with: the peak
+    // on-screen count with no limit, and with each level. This is the number behind
+    // "sometimes there is too much danmaku on the screen" - no guessing from pictures.
+    if(args.contains("--danmu-density")) {
+        val danmaku=DanmakuRepository()
+        try {
+            val samples=repository.home(1,ContentType.SHORT).items.take(8)
+            say("首页样本 ${samples.size} 部")
+            for(sample in samples) {
+                val detail=repository.detail(sample.id)
+                val vid=detail.episodes.firstOrNull() ?: continue
+                val window=danmaku.window(detail.series.id,vid,0L,0L)
+                val items=window.items
+                if(items.isEmpty()) { say("${detail.series.title}：这一窗没有弹幕"); continue }
+                val end=(items.maxOfOrNull { it.enterAtMs } ?: 0L)+8_000L
+                fun peak(cap: Int):Pair<Int,Int> {
+                    val timeline=DanmakuTimeline(items,trackCount=7,lifetimeMs=8_000L,maxOnScreen=cap)
+                    var best=0; var t=0L
+                    while(t<=end) {
+                        val n=timeline.visibleAt(t).size
+                        if(n>best) best=n
+                        t+=100L
+                    }
+                    return best to timeline.placed.size
+                }
+                val free=peak(Int.MAX_VALUE)
+                val parts=DanmakuDensity.entries.map { d ->
+                    val (on,kept)=peak(d.maxOnScreen)
+                    "${d.label}:$on(留$kept)"
+                }
+                say("${detail.series.title}：本窗 ${items.size} 条｜不限同屏 ${free.first}｜"+parts.joinToString("｜"))
+            }
         } finally {
             repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
         }

@@ -1164,6 +1164,10 @@ class MainActivity: Activity() {
         danmakuSizeButton=setting(playback,"弹幕大小  ·  ${library.danmakuSize.label}") { showDanmakuSizePicker(danmakuSizeButton,false) }
         lateinit var danmakuRowsButton: TextView
         danmakuRowsButton=setting(playback,"弹幕行数  ·  ${DanmakuRows.label(library.danmakuRows)}") { showDanmakuRowsPicker(danmakuRowsButton,false) }
+        lateinit var danmakuDensityButton: TextView
+        danmakuDensityButton=setting(playback,"弹幕数量  ·  ${library.danmakuDensity.label}") { showDanmakuDensityPicker(danmakuDensityButton,false) }
+        lateinit var danmakuAlphaButton: TextView
+        danmakuAlphaButton=setting(playback,"弹幕透明度  ·  ${library.danmakuAlpha.label}") { showDanmakuAlphaPicker(danmakuAlphaButton,false) }
         lateinit var backup: TextView
         backup=setting(device,"手机备份与恢复") {
             runCatching { LibraryBackup.encode(library.snapshot()) }.onSuccess { encoded ->
@@ -1488,7 +1492,7 @@ class MainActivity: Activity() {
                 setSpeedSource { player?.playbackParameters?.speed ?: 1f }
                 setVideoRectProvider { videoRect() }
                 // 字号和行数先记着：画面尺寸这时候还没定，等 onSizeChanged 再排版。
-                setStyle(library.danmakuSize,library.danmakuRows)
+                setStyle(library.danmakuSize,library.danmakuRows,library.danmakuDensity,library.danmakuAlpha)
                 // 屏幕放不下用户要的那么多行时说一声：界面上写着 12 行而屏幕上只有 7 行，
                 // 用户只会以为这个设置是坏的。
                 onClamped={ rows -> Toast.makeText(this@MainActivity,"屏幕放不下这么多行，实际显示 $rows 行",Toast.LENGTH_LONG).show() }
@@ -1555,7 +1559,8 @@ class MainActivity: Activity() {
             val source=ProgressiveMediaSource.Factory { VideoDataSource(remote) }.createMediaSource(MediaItem.Builder().setMediaId(requestedId).setUri("hongguotv://episode/$requestedId").setMimeType(MimeTypes.VIDEO_MP4).build())
             p.setMediaSource(source); p.seekTo(position.coerceAtLeast(0)); p.prepare(); p.playWhenReady=foreground && requestedAutoplay && !pausedForLifecycle && episodePanel==null
             // 这一集的弹幕。切集时也走这里：session 一开始就会把上一集的弹幕撤掉。
-            if(library.danmakuEnabled) danmakuSession.start(data.series.id,requestedId)
+            // 从当前进度开始问：续播时播放器已经在中间了，还从第 0 秒问起，弹幕会晚到几分钟。
+            if(library.danmakuEnabled) danmakuSession.start(data.series.id,requestedId,0L,position.coerceAtLeast(0L))
         }, { problem -> playerFailure(problem) })
     }
     private fun cancelPrefetch() {
@@ -1766,16 +1771,17 @@ class MainActivity: Activity() {
         val data=detail ?: return
         if(screen!="player") return
         val episode=data.episodes.getOrNull(episodeIndex) ?: return
-        danmakuSession.start(data.series.id,episode)
+        // 从播放器现在的位置开始问：中途打开开关时画面已经播到中间了。
+        danmakuSession.start(data.series.id,episode,0L,player?.currentPosition ?: 0L)
     }
     /**
-     * 弹幕的字号和行数生效。
+     * 弹幕的字号、行数、同屏条数和透明度生效。
      *
      * 改了要立刻重排，不用退出播放再进来 —— 正在看的时候觉得字小，正是最想调它的时候。
      * 屏幕放不下用户要的那么多行时，overlay 会自己喊一声（见 [DanmakuOverlay.onClamped]）。
      */
     private fun applyDanmakuStyle() {
-        danmakuOverlay?.setStyle(library.danmakuSize,library.danmakuRows)
+        danmakuOverlay?.setStyle(library.danmakuSize,library.danmakuRows,library.danmakuDensity,library.danmakuAlpha)
     }
     private fun frameResizeMode()=when(library.frameMode) {
         VideoFrameMode.FIT -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -1836,6 +1842,33 @@ class MainActivity: Activity() {
             if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "弹幕行数 " else "弹幕行数  ·  ")+DanmakuRows.label(target)
         })
     }
+    /**
+     * 同屏最多几条弹幕。
+     *
+     * 弹幕一多，屏幕上就是一片白字（实测同屏最高 36 条，铺在 7 行轨道上）。这个旋钮压的是**条数**，
+     * 不是行数 —— 行数是画面上留几行给弹幕，这个是这几行里同时最多飘几条。
+     */
+    private fun showDanmakuDensityPicker(anchor: TextView,inPlayer: Boolean) {
+        val options=DanmakuDensity.entries
+        tvTools.choose("弹幕数量",options.map { "${it.label} · 同屏 ${it.maxOnScreen} 条" },anchor,{ index ->
+            val target=options[index]
+            library.danmakuDensity=target; applyDanmakuStyle()
+            if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "弹幕数量 " else "弹幕数量  ·  ")+target.label
+        })
+    }
+    /**
+     * 弹幕有多透明。
+     *
+     * 描边是黑边、填充是白字，两者不一起降：亮画面上白字全靠那道黑边才看得清，边淡了字就糊了。
+     */
+    private fun showDanmakuAlphaPicker(anchor: TextView,inPlayer: Boolean) {
+        val options=DanmakuAlpha.entries
+        tvTools.choose("弹幕透明度",options.map { it.label },anchor,{ index ->
+            val target=options[index]
+            library.danmakuAlpha=target; applyDanmakuStyle()
+            if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "弹幕透明度 " else "弹幕透明度  ·  ")+target.label
+        })
+    }
     private fun seek(direction: Int,repeat: Int) {
         val p=player ?: return; if(!playbackReady) return
         val duration=p.duration; if(duration<=0) return
@@ -1855,7 +1888,7 @@ class MainActivity: Activity() {
         episodes=addButton(options,"选集") { showEpisodePanel(episodes) }
         lateinit var more: TextView
         more=addButton(options,"播放设置") {
-            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放","弹幕 ${if(library.danmakuEnabled) "开" else "关"}","弹幕大小 ${library.danmakuSize.label}","弹幕行数 ${DanmakuRows.label(library.danmakuRows)}"),more,{ choice ->
+            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放","弹幕 ${if(library.danmakuEnabled) "开" else "关"}","弹幕大小 ${library.danmakuSize.label}","弹幕行数 ${DanmakuRows.label(library.danmakuRows)}","弹幕数量 ${library.danmakuDensity.label}","弹幕透明度 ${library.danmakuAlpha.label}"),more,{ choice ->
                 main.post {
                     if(screen=="player" && more.isAttachedToWindow) when(choice) {
                         0 -> showSpeedPicker(more)
@@ -1866,6 +1899,8 @@ class MainActivity: Activity() {
                         5 -> { library.danmakuEnabled=!library.danmakuEnabled; applyDanmakuSetting() }
                         6 -> showDanmakuSizePicker(more,true)
                         7 -> showDanmakuRowsPicker(more,true)
+                        8 -> showDanmakuDensityPicker(more,true)
+                        9 -> showDanmakuAlphaPicker(more,true)
                     }
                 }
             })

@@ -30,6 +30,37 @@ object DanmakuRows {
 }
 
 /**
+ * 同屏最多几条弹幕。
+ *
+ * 挡屏幕的不是「叠字」，是**条数**。实测一集 15 分钟 649 条，同屏最高 36 条，铺在 7 行轨道上 ——
+ * 画面就被白字铺满了。这个旋钮管的就是同屏条数，跟「行数」不是一回事：
+ * 行数是画面上留几行给弹幕，这个是这几行里同时最多飘几条。
+ *
+ * 存的是档位而不是条数：条数是相对「这块屏幕能放多少」而言的，换台电视同一个条数完全不是一回事。
+ */
+enum class DanmakuDensity(val maxOnScreen: Int, val label: String) {
+    LOW(6,"少"), MEDIUM(12,"中"), HIGH(24,"多");
+    companion object {
+        /** 认不出来的名字按「中」算：旧备份、旧记录里没有这个字段。 */
+        fun fromStored(value: String?)=entries.firstOrNull { it.name==value } ?: MEDIUM
+    }
+}
+
+/**
+ * 弹幕有多透明。
+ *
+ * 描边（黑边）比填充更实：电视上的画面五花八门，白字全靠这道黑边才看得清。填充淡一点没关系，
+ * 边淡了字就真的糊在画面里了 —— 所以两档的 alpha 不是同一个比例。
+ */
+enum class DanmakuAlpha(val fill: Int, val edge: Int, val label: String) {
+    SOLID(255,220,"不透明"), HALF(165,200,"半透明"), LIGHT(105,160,"淡");
+    companion object {
+        /** 认不出来的名字按「半透明」算：旧备份、旧记录里没有这个字段。 */
+        fun fromStored(value: String?)=entries.firstOrNull { it.name==value } ?: HALF
+    }
+}
+
+/**
  * 弹幕在屏幕上的排版：字多大、一行多高、有几行。
  *
  * 放在 core 里、且不依赖 Android，是为了能测：字号、行高、行数三者互相牵着

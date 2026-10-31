@@ -8,6 +8,8 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.view.View
 import com.hongguotv.core.Danmaku
+import com.hongguotv.core.DanmakuAlpha
+import com.hongguotv.core.DanmakuDensity
 import com.hongguotv.core.DanmakuLayout
 import com.hongguotv.core.DanmakuLayouts
 import com.hongguotv.core.DanmakuRows
@@ -43,6 +45,17 @@ class DanmakuOverlay(context: Context) : View(context) {
     /** 用户要的字号档位和行数。定下来之前先记着，等画面有了尺寸再排。 */
     private var size=DanmakuSize.NORMAL
     private var requestedRows=DanmakuRows.AUTO
+    /** 同屏最多几条。弹幕一多，画面就是一片白字（实测同屏最高 36 条）。 */
+    private var density=DanmakuDensity.MEDIUM
+    /** 弹幕有多透明。描边比填充实：亮画面上白字全靠那道黑边才看得清。 */
+    private var alpha=DanmakuAlpha.HALF
+    /**
+     * 最近一次交给本层的全部弹幕。
+     *
+     * 重排要从这里重来，不能从「已经排好的」重来：被密度上限丢掉的那几条，得留着 ——
+     * 用户把密度调高时它们该回来。
+     */
+    private var source: List<Danmaku> = emptyList()
     /** 画面的高度。字号和行数都是按它算的。 */
     private var viewHeight=0
     private var layout: DanmakuLayout?=null
@@ -72,13 +85,14 @@ class DanmakuOverlay(context: Context) : View(context) {
      * 轨道数是按屏幕高度算的，所以宽度和高度定下来之前先记着，等尺寸到了再排。
      */
     fun setItems(items: List<Danmaku>) {
+        source=items
         if(items.isEmpty()) { timeline=null; widths=FloatArray(0); pending=null; invalidate(); return }
         if(textSizePx<=0) { pending=items; invalidate(); return }
         pending=null
         fill.textSize=textSizePx
         edge.textSize=textSizePx
         edge.strokeWidth=(textSizePx*.1f).coerceAtLeast(1f)
-        val laid=DanmakuTimeline(items,trackCount,lifetimeMs())
+        val laid=DanmakuTimeline(items,trackCount,lifetimeMs(),density.maxOnScreen)
         timeline=laid
         widths=FloatArray(laid.placed.size) { fill.measureText(laid.placed[it].danmaku.text) }
         invalidate()
@@ -88,16 +102,17 @@ class DanmakuOverlay(context: Context) : View(context) {
     fun setPositionSource(source: ()->Long) { positionSource=source }
 
     /**
-     * 弹幕的字号和行数。
+     * 弹幕的字号、行数、同屏条数和透明度。
      *
      * 轨道是排的时候定死的，所以改了要重排：不重排的话，字变大了还是按老的行高摆，
-     * 上一行的字会压到下一行头上，看起来就是「调大了反而更挤」。
+     * 上一行的字会压到下一行头上，看起来就是「调大了反而更挤」。密度也一样 —— 上限变了，
+     * 哪些弹幕该被丢、哪些该晚点飘，都要重算。
      *
      * @return 是不是真的改了。
      */
-    fun setStyle(size: DanmakuSize,rows: Int): Boolean {
-        if(size==this.size && rows==requestedRows) return false
-        this.size=size; requestedRows=rows
+    fun setStyle(size: DanmakuSize,rows: Int,density: DanmakuDensity,alpha: DanmakuAlpha): Boolean {
+        if(size==this.size && rows==requestedRows && density==this.density && alpha==this.alpha) return false
+        this.size=size; requestedRows=rows; this.density=density; this.alpha=alpha
         applyLayout()
         return true
     }
@@ -118,9 +133,12 @@ class DanmakuOverlay(context: Context) : View(context) {
         fill.textSize=textSizePx
         edge.textSize=textSizePx
         edge.strokeWidth=(textSizePx*.1f).coerceAtLeast(1f)
+        // 透明度：填充是白字，描边是黑边，两者按档位走。
+        fill.color=Color.argb(alpha.fill,255,255,255)
+        edge.color=Color.argb(alpha.edge,0,0,0)
         if(laid.clamped&&!reportedClamp) { reportedClamp=true; onClamped?.invoke(laid.trackCount) }
         else if(!laid.clamped) reportedClamp=false
-        val items=pending ?: timeline?.placed?.map { it.danmaku }
+        val items=pending ?: if(source.isEmpty()) null else source
         if(items!=null) setItems(items)
     }
 
