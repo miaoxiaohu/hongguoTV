@@ -1845,11 +1845,14 @@ class MainActivity: Activity() {
             DanmakuSettings.rows(library.danmakuEnabled,library.danmakuSize,library.danmakuRows,library.danmakuDensity,library.danmakuAlpha),
             { row,option ->
                 when(row) {
-                    0 -> { library.danmakuEnabled=option==0; applyDanmakuSetting() }
+                    // 选中原值不动：再点一次「开启」不该清空并重拉正在飘的弹幕
+                    0 -> { val next=option==0; if(next!=library.danmakuEnabled) { library.danmakuEnabled=next; applyDanmakuSetting() } }
                     1 -> { library.danmakuSize=DanmakuSize.entries[option]; applyDanmakuStyle() }
                     2 -> { library.danmakuRows=DanmakuRows.options[option]; applyDanmakuStyle() }
                     3 -> { library.danmakuDensity=DanmakuDensity.entries[option]; applyDanmakuStyle() }
-                    else -> { library.danmakuAlpha=DanmakuAlpha.entries[option]; applyDanmakuStyle() }
+                    // 显式行号：core 以后加第 6 行时不会落进这里被当透明度下标去取
+                    4 -> { library.danmakuAlpha=DanmakuAlpha.entries[option]; applyDanmakuStyle() }
+                    else -> Unit
                 }
                 DanmakuSettings.rows(library.danmakuEnabled,library.danmakuSize,library.danmakuRows,library.danmakuDensity,library.danmakuAlpha)
             },
