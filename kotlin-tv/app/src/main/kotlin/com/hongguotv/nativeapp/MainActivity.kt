@@ -1162,19 +1162,9 @@ class MainActivity: Activity() {
             autoNextButton.text="自动连播  ·  ${if(library.autoNext) "开启" else "关闭"}"
         }
         lateinit var danmakuButton: TextView
-        danmakuButton=setting(playback,"弹幕  ·  ${if(library.danmakuEnabled) "开启" else "关闭"}") {
-            library.danmakuEnabled=!library.danmakuEnabled
-            danmakuButton.text="弹幕  ·  ${if(library.danmakuEnabled) "开启" else "关闭"}"
-            applyDanmakuSetting()
+        danmakuButton=setting(playback,"弹幕设置  ·  ${danmakuSummary()}") {
+            showDanmakuSettings(danmakuButton) { danmakuButton.text="弹幕设置  ·  ${danmakuSummary()}" }
         }
-        lateinit var danmakuSizeButton: TextView
-        danmakuSizeButton=setting(playback,"弹幕大小  ·  ${library.danmakuSize.label}") { showDanmakuSizePicker(danmakuSizeButton,false) }
-        lateinit var danmakuRowsButton: TextView
-        danmakuRowsButton=setting(playback,"弹幕行数  ·  ${DanmakuRows.label(library.danmakuRows)}") { showDanmakuRowsPicker(danmakuRowsButton,false) }
-        lateinit var danmakuDensityButton: TextView
-        danmakuDensityButton=setting(playback,"弹幕数量  ·  ${library.danmakuDensity.label}") { showDanmakuDensityPicker(danmakuDensityButton,false) }
-        lateinit var danmakuAlphaButton: TextView
-        danmakuAlphaButton=setting(playback,"弹幕透明度  ·  ${library.danmakuAlpha.label}") { showDanmakuAlphaPicker(danmakuAlphaButton,false) }
         lateinit var backup: TextView
         backup=setting(device,"手机备份与恢复") {
             runCatching { LibraryBackup.encode(library.snapshot()) }.onSuccess { encoded ->
@@ -1835,6 +1825,36 @@ class MainActivity: Activity() {
     private fun applyDanmakuStyle() {
         danmakuOverlay?.setStyle(library.danmakuSize,library.danmakuRows,library.danmakuDensity,library.danmakuAlpha)
     }
+    /**
+     * 弹幕设置入口上的一行摘要。
+     *
+     * 开关 + 4 个样式的当前值，`·` 分隔 —— 一行放得进设置页左列，也一眼看得出现在是什么状态。
+     */
+    private fun danmakuSummary()=DanmakuSettings.summary(library.danmakuEnabled,library.danmakuSize,library.danmakuRows,library.danmakuDensity,library.danmakuAlpha)
+    /**
+     * 弹幕设置面板。
+     *
+     * 五项（开关、大小、行数、数量、透明度）都在这一个面板里：改完不关面板，五项的当前值一直都在眼前。
+     * 选中的值立刻生效 —— 正在播的时候觉得字小，正是最想调它的时候。
+     *
+     * 面板里给的是「第几个候选」，这里按下标取枚举；两边的顺序由 core 的单测钉着
+     * （见 DanmakuSettingsTest.theOptionOrderMatchesTheEnums）。
+     */
+    private fun showDanmakuSettings(anchor: TextView,onClosed: ()->Unit={}) {
+        DanmakuSettingsDialog(this,
+            DanmakuSettings.rows(library.danmakuEnabled,library.danmakuSize,library.danmakuRows,library.danmakuDensity,library.danmakuAlpha),
+            { row,option ->
+                when(row) {
+                    0 -> { library.danmakuEnabled=option==0; applyDanmakuSetting() }
+                    1 -> { library.danmakuSize=DanmakuSize.entries[option]; applyDanmakuStyle() }
+                    2 -> { library.danmakuRows=DanmakuRows.options[option]; applyDanmakuStyle() }
+                    3 -> { library.danmakuDensity=DanmakuDensity.entries[option]; applyDanmakuStyle() }
+                    else -> { library.danmakuAlpha=DanmakuAlpha.entries[option]; applyDanmakuStyle() }
+                }
+                DanmakuSettings.rows(library.danmakuEnabled,library.danmakuSize,library.danmakuRows,library.danmakuDensity,library.danmakuAlpha)
+            },
+            { onClosed(); if(anchor.isAttachedToWindow) anchor.requestFocus() }).show()
+    }
     private fun frameResizeMode()=when(library.frameMode) {
         VideoFrameMode.FIT -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
         VideoFrameMode.ZOOM -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
@@ -1866,61 +1886,6 @@ class MainActivity: Activity() {
             if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "画面 " else "画面模式  ·  ")+library.frameMode.label
         })
     }
-    /**
-     * 弹幕的字号。
-     *
-     * 档位而不是倍数：倍数是相对「按屏高算出来的基准字号」而言的，换台电视同一个倍数
-     * 看起来完全不是一回事。存的是档位，跟着机器走。
-     */
-    private fun showDanmakuSizePicker(anchor: TextView,inPlayer: Boolean) {
-        val options=DanmakuSize.entries
-        tvTools.choose("弹幕大小",options.map { "${it.label} · ${(it.scale*100).toInt()}%" },anchor,{ index ->
-            val target=options[index]
-            library.danmakuSize=target; applyDanmakuStyle()
-            if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "弹幕大小 " else "弹幕大小  ·  ")+target.label
-        })
-    }
-    /**
-     * 弹幕占几行。
-     *
-     * 「自动」是按屏幕高度算，填满画面上半；写死行数就照他说的排 —— 画面放不下时少几行，
-     * 并且告诉用户实际是几行，不能让人对着屏幕数出来的行数找不着北。
-     */
-    private fun showDanmakuRowsPicker(anchor: TextView,inPlayer: Boolean) {
-        val options=DanmakuRows.options
-        tvTools.choose("弹幕行数",options.map { DanmakuRows.label(it) },anchor,{ index ->
-            val target=options[index]
-            library.danmakuRows=target; applyDanmakuStyle()
-            if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "弹幕行数 " else "弹幕行数  ·  ")+DanmakuRows.label(target)
-        })
-    }
-    /**
-     * 同屏最多几条弹幕。
-     *
-     * 弹幕一多，屏幕上就是一片白字（实测同屏最高 36 条，铺在 7 行轨道上）。这个旋钮压的是**条数**，
-     * 不是行数 —— 行数是画面上留几行给弹幕，这个是这几行里同时最多飘几条。
-     */
-    private fun showDanmakuDensityPicker(anchor: TextView,inPlayer: Boolean) {
-        val options=DanmakuDensity.entries
-        tvTools.choose("弹幕数量",options.map { "${it.label} · 同屏 ${it.maxOnScreen} 条" },anchor,{ index ->
-            val target=options[index]
-            library.danmakuDensity=target; applyDanmakuStyle()
-            if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "弹幕数量 " else "弹幕数量  ·  ")+target.label
-        })
-    }
-    /**
-     * 弹幕有多透明。
-     *
-     * 描边是黑边、填充是白字，两者不一起降：亮画面上白字全靠那道黑边才看得清，边淡了字就糊了。
-     */
-    private fun showDanmakuAlphaPicker(anchor: TextView,inPlayer: Boolean) {
-        val options=DanmakuAlpha.entries
-        tvTools.choose("弹幕透明度",options.map { it.label },anchor,{ index ->
-            val target=options[index]
-            library.danmakuAlpha=target; applyDanmakuStyle()
-            if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "弹幕透明度 " else "弹幕透明度  ·  ")+target.label
-        })
-    }
     private fun seek(direction: Int,repeat: Int) {
         val p=player ?: return; if(!playbackReady) return
         val duration=p.duration; if(duration<=0) return
@@ -1940,7 +1905,7 @@ class MainActivity: Activity() {
         episodes=addButton(options,"选集") { showEpisodePanel(episodes) }
         lateinit var more: TextView
         more=addButton(options,"播放设置") {
-            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放","弹幕 ${if(library.danmakuEnabled) "开" else "关"}","弹幕大小 ${library.danmakuSize.label}","弹幕行数 ${DanmakuRows.label(library.danmakuRows)}","弹幕数量 ${library.danmakuDensity.label}","弹幕透明度 ${library.danmakuAlpha.label}"),more,{ choice ->
+            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放","弹幕设置 ${danmakuSummary()}"),more,{ choice ->
                 main.post {
                     if(screen=="player" && more.isAttachedToWindow) when(choice) {
                         0 -> showSpeedPicker(more)
@@ -1948,11 +1913,7 @@ class MainActivity: Activity() {
                         2 -> showFramePicker(more,true)
                         3 -> showSleepPicker(more)
                         4 -> { seekTo(0); hidePanel() }
-                        5 -> { library.danmakuEnabled=!library.danmakuEnabled; applyDanmakuSetting() }
-                        6 -> showDanmakuSizePicker(more,true)
-                        7 -> showDanmakuRowsPicker(more,true)
-                        8 -> showDanmakuDensityPicker(more,true)
-                        9 -> showDanmakuAlphaPicker(more,true)
+                        5 -> showDanmakuSettings(more)
                     }
                 }
             })
