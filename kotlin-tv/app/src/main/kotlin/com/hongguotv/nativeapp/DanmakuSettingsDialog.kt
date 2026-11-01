@@ -74,6 +74,7 @@ class DanmakuSettingsDialog(
     private var closedSent=false
     /** 全局布局监听：只挂一个，挂在窗口的 decor 上。 */
     private var layoutListener: ViewTreeObserver.OnGlobalLayoutListener?=null
+    /** 监听挂在哪个观察者上。attach 之前是浮动观察者（会被 merge 掉并 kill），之后是根观察者。 */
     private var layoutObserver: ViewTreeObserver?=null
     /** 宿主生命周期监听挂上了没有。 */
     private var lifecycleRegistered=false
@@ -101,8 +102,9 @@ class DanmakuSettingsDialog(
     /**
      * 宿主停了 → 收面板。
      *
-     * 收的动作挪到下一轮消息循环：反注册要动 Application 的回调列表，
-     * 而此刻正是在遍历那个列表 —— 遍历中删元素会越界。
+     * 收的动作挪到下一轮消息循环：AOSP 的 dispatchActivityStopped 走 collectActivityLifecycleCallbacks()，
+     * 遍历的是 mActivityLifecycleCallbacks.toArray() 快照 —— 同步反注册其实不会越界、也不会跳过后面的回调；
+     * post 到下一轮只是为了避开「正在回调里改 Application 的回调列表」这个时序顾虑。
      */
     private fun stopWith(host: Activity) {
         if(host!==activity) return
@@ -243,14 +245,46 @@ class DanmakuSettingsDialog(
      */
     private fun hookLayout() {
         val decor=dialog.window?.decorView ?: return
+        removeLayoutListener()
         val observer=decor.viewTreeObserver
-        layoutListener?.let { layoutObserver?.removeOnGlobalLayoutListener(it) }
         val listener=object: ViewTreeObserver.OnGlobalLayoutListener {
-            override fun onGlobalLayout() { onPanelLayout() }
+            override fun onGlobalLayout() {
+                // 布局回调是从根观察者发出来的 —— 这时 decor.getViewTreeObserver() 已经是根观察者。
+                // attach 时浮动观察者被 merge 进根观察者并被 kill，所以这里换存活的那个：
+                // 关面板时要摘的正是根观察者上那一条，摘浮动观察者等于没摘。
+                val current=decor.viewTreeObserver
+                if(current.isAlive) layoutObserver=current
+                onPanelLayout()
+            }
         }
         layoutObserver=observer
         layoutListener=listener
         observer.addOnGlobalLayoutListener(listener)
+    }
+
+    /**
+     * 把全局布局监听摘下来。死观察者不摘 —— 摘了会抛。
+     *
+     * AOSP：attach 时 ViewRootImpl 把浮动观察者 merge 进根观察者，merge() 结尾会 kill() 掉浮动观察者，
+     * 而 removeOnGlobalLayoutListener 第一行就是 checkIsAlive()，对死观察者调用直接抛 IllegalStateException。
+     *
+     * 真正挂着监听的是 attach 之后的根观察者，所以候选观察者有两个：
+     * 字段里存的那个（可能是已死的浮动观察者），和 decor 当下的那个（attach 之后就是根观察者）。
+     */
+    private fun removeLayoutListener() {
+        val listener=layoutListener
+        if(listener==null) { layoutObserver=null; return }
+        val candidates=mutableListOf<ViewTreeObserver>()
+        layoutObserver?.let { candidates+=it }
+        dialog.window?.decorView?.viewTreeObserver?.let { current->
+            if(candidates.none { it===current }) candidates+=current
+        }
+        candidates.forEach { observer->
+            // 活体判断：死观察者调 remove 会抛 IllegalStateException，直接丢掉引用。
+            if(observer.isAlive) observer.removeOnGlobalLayoutListener(listener)
+        }
+        layoutListener=null
+        layoutObserver=null
     }
 
     fun show() {
@@ -268,9 +302,12 @@ class DanmakuSettingsDialog(
         }
         render()
         dialog.setContentView(box)
+        // 窗口背景要在 show 之前就换掉：show 之后 DecorView 首帧布局还拿着主题背景，
+        // 会把背景的 insets 当成 decor 的 padding —— 窗口高度凭空多出上下 inset、宽度少两倍 inset，
+        // 和 applyScrollHeight() 手工量的 inner 对不上，还得再布局一次。
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
         dialog.show()
         dialog.window?.apply {
-            setBackgroundDrawableResource(android.R.color.transparent)
             setGravity(Gravity.CENTER)
             setLayout(panelWidth(),LinearLayout.LayoutParams.WRAP_CONTENT)
         }
@@ -283,19 +320,18 @@ class DanmakuSettingsDialog(
     }
 
     fun dismiss() {
-        val showing=dialog.isShowing
         dialog.dismiss()
-        // 没 show 就 dismiss 的话系统不走 onDismiss，closed() 得自己补一次。
-        if(!showing) notifyClosed()
+        // 无条件补一次：系统的 onDismiss 不是每次都有 —— AOSP 的 dismissDialog() 在窗口已销毁时
+        // 直接 return、不发 dismiss 消息，onDismiss 不触发。只靠 onDismiss 的话，
+        // closed() 不回调、生命周期监听也不反注册（泄漏）。notifyClosed 幂等，closedSent 挡住重复。
+        notifyClosed()
     }
 
     private fun notifyClosed() {
         if(closedSent) return
         closedSent=true
         // 面板没了就别再听它的布局：晚到的回调只会去动已经 detach 的 view。
-        layoutListener?.let { layoutObserver?.removeOnGlobalLayoutListener(it) }
-        layoutListener=null
-        layoutObserver=null
+        removeLayoutListener()
         // 生命周期监听也得摘：Application 一直活着，留着就把面板和 Activity 一起拖住了。
         if(lifecycleRegistered) {
             activity.application.unregisterActivityLifecycleCallbacks(lifecycle)
