@@ -177,12 +177,9 @@ data class CatalogPage(
     val serverFailed: Boolean get() = serverProblem != ServerSearchProblem.NONE
 }
 /**
- * A playable stream, and the door that answered with it.
- *
- * TEMPORARY: `door` names the endpoint that produced this address (registered / signed / web).
- * It exists for the probe build and is removed before the release build.
+ * A playable stream.
  */
-data class StreamInfo(val url: String, val key: ByteArray?, val quality: String, val door: String = "unknown")
+data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
 
 /**
@@ -823,9 +820,8 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * The answer holds one entry per episode that was asked for, and the model it carries usually
      * has the renditions inline; only some answers point at a second address instead.
      */
-    private fun registeredStream(id: String, maxQuality: Int): StreamInfo = registeredStreamWith(playbackIdentity(), id, maxQuality)
-    /** TEMPORARY split so the probe can try the door with a brand new identity. */
-    private fun registeredStreamWith(identity: PlaybackIdentity, id: String, maxQuality: Int): StreamInfo {
+    private fun registeredStream(id: String, maxQuality: Int): StreamInfo {
+        val identity=playbackIdentity()
         val query=LinkedHashMap<String,String>(PLAYBACK_DEVICE_PARAMS)
         query["device_id"]=identity.deviceId
         query["iid"]=identity.iid
@@ -863,7 +859,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             val outer=JSONObject(text(fallback,client=addressHttp))
             info=outer.optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
         }
-        return pickStream(info,maxQuality,"registered")
+        return pickStream(info,maxQuality)
     }
     /** The renditions a model carries, in either of the two shapes they arrive in. */
     private fun renditions(info: JSONObject): List<JSONObject> {
@@ -890,7 +886,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * A model that arrives from the older endpoint has all of it at the top level instead, so
      * every field is read from both places.
      */
-    private fun pickStream(info: JSONObject, maxQuality: Int, door: String): StreamInfo {
+    private fun pickStream(info: JSONObject, maxQuality: Int): StreamInfo {
         val seed=info.str("key_seed")
         val rows=renditions(info).mapNotNull { item ->
             val meta=item.optJSONObject("video_meta")
@@ -914,7 +910,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         val spade=selected.item.str("spade_a").ifEmpty { selected.item.optJSONObject("encrypt_info")?.str("spade_a").orEmpty() }
         val key=spade.takeIf { it.isNotEmpty() }?.let { runCatching { MediaCrypto.deriveKey(it) }.getOrNull() }
         val quality=if(selected.height>0) "${selected.height}P"+(if(selected.height>maxQuality) "（兼容资源）" else "") else "自动"
-        return StreamInfo(url,key,quality,door)
+        return StreamInfo(url,key,quality)
     }
     /** One rendition of a model: where it is, how big it is, and what the entry said about it. */
     private class Rendition(val url: String, val height: Int, val item: JSONObject)
@@ -1030,32 +1026,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         if(!url.startsWith("https://") && !url.startsWith("http://")) throw IOException("播放地址无效")
         val key=item.str("spade_a").takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
         val quality=if(selected.first>0) "${selected.first}P"+(if(selected.first>maxQuality) "（兼容资源）" else "") else "自动"
-        return StreamInfo(url,key,quality,"signed")
-    }
-    /**
-     * TEMPORARY: report what each door answers on its own. Probe builds only; removed before release.
-     */
-    internal fun probeWebStream(seriesId: String, id: String, maxQuality: Int): StreamInfo = webStream(seriesId,id,maxQuality)
-    internal fun probeDoors(seriesId: String, id: String, maxQuality: Int): List<String> {
-        val out=mutableListOf<String>()
-        fun attempt(label: String, block: () -> StreamInfo) {
-            val began=System.currentTimeMillis()
-            try {
-                val info=block()
-                out.add("$label OK quality=${info.quality} url=${info.url.take(150)} ms=${System.currentTimeMillis()-began}")
-            } catch(e: Exception) {
-                out.add("$label FAIL ${e.javaClass.simpleName}: ${e.message} ms=${System.currentTimeMillis()-began}")
-                e.suppressed.forEach { out.add("   suppressed ${it.javaClass.simpleName}: ${it.message}") }
-            }
-        }
-        attempt("registered") { registeredStream(id,maxQuality) }
-        attempt("registered-fresh") {
-            val identity=PlaybackDevice.register(addressHttp,clock())
-            registeredStreamWith(identity,id,maxQuality)
-        }
-        attempt("signed") { signedStream(id,maxQuality) }
-        attempt("web") { webStream(seriesId,id,maxQuality) }
-        return out
+        return StreamInfo(url,key,quality)
     }
     private fun webStream(seriesId: String, id: String, maxQuality: Int): StreamInfo {
         val html=try { addressLookup { client -> text("$site/player/$seriesId/$id",client=client) } }
@@ -1068,7 +1039,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         if(!url.startsWith("https://") && !url.startsWith("http://")) throw IOException("播放地址格式异常")
         val height=Regex("(\\d{3,4})p").find(url)?.groupValues?.get(1)?.toIntOrNull() ?: 0
         val quality=if(height>0) "${height}P"+(if(height>maxQuality) "（兼容资源）" else "") else "自动"
-        return StreamInfo(url,null,quality,"web")
+        return StreamInfo(url,null,quality)
     }
     companion object {
         /** The only signed player endpoint that still answers; see [stream]. */

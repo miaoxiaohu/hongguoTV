@@ -308,6 +308,15 @@ class MainActivity: Activity() {
     private var speedDialog: AlertDialog?=null
     private var pendingSeek: Long?=null
     private var playError=false
+    /**
+     * 为什么这一次播不了。
+     *
+     * 这句话得在整个自动重试期间一直看得见：倒计时是另一件事，它自己占一行，不许把原因
+     * 盖掉 —— 原因被盖掉的话，用户只看到「准备恢复播放」，永远不知道为什么失败。
+     */
+    private var playbackFailureReason: String = ""
+    /** 这条原因是哪一集的：换集了它就得跟着走。 */
+    private var playbackFailureEpisode: Int = -1
     private var lastSaved=0L
     private var quality=""
     private val tick=object: Runnable {
@@ -1470,6 +1479,9 @@ class MainActivity: Activity() {
         if(!recovering) recovery.reset()
         retryNotBeforeMs=0
         autoRecovery=false; readySince=0; startPosition=position.coerceAtLeast(0); requestedAutoplay=autoplay
+        // 换了一集就换一条原因：上一集为什么失败，不该跟着串到这一集。同一集的重试不算 ——
+        // 那一集还是刚才失败的那一集，原因得留着，重试成功之前一直看得见。
+        if(selectedIndex!=playbackFailureEpisode) { playbackFailureReason=""; playbackFailureEpisode=-1 }
         if(autoplay) sleepStopped=false
         screen="player"; episodeIndex=selectedIndex; group=episodeIndex/20
         panel=false; playError=false; playbackReady=false; quality=""; pausedForLifecycle=!autoplay
@@ -1505,27 +1517,15 @@ class MainActivity: Activity() {
             root.addView(ScrollView(this).apply { isVerticalScrollBarEnabled=false; addView(hud) },FrameLayout.LayoutParams(-1,-2,Gravity.BOTTOM))
         }
         playbackTitle.text="${data.series.title}  ·  第 ${episodeIndex+1} 集"
-        playbackText.text="正在获取播放地址…"; progressBar.progress=0; progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
+        // 重试中的这一集，原因得留着：倒计时和「正在获取播放地址…」都不能把它顶掉。
+        playbackText.text=withFailureReason("正在获取播放地址…"); progressBar.progress=0; progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
         syncMediaSession()
         val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
         work({ prefetched ?: run {
-            val lookupStarted=android.os.SystemClock.elapsedRealtime()
             val info=adopted ?: repository.stream(data.series.id,requestedId,maxQuality)
-            val lookupMs=android.os.SystemClock.elapsedRealtime()-lookupStarted
-            RemoteVideo(repository.http,info).prepare().also { remote ->
-            TvProbe.report("resolve", mapOf(
-                "episode" to (episodeIndex + 1),
-                "quality" to maxQuality,
-                "door" to info.door,
-                "lookupMs" to lookupMs,
-                "url" to remote.info.url,
-                "hasKey" to (remote.info.key != null),
-                "total" to remote.total,
-                "prefetched" to (prefetched != null),
-                "adopted" to (adopted != null)))
-        }}
-        }, { remote ->
+            RemoteVideo(repository.http,info).prepare()
+        }}, { remote ->
             video=remote; quality=remote.info.quality
             val p=player ?: run {
                 val load=DefaultLoadControl.Builder().setBufferDurationsMs(15000,30000,1000,2000).setTargetBufferBytes(12*1024*1024).build()
@@ -1541,18 +1541,14 @@ class MainActivity: Activity() {
                 private fun active()=player===p && generation==ticket && p.currentMediaItem?.mediaId==requestedId
                 override fun onPlaybackStateChanged(state: Int) {
                     if(!active()) return
-                    TvProbe.report("state", mapOf(
-                        "state" to state,
-                        "episode" to (episodeIndex + 1),
-                        "positionMs" to p.currentPosition,
-                        "bufferedMs" to p.bufferedPosition,
-                        "totalMs" to p.duration))
                     if(state==Player.STATE_READY) {
                         if(!p.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)) {
                             playerFailure(PlaybackException("资源没有可解码的视频轨道",null,PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED))
                             return
                         }
                         playbackReady=true
+                        // 播起来了，之前的失败原因就不再成立了：留着它，下一次失败之前它会一直挂在屏幕上。
+                        playbackFailureReason=""; playbackFailureEpisode=-1
                         if(firstReady) { firstReady=false; readySince=android.os.SystemClock.elapsedRealtime(); android.util.Log.i("HongguoTV","Playback ready episode=${episodeIndex+1} preloaded=${prefetched!=null} reused=$reuse elapsedMs=${readySince-playbackStarted}") }
                         if(hud.visibility==View.VISIBLE) updatePlaybackText()
                     }
@@ -1664,7 +1660,6 @@ class MainActivity: Activity() {
             } catch(e: Exception) {
                 remote?.close()
                 if(e !is CancelledException) android.util.Log.i("HongguoTV","Episode preparation failed key=$key elapsedMs=${android.os.SystemClock.elapsedRealtime()-started} ${e.javaClass.simpleName}")
-                TvProbe.report("prep_fail", mapOf("key" to key, "error" to TvProbe.chain(e), "elapsedMs" to (android.os.SystemClock.elapsedRealtime() - started)))
             }
             finally {
                 main.removeCallbacks(watchdog)
@@ -1675,26 +1670,27 @@ class MainActivity: Activity() {
     private fun networkAvailable(): Boolean = connectivity.getNetworkCapabilities(connectivity.activeNetwork)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)==true
     private fun currentPosition(): Long = pendingSeek ?: player?.currentPosition?.takeIf { playbackReady } ?: startPosition
     private fun cancelRecovery() { main.removeCallbacks(retryRunnable); retryPending=false; autoRecovery=false }
+    /**
+     * 把失败原因和状态拼成两行。
+     *
+     * 原因是「为什么失败」，状态是「现在在干嘛」。倒计时是状态，它不该把原因顶掉 ——
+     * 顶掉了的话，用户就只看到「准备恢复播放」，永远不知道自己为什么没得看。
+     * 没有原因的时候只给状态一行，不留空行。
+     */
+    private fun withFailureReason(status: String): String =
+        if(playbackFailureReason.isEmpty() || playbackFailureEpisode!=episodeIndex) status
+        else "$playbackFailureReason\n$status"
     private fun scheduleRecovery() {
         if(!foreground || !playError || !autoRecovery || retryPending) return
-        if(!recovery.remaining) { autoRecovery=false; playbackText.text="已自动重试 3 次，仍无法播放。可手动重试或切换清晰度。"; return }
-        if(!networkAvailable()) { playbackText.text="网络已断开，联网后自动续播 · 第 ${episodeIndex+1} 集 ${formatTime(retryPosition)}"; return }
+        if(!recovery.remaining) { autoRecovery=false; playbackText.text=withFailureReason("已自动重试 3 次，仍无法播放。可手动重试或切换清晰度。"); return }
+        if(!networkAvailable()) { playbackText.text=withFailureReason("网络已断开，联网后自动续播 · 第 ${episodeIndex+1} 集 ${formatTime(retryPosition)}"); return }
         val delay=recovery.delayMillis ?: return
         // 有的时候不是网络不行，是设备注册还没到能再试的时候。早了也是白问，还白等一轮。
         val wait=maxOf(delay,retryNotBeforeMs)
-        playbackText.text="${if(retryAutoplay) "准备恢复播放" else "准备恢复暂停位置"} · ${wait/1000f} 秒后重试 ${recovery.attempts+1}/3 · ${formatTime(retryPosition)}"
+        playbackText.text=withFailureReason("${if(retryAutoplay) "准备恢复播放" else "准备恢复暂停位置"} · ${wait/1000f} 秒后重试 ${recovery.attempts+1}/3 · ${formatTime(retryPosition)}")
         retryPending=true; main.postDelayed(retryRunnable,wait)
     }
     private fun playerFailure(problem: Throwable) {
-        TvProbe.report("player_failure", mapOf(
-            "error" to TvProbe.chain(problem),
-            "cls" to problem.javaClass.name,
-            "code" to (problem as? PlaybackException)?.errorCode,
-            "codeName" to (problem as? PlaybackException)?.errorCodeName,
-            "episode" to (episodeIndex + 1),
-            "quality" to library.maxQuality,
-            "positionMs" to currentPosition(),
-            "attempts" to recovery.attempts))
         retryPosition=currentPosition().coerceAtLeast(0); retryAutoplay=requestedAutoplay && !sleepStopped
         saveProgress(); cancelRecovery(); cancelPrefetch()
         playError=true; player?.pause(); progressBar.visibility=View.GONE; hud.visibility=View.VISIBLE; controls.removeAllViews(); controls.visibility=View.VISIBLE; panel=true
@@ -1707,7 +1703,9 @@ class MainActivity: Activity() {
         val sample=problem as? SampleClipException
         val registration=problem as? RegistrationUnavailableException
         val lookup=problem as? AddressLookupException
-        playbackText.text=when {
+        // 原因先记下来：接下来 scheduleRecovery 会往同一行文字里写倒计时，那句倒计时不该
+        // 把原因顶掉 —— 顶掉的话，用户永远不知道自己为什么没得看。
+        playbackFailureReason=when {
             decoding -> "电视无法解码当前视频，可尝试更低清晰度。"
             sample!=null -> "只取到 ${sample.sampleMs/1000} 秒试看片段，不是完整剧集，正在重新获取播放地址…"
             registration!=null -> "播放设备注册未成功，正在重新获取播放地址…"
@@ -1715,6 +1713,8 @@ class MainActivity: Activity() {
             offline -> "网络连接失败，可重试或切换清晰度。"
             else -> "播放失败，可重试或切换清晰度。"
         }
+        playbackFailureEpisode=episodeIndex
+        playbackText.text=playbackFailureReason
         // 注册不是马上就能再试的：它有它自己的窗口，早了也是白问。窗口有多长由 core 说了算。
         retryNotBeforeMs=registration?.retryAfterMs ?: 0L
         val actions=row(); controls.addView(actions)
@@ -1723,7 +1723,7 @@ class MainActivity: Activity() {
         if(sample==null && registration==null && lookup==null) addButton(actions,"尝试 720P") { library.maxQuality=720; playEpisode(episodeIndex,retryPosition,retryAutoplay) }
         addButton(actions,"返回选集") { returnToDetail(true) }
         if(retryable && !sleepStopped) {
-            addButton(controls,"停止自动重试") { cancelRecovery(); playbackText.text="自动重试已停止，观看位置已保留。" }
+            addButton(controls,"停止自动重试") { cancelRecovery(); playbackText.text=withFailureReason("自动重试已停止，观看位置已保留。") }
             autoRecovery=true; scheduleRecovery()
         }
         android.util.Log.w("HongguoTV","Playback failure: ${problem.javaClass.simpleName}"+(if(problem is PlaybackException) " code=${problem.errorCodeName}" else ""))
@@ -1742,7 +1742,7 @@ class MainActivity: Activity() {
         sleepButton?.text="定时 ${sleepTimer.label()}"
         if(screen!="player" || playError) return
         if(sleepStopped) { playbackText.text="定时停止已生效 · 观看位置已保存 · 按播放可继续"; return }
-        if(!playbackReady) { playbackText.text=(if(!requestedAutoplay) "准备后保持暂停 · " else "")+if(video==null) "正在获取播放地址…" else "正在缓冲…"; return }
+        if(!playbackReady) { playbackText.text=withFailureReason((if(!requestedAutoplay) "准备后保持暂停 · " else "")+if(video==null) "正在获取播放地址…" else "正在缓冲…"); return }
         val p=player ?: return
         val duration=p.duration.coerceAtLeast(0); val position=pendingSeek ?: p.currentPosition
         val state=when { p.playbackState==Player.STATE_BUFFERING -> "缓冲中"; p.playbackState==Player.STATE_ENDED -> "本集已结束"; !p.playWhenReady -> "已暂停"; else -> "正在播放" }
