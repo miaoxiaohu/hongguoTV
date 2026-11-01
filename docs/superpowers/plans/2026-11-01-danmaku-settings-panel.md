@@ -38,7 +38,9 @@ app 是 Android 模块（有 JVM 单测源集 `app/src/test`）。
 **Interfaces:**
 - Consumes: `DanmakuSize` / `DanmakuRows` / `DanmakuDensity` / `DanmakuAlpha`（`core/DanmakuStyle.kt`，已存在）
 - Produces:
-  - `data class DanmakuSettingRow(val title: String, val value: String, val options: List<String>)`
+  - `data class DanmakuSettingRow(val title: String, val value: String, val options: List<String>, val selectedIndex: Int)`
+    （`selectedIndex` 是「当前是第几个候选」——**不能靠 `value` 在 `options` 里找**：
+    大小那行的 value 是「标准」，候选串却是「标准 · 100%」，比字符串对不上）
   - `object DanmakuSettings`：
     - `val toggleOptions: List<String>` = `["开启","关闭"]`
     - `val sizeOptions: List<String>`、`val rowOptions: List<String>`、`val densityOptions: List<String>`、`val alphaOptions: List<String>`
@@ -322,7 +324,9 @@ class DanmakuSettingsDialog(
             box.addView(line,LinearLayout.LayoutParams(-1,-2).apply { bottomMargin=dp(4) })
             if(expanded==index) {
                 row.options.forEachIndexed { optionIndex,option ->
-                    val choice=item(option,option==row.value) {
+                    // 当前项用 selectedIndex 认，不用「文案相等」认：大小那行的当前值是
+                    // 「标准」，候选串却是「标准 · 100%」，比字符串对不上。
+                    val choice=item(option,optionIndex==row.selectedIndex) {
                         rows=apply(index,optionIndex)
                         expanded=null
                         focusRow=index
@@ -641,17 +645,14 @@ $adb='D:\Programs\android-sdk\platform-tools\adb.exe'
 
 - [ ] **Step 2: 出一个装到 Palm 的调试包**
 
-版本号取一个**严格大于 Palm 上现装 versionCode** 的值：Step 1 记下的那个 +1 起步。
-若那个值 ≥ 9076（将来的正式包号），正式包的号要相应抬高 —— 更新提示按 versionCode 严格大于比较，
-号不够大，电视/手机永远收不到更新。
+版本号取 **9076 / 0.9.76-dbg**：必须严格大于 Palm 上现装的 9074（电视上也是 9074），
+又必须小于将来的正式包 9077 —— 更新提示按 versionCode 严格大于比较，正式包要越过实验版。
 
 ```
 cd D:\document\project\hongguoTV\kotlin-tv
-$env:HONGGUOTV_VERSION_CODE='9085'; $env:HONGGUOTV_VERSION_NAME='0.9.85-dbg'
+$env:HONGGUOTV_VERSION_CODE='9076'; $env:HONGGUOTV_VERSION_NAME='0.9.76-dbg'
 .\gradlew.bat :app:assembleRelease --console=plain --no-daemon
 ```
-
-（`9085` 只是「装到 Palm 上试」的号。正式包的号在出包那一步另定，见「交付说明」。）
 
 产物：`kotlin-tv/app/build/outputs/apk/release/app-release.apk`
 
@@ -726,9 +727,17 @@ git commit -m "fix: 弹幕设置面板实机验收发现的问题"
 
 ## 交付说明
 
-本计划**不单独出正式包**。弹幕设置面板随 **0.9.76 正式包**一起交付 —— 那个包还要一并收掉
-「播放总是重试」修复的临时探针（`TvProbe.kt`、`ContentRepository.probeDoors()` 等），
-撤干净后重新出包、重新装。正式包版本号必须严格大于电视上现装的 0.9.74/9074 与探针包 0.9.75-dbg/9075。
+本计划**不单独出正式包**。弹幕设置面板随正式包一起交付 —— 那个包还要一并收掉
+「播放总是重试」修复的临时探针（`TvProbe.kt`、`ContentRepository.probeDoors()` 等），撤干净后重新出包、重新装。
+
+版本号链路（更新提示按 versionCode 严格大于比较，官方包必须越过实验版）：
+
+| versionCode | versionName | 用途 |
+|---|---|---|
+| 9074 | 0.9.74 | 电视与 Palm 上现装的版本 |
+| 9075 | 0.9.75-dbg | 「播放总是重试」修复的探针包（不装） |
+| 9076 | 0.9.76-dbg | 本次实机验收用（装 Palm） |
+| **9077** | **0.9.77** | **正式交付包**（弹幕面板 + 播放重试修复，探针撤干净） |
 
 ## 验收标准
 

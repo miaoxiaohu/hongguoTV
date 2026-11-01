@@ -85,6 +85,16 @@
 - 落盘仍是 `native-library-v1` 的 `danmakuEnabled/danmakuSize/danmakuRows/danmakuDensity/danmakuAlpha`
 - 备份/恢复格式**不动**（`LibraryBackup.BackupSettings` 不变），老用户设置不丢
 
+### 行模型
+
+core 里的 `DanmakuSettingRow(title, value, options, selectedIndex)`：
+`value` 是**短标签**（「标准」），`options` 是给用户看的**完整候选串**（「标准 · 100%」），
+`selectedIndex` 是「当前是第几个候选」。
+
+**不能靠 `value` 在 `options` 里找当前项** —— 大小、数量这两行对不上（短标签 vs 完整串）。
+面板标当前项一律用 `selectedIndex`。
+每行都保证 `options[selectedIndex]` 存在：开关行它就等于 `value`，四个样式行它以 `value` 开头。
+
 ## 实现选择
 
 三条路子，选第 1 条：
