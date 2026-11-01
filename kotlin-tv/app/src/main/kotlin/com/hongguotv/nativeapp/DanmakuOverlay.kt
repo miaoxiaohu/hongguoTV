@@ -5,13 +5,13 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Rect
 import android.view.View
 import com.hongguotv.core.Danmaku
 import com.hongguotv.core.DanmakuAlpha
 import com.hongguotv.core.DanmakuDensity
 import com.hongguotv.core.DanmakuLayout
 import com.hongguotv.core.DanmakuLayouts
+import com.hongguotv.core.DanmakuMotion
 import com.hongguotv.core.DanmakuRows
 import com.hongguotv.core.DanmakuSize
 import com.hongguotv.core.DanmakuTimeline
@@ -37,7 +37,6 @@ class DanmakuOverlay(context: Context) : View(context) {
     private var pending: List<Danmaku>?=null
     private var positionSource:()->Long={ 0L }
     private var speedSource:()->Float={ 1f }
-    private var videoRectProvider:()->Rect?={ null }
     private var running=false
     private var textSizePx=0f
     private var trackHeightPx=0
@@ -59,8 +58,6 @@ class DanmakuOverlay(context: Context) : View(context) {
     /** 画面的高度。字号和行数都是按它算的。 */
     private var viewHeight=0
     private var layout: DanmakuLayout?=null
-    /** 每帧都要用，不该每帧都新建一个数组。 */
-    private val overlayAt=IntArray(2)
 
     /**
      * 屏幕放不下用户要的那么多行时告诉外面实际有几行。
@@ -151,14 +148,6 @@ class DanmakuOverlay(context: Context) : View(context) {
      */
     fun setSpeedSource(source: ()->Float) { speedSource=source }
 
-    /**
-     * 视频画面在窗口里的矩形。
-     *
-     * 竖屏短剧在 16:9 的电视上默认是「完整画面」：画面撑满高度，左右留出黑边。弹幕要是按整个
-     * 屏幕算，就会飘在那两条黑边上 —— 看着像飘在画面外面。所以要拿画面的真实矩形。
-     */
-    fun setVideoRectProvider(provider: ()->Rect?) { videoRectProvider=provider }
-
     fun start() {
         if(running) return
         running=true
@@ -189,18 +178,22 @@ class DanmakuOverlay(context: Context) : View(context) {
         val position=positionSource()
         val visible=laid.visibleAt(position,speedSource())
         if(visible.isEmpty()) return
-        // 画面在哪儿：拿不到就按整个 view 算（刚开始播放、surface 还没尺寸时是这种）。
-        val rect=videoRectProvider()?.let { r -> if(r.width()>0&&r.height()>0) r else null }
-        // 两边都是相对窗口的坐标，差值才是相对本 overlay 的。
-        getLocationInWindow(overlayAt)
-        val left=rect?.left?.minus(overlayAt[0]) ?: 0
-        val right=rect?.right?.minus(overlayAt[0]) ?: width
+        // 飞行区间是**整个屏幕**，不是视频画面那一块矩形。
+        //
+        // 用户 2026-11-01 要的是「从右边第一个字出来，左最后一个字结束」。竖屏短剧在 16:9 电视上
+        // 左右留黑边，按画面矩形算的话弹幕根本碰不到屏幕的右缘和左缘。
+        //
+        // 0.9.50 那次改成跟画面矩形走（git show 3eecda9）的副作用是：画的时候没裁剪，起点落在画面
+        // 右缘，整条文字直接摆在右边那条黑边上 —— 用户看到的是「整条突然出现在右边」。所以这次
+        // 起止都放在屏外：刚起步时整条在屏幕右边外面，第一个字才从右缘露头；收尾时最后一个字
+        // 最后在屏幕左缘收尾。
+        val bandWidth=width
         val baseline0=textSizePx
         for(v in visible) {
             val w=if(v.index<widths.size) widths[v.index] else 0f
-            val travel=(right-left)+w
-            val x=right-(v.elapsedMs.toFloat()/laid.lifetimeMs)*travel
-            if(x>right||x+w<left) continue
+            val x=DanmakuMotion.xAt(v.elapsedMs,laid.lifetimeMs,bandWidth,w)
+            // 整条都在屏外就不画：一个字都不露的时候画了也没用。
+            if(DanmakuMotion.visibleTextRange(v.elapsedMs,laid.lifetimeMs,bandWidth,w)==null) continue
             val baseline=baseline0+v.track*trackHeightPx
             canvas.drawText(v.danmaku.text,x,baseline,edge)
             canvas.drawText(v.danmaku.text,x,baseline,fill)

@@ -7,7 +7,6 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.graphics.Color
-import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.view.*
@@ -1500,7 +1499,6 @@ class MainActivity: Activity() {
             danmakuOverlay=DanmakuOverlay(this).apply {
                 setPositionSource { player?.currentPosition ?: 0L }
                 setSpeedSource { player?.playbackParameters?.speed ?: 1f }
-                setVideoRectProvider { videoRect() }
                 // 字号和行数先记着：画面尺寸这时候还没定，等 onSizeChanged 再排版。
                 setStyle(library.danmakuSize,library.danmakuRows,library.danmakuDensity,library.danmakuAlpha)
                 // 屏幕放不下用户要的那么多行时说一声：界面上写着 12 行而屏幕上只有 7 行，
@@ -1862,26 +1860,6 @@ class MainActivity: Activity() {
         VideoFrameMode.FIT -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
         VideoFrameMode.ZOOM -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
         VideoFrameMode.FILL -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL
-    }
-    /**
-     * 视频画面在窗口里的矩形。
-     *
-     * 竖屏短剧在 16:9 的电视上默认是「完整画面」：画面撑满高度，左右各留一条黑边。弹幕要按
-     * 画面的真实宽度走，不然就飘在那两条黑边上 —— 看着像飘在画面外面。
-     *
-     * 找的是 surface 本身：播放器外面那层框永远是全屏的，只有 surface 才是画面真正的范围。
-     */
-    private fun videoRect(): Rect? {
-        val pv=playerView ?: return null
-        val surface=findSurface(pv) ?: return null
-        if(surface.width<=0||surface.height<=0) return null
-        val at=IntArray(2); surface.getLocationInWindow(at)
-        return Rect(at[0],at[1],at[0]+surface.width,at[1]+surface.height)
-    }
-    private fun findSurface(view: View): View? {
-        if(view is SurfaceView||view is TextureView) return view
-        if(view is ViewGroup) for(i in 0 until view.childCount) findSurface(view.getChildAt(i))?.let { return it }
-        return null
     }
     private fun showFramePicker(anchor: TextView,inPlayer: Boolean) {
         tvTools.choose("全局画面模式",listOf("完整画面 · 保留比例与全部内容","等比铺满 · 会裁掉部分画面与字幕","拉伸铺满 · 画面比例会改变"),anchor,{ index ->
