@@ -2,6 +2,7 @@
 package com.hongguotv.nativeapp
 
 import android.app.Activity
+import android.app.Application
 import android.app.Dialog
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
@@ -9,6 +10,9 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.ViewTreeObserver
 import android.view.Window
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -71,6 +75,39 @@ class DanmakuSettingsDialog(
     /** 全局布局监听：只挂一个，挂在窗口的 decor 上。 */
     private var layoutListener: ViewTreeObserver.OnGlobalLayoutListener?=null
     private var layoutObserver: ViewTreeObserver?=null
+    /** 宿主生命周期监听挂上了没有。 */
+    private var lifecycleRegistered=false
+    private val mainHandler=Handler(Looper.getMainLooper())
+
+    /**
+     * 宿主 Activity 停了就把面板收掉。
+     *
+     * 面板是独立的 Dialog 窗口，不走 TvTools —— MainActivity.onStop() 里的 tvTools.close() 关不掉它。
+     * 面板开着时按 HOME / 切应用 / 熄屏，Dialog 的窗口会留着，可能报 WindowLeaked。
+     *
+     * 只在 onActivityStopped 收：onActivityPaused 时（半透明覆盖层、拉通知栏）宿主还看得见，
+     * 这时候把面板关了莫名其妙。Activity 销毁前一定先 stop，所以这一条就够。
+     */
+    private val lifecycle=object: Application.ActivityLifecycleCallbacks {
+        override fun onActivityCreated(host: Activity,savedInstanceState: Bundle?)=Unit
+        override fun onActivityStarted(host: Activity)=Unit
+        override fun onActivityResumed(host: Activity)=Unit
+        override fun onActivityPaused(host: Activity)=Unit
+        override fun onActivityStopped(host: Activity) { stopWith(host) }
+        override fun onActivitySaveInstanceState(host: Activity,outState: Bundle)=Unit
+        override fun onActivityDestroyed(host: Activity) { stopWith(host) }
+    }
+
+    /**
+     * 宿主停了 → 收面板。
+     *
+     * 收的动作挪到下一轮消息循环：反注册要动 Application 的回调列表，
+     * 而此刻正是在遍历那个列表 —— 遍历中删元素会越界。
+     */
+    private fun stopWith(host: Activity) {
+        if(host!==activity) return
+        mainHandler.post { dismiss() }
+    }
 
     init {
         box.addView(title)
@@ -182,6 +219,8 @@ class DanmakuSettingsDialog(
 
     /** 布局完成：按实测高度纠正滚动区、重算焦点图、把焦点还给该落的那一行。 */
     private fun onPanelLayout() {
+        // 面板已经关掉就别再动它的 view：布局回调可能比 dismiss 晚到一步。
+        if(!dialog.isShowing) return
         // 手动量的时候宽度是按面板宽算的，真布局差一点就以实测为准。
         setScrollHeight(scrollHeightFor(list.measuredHeight,title.measuredHeight))
         focusRouter.apply(box)
@@ -236,6 +275,11 @@ class DanmakuSettingsDialog(
             setLayout(panelWidth(),LinearLayout.LayoutParams.WRAP_CONTENT)
         }
         hookLayout()
+        // 宿主一停就收面板（见 lifecycle）：挂上就得记得摘，摘在 notifyClosed 里。
+        if(!lifecycleRegistered) {
+            activity.application.registerActivityLifecycleCallbacks(lifecycle)
+            lifecycleRegistered=true
+        }
     }
 
     fun dismiss() {
@@ -248,6 +292,15 @@ class DanmakuSettingsDialog(
     private fun notifyClosed() {
         if(closedSent) return
         closedSent=true
+        // 面板没了就别再听它的布局：晚到的回调只会去动已经 detach 的 view。
+        layoutListener?.let { layoutObserver?.removeOnGlobalLayoutListener(it) }
+        layoutListener=null
+        layoutObserver=null
+        // 生命周期监听也得摘：Application 一直活着，留着就把面板和 Activity 一起拖住了。
+        if(lifecycleRegistered) {
+            activity.application.unregisterActivityLifecycleCallbacks(lifecycle)
+            lifecycleRegistered=false
+        }
         closed()
     }
 }
