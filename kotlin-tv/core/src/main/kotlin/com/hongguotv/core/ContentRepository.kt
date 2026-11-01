@@ -176,7 +176,13 @@ data class CatalogPage(
     /** 站方那十行是不是没拿到。 */
     val serverFailed: Boolean get() = serverProblem != ServerSearchProblem.NONE
 }
-data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
+/**
+ * A playable stream, and the door that answered with it.
+ *
+ * TEMPORARY: `door` names the endpoint that produced this address (registered / signed / web).
+ * It exists for the probe build and is removed before the release build.
+ */
+data class StreamInfo(val url: String, val key: ByteArray?, val quality: String, val door: String = "unknown")
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
 
 /**
@@ -217,6 +223,39 @@ class EmptySignedAnswerException: IOException("播放接口返回空内容")
 class PublicPageHasNoEpisodeException: IOException("该来源每部剧只提供前 3 集，本集暂无资源")
 
 /**
+ * The anonymous device could not be registered, and the attempt is not repeated for a moment.
+ *
+ * This is the failure that used to turn a ten-second outage into a minute of "play ten seconds,
+ * fail, retry". The registration stalled, the attempt was given up on, and every attempt inside
+ * the retry window then reported the *absence* of an identity - which is not a network failure,
+ * so the fallback walked on to the public page. That page hosts the ten-second sample, so the
+ * box played ten seconds of 360p, said "failed", and did it again.
+ *
+ * The exception says exactly what it is, so the fallback can tell it apart from a refusal and
+ * stay where it is: without an identity the public page can only offer the sample.
+ */
+class RegistrationUnavailableException(val retryAfterMs: Long = 0L): IOException("播放设备注册未成功，请稍后重试")
+
+/**
+ * The source answered with the ten-second sample instead of the episode.
+ *
+ * The public page hosts `video/public/<id>/360p.mp4`, and that file is ten seconds long
+ * (measured 2026-11-01: exactly 10.000 s, 1,057,426 bytes) - a preview, not the episode. It
+ * used to be handed to the player as if it were the episode, which played for ten seconds and
+ * then reported a playback failure.
+ */
+class SampleClipException(val sampleMs: Long): IOException("只取到 ${sampleMs/1000} 秒试看片段，不是完整剧集")
+
+/**
+ * The address lookup did not produce an address to play.
+ *
+ * The person is looking at 「正在获取播放地址…」 while this happens, so the wording of the
+ * failure matters: it is not "the network is broken" and not "try another quality" - the next
+ * thing that helps is another attempt at the address.
+ */
+class AddressLookupException(val timedOut: Boolean,cause: Throwable): IOException(if(timedOut) "获取播放地址超时" else "获取播放地址失败",cause)
+
+/**
  * How many board pages one shelf may have.
  *
  * The site publishes five for every board and answers 404 on the sixth - measured 2026-10-19 for
@@ -238,15 +277,30 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      */
     private val addressHttp=addressHttpClient(http)
     /**
+     * The transport one registration attempt uses.
+     *
+     * The registration gets its own leash because it is a once-per-session request that the
+     * whole playback path depends on. Measured 2026-11-01 on the TV: the connection to the
+     * registration host stalled for 10.04 s and 15.03 s and the answer that finally came was
+     * 155 ms past the ten-second deadline the address lookup used - so a request that would
+     * have succeeded was killed, and the box was left without an identity.
+     *
+     * Twenty seconds covers both stalls that were measured and still ends the wait for a
+     * registration that is never going to answer.
+     */
+    private val registrationHttp=addressHttpClient(http).newBuilder()
+        .callTimeout(REGISTRATION_CALL_TIMEOUT_S,TimeUnit.SECONDS).build()
+    /**
      * The registered playback identity, and the moment the last registration attempt failed.
      *
      * The identity belongs to this repository rather than to a process-wide singleton: the app
      * makes one repository for the whole session, so the device is registered once either way,
      * but a test that makes a repository of its own cannot inherit another test's identity.
      *
-     * A failed registration is not retried for a minute. It is not remembered as a failure - it
-     * is only not retried - so that a playback attempt does not turn into a registration attempt
-     * every time the person turns the set on.
+     * A failed registration is not retried for a few seconds. It is not remembered as a failure -
+     * it is only not retried - so that a playback attempt does not turn into a registration
+     * attempt every time the person turns the set on. The window used to be a minute, and a
+     * minute is long enough for every attempt inside it to be answered with the sample.
      */
     @Volatile private var registeredIdentity: PlaybackIdentity?=null
     @Volatile private var registrationFailedAt=0L
@@ -260,12 +314,56 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         registeredIdentity?.let { return it }
         val now=clock()
         if(registrationFailedAt>0 && now-registrationFailedAt<PLAYBACK_REGISTRATION_RETRY_MS) {
-            throw IOException("播放设备注册未成功，请稍后重试")
+            // The window is measured from the moment the attempt *failed*, not from the moment it
+            // started: an attempt that took twenty seconds to fail has already spent its window.
+            // What is left of it travels with the exception, so the caller does not knock again
+            // before the window is over.
+            throw RegistrationUnavailableException(PLAYBACK_REGISTRATION_RETRY_MS-(now-registrationFailedAt))
         }
-        registrationFailedAt=now
-        val identity=PlaybackDevice.register(addressHttp,now)
+        val identity=try { registerIdentity(now) }
+        catch(e: Exception) { registrationFailedAt=clock(); throw e }
         registeredIdentity=identity
+        registrationFailedAt=0
         return identity
+    }
+    /**
+     * One registration attempt, and a second one on a fresh connection when the first stalled.
+     *
+     * A connection that stalled does not come back by being asked again on the same socket. The
+     * pooled connections are thrown away and the request goes out again: the name is resolved
+     * anew, and the new attempt can land on another edge - which is what happened on the TV,
+     * where a connection to one edge sat still for ten seconds while a new connection to
+     * another was answered in 215 ms.
+     *
+     * Only a stall earns the second attempt. A connection that was refused is talking to a host
+     * that is not there, and the answer would be the same one more time.
+     */
+    private fun registerIdentity(now: Long): PlaybackIdentity {
+        try { return PlaybackDevice.register(registrationHttp,now) }
+        catch(first: Exception) {
+            if(!isTimeoutFailure(first)||isCancellation(first)) throw first
+            http.connectionPool.evictAll()
+            try { return PlaybackDevice.register(registrationHttp,now) }
+            catch(second: Exception) { second.addSuppressed(first); throw second }
+        }
+    }
+    /**
+     * One address lookup, and a second one on a fresh connection when the first died of the network.
+     *
+     * A connection that stalled does not come back by being asked again on the same socket. The
+     * pooled connections are thrown away and the request goes out again: the name is resolved
+     * anew, and the new connection can land on another edge. Measured on the TV, 2026-11-01: the
+     * old connection to one edge sat still for 10.04 s and 15.03 s, while a new connection to
+     * another edge was answered in 215 ms.
+     */
+    private fun <T> addressLookup(ask: (OkHttpClient) -> T): T {
+        try { return ask(addressHttp) }
+        catch(first: Exception) {
+            if(!isTimeoutFailure(first)||isCancellation(first)) throw first
+            http.connectionPool.evictAll()
+            try { return ask(addressHttp) }
+            catch(second: Exception) { second.addSuppressed(first); throw second }
+        }
     }
     private fun text(url: String, signed: Signer.Request? = null, client: OkHttpClient = http): String {
         val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
@@ -659,23 +757,41 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      */
     fun stream(seriesId: String, id: String, maxQuality: Int = 1080): StreamInfo {
         require(seriesId.matches(Regex("[0-9]{1,30}")) && id.matches(Regex("[0-9]{1,30}")))
-        // The endpoint that answers today is asked first: it wants a registered identity and no
-        // signature, which is the opposite of what the signed path sends - see
-        // [registeredStream]. The signed path stays as the second door because it is the one
-        // that answered until 2026-10-27 and may answer again.
+        return try { streamDoors(seriesId,id,maxQuality) }
+        catch(e: Exception) {
+            // The caller is the person waiting in front of the set, so a failure of the network
+            // is named as what it is: the address could not be obtained, and the next thing that
+            // helps is another attempt at the address - not another quality.
+            //
+            // A refusal keeps its own wording: it is a different thing, and it says more about
+            // the site than a generic failure would.
+            when(e) {
+                is AddressLookupException,is SampleClipException,is RegistrationUnavailableException -> throw e
+                is PublicPageHasNoEpisodeException -> throw e
+                else -> {
+                    if(isCancellation(e)) throw e
+                    if(isNetworkFailure(e)) throw AddressLookupException(isTimeoutFailure(e),e)
+                    throw e
+                }
+            }
+        }
+    }
+    /**
+     * Asks the three doors in the order that answers today.
+     *
+     * The doors themselves are described on [stream]; this is where the order is decided.
+     */
+    private fun streamDoors(seriesId: String, id: String, maxQuality: Int): StreamInfo {
         try { return registeredStream(id,maxQuality) }
         catch(registered: Exception) {
+            // The signed door sits on the same host as the registered one, so when the first
+            // attempt died of the network the second one dies of the same network - and the
+            // wait before the person hears anything grows with it. The public page is another
+            // host, but it only has the ten-second sample, so it is not worth a detour either.
+            if(fallbackCannotHelp(registered)) throw registered
             try { return signedStream(id,maxQuality) }
             catch(signed: Exception) {
-                // Must be Exception, not IOException: the signed endpoint answers HTTP 200 with a
-                // zero-byte body, so `JSONObject(text(...))` throws org.json.JSONException - a
-                // RuntimeException - which an IOException-only catch lets escape past the fallback.
-                //
-                // The fallback is only worth making when the endpoint *answered* with
-                // something unusable. When the network is gone, the public page is the same dead
-                // network: asking it as well doubles the silence before the user learns that the
-                // episode cannot be played, and the retry counter does not start until it returns.
-                if(fallbackCannotHelp(signed) && fallbackCannotHelp(registered)) {
+                if(fallbackCannotHelp(signed)) {
                     signed.addSuppressed(registered); throw signed
                 }
                 try { return webStream(seriesId,id,maxQuality) }
@@ -707,8 +823,9 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * The answer holds one entry per episode that was asked for, and the model it carries usually
      * has the renditions inline; only some answers point at a second address instead.
      */
-    private fun registeredStream(id: String, maxQuality: Int): StreamInfo {
-        val identity=playbackIdentity()
+    private fun registeredStream(id: String, maxQuality: Int): StreamInfo = registeredStreamWith(playbackIdentity(), id, maxQuality)
+    /** TEMPORARY split so the probe can try the door with a brand new identity. */
+    private fun registeredStreamWith(identity: PlaybackIdentity, id: String, maxQuality: Int): StreamInfo {
         val query=LinkedHashMap<String,String>(PLAYBACK_DEVICE_PARAMS)
         query["device_id"]=identity.deviceId
         query["iid"]=identity.iid
@@ -721,10 +838,10 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             .header("Content-Type","application/json; charset=UTF-8")
             .post(body.toRequestBody("application/json; charset=UTF-8".toMediaType()))
             .build()
-        val text=RequestScope.execute(addressHttp.newCall(request)) { response ->
+        val text=addressLookup { client -> RequestScope.execute(client.newCall(request)) { response ->
             if(!response.isSuccessful) throw HttpStatusException(response.code)
             response.body?.string() ?: throw IOException("播放信息为空")
-        }
+        } }
         // The same zero-byte answer the signed path gets when it is refused.
         if(text.isBlank()) throw EmptySignedAnswerException()
         val answer=JSONObject(text)
@@ -746,7 +863,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             val outer=JSONObject(text(fallback,client=addressHttp))
             info=outer.optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
         }
-        return pickStream(info,maxQuality)
+        return pickStream(info,maxQuality,"registered")
     }
     /** The renditions a model carries, in either of the two shapes they arrive in. */
     private fun renditions(info: JSONObject): List<JSONObject> {
@@ -773,7 +890,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * A model that arrives from the older endpoint has all of it at the top level instead, so
      * every field is read from both places.
      */
-    private fun pickStream(info: JSONObject, maxQuality: Int): StreamInfo {
+    private fun pickStream(info: JSONObject, maxQuality: Int, door: String): StreamInfo {
         val seed=info.str("key_seed")
         val rows=renditions(info).mapNotNull { item ->
             val meta=item.optJSONObject("video_meta")
@@ -797,7 +914,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         val spade=selected.item.str("spade_a").ifEmpty { selected.item.optJSONObject("encrypt_info")?.str("spade_a").orEmpty() }
         val key=spade.takeIf { it.isNotEmpty() }?.let { runCatching { MediaCrypto.deriveKey(it) }.getOrNull() }
         val quality=if(selected.height>0) "${selected.height}P"+(if(selected.height>maxQuality) "（兼容资源）" else "") else "自动"
-        return StreamInfo(url,key,quality)
+        return StreamInfo(url,key,quality,door)
     }
     /** One rendition of a model: where it is, how big it is, and what the entry said about it. */
     private class Rendition(val url: String, val height: Int, val item: JSONObject)
@@ -913,10 +1030,35 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         if(!url.startsWith("https://") && !url.startsWith("http://")) throw IOException("播放地址无效")
         val key=item.str("spade_a").takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
         val quality=if(selected.first>0) "${selected.first}P"+(if(selected.first>maxQuality) "（兼容资源）" else "") else "自动"
-        return StreamInfo(url,key,quality)
+        return StreamInfo(url,key,quality,"signed")
+    }
+    /**
+     * TEMPORARY: report what each door answers on its own. Probe builds only; removed before release.
+     */
+    internal fun probeWebStream(seriesId: String, id: String, maxQuality: Int): StreamInfo = webStream(seriesId,id,maxQuality)
+    internal fun probeDoors(seriesId: String, id: String, maxQuality: Int): List<String> {
+        val out=mutableListOf<String>()
+        fun attempt(label: String, block: () -> StreamInfo) {
+            val began=System.currentTimeMillis()
+            try {
+                val info=block()
+                out.add("$label OK quality=${info.quality} url=${info.url.take(150)} ms=${System.currentTimeMillis()-began}")
+            } catch(e: Exception) {
+                out.add("$label FAIL ${e.javaClass.simpleName}: ${e.message} ms=${System.currentTimeMillis()-began}")
+                e.suppressed.forEach { out.add("   suppressed ${it.javaClass.simpleName}: ${it.message}") }
+            }
+        }
+        attempt("registered") { registeredStream(id,maxQuality) }
+        attempt("registered-fresh") {
+            val identity=PlaybackDevice.register(addressHttp,clock())
+            registeredStreamWith(identity,id,maxQuality)
+        }
+        attempt("signed") { signedStream(id,maxQuality) }
+        attempt("web") { webStream(seriesId,id,maxQuality) }
+        return out
     }
     private fun webStream(seriesId: String, id: String, maxQuality: Int): StreamInfo {
-        val html=try { text("$site/player/$seriesId/$id",client=addressHttp) }
+        val html=try { addressLookup { client -> text("$site/player/$seriesId/$id",client=client) } }
         catch(e: HttpStatusException) { if(e.code==404) throw PublicPageHasNoEpisodeException(); throw e }
         val raw=Regex("\"contentUrl\"\\s*:\\s*\"([^\"]+)\"").find(html)?.groupValues?.get(1)
             ?: Regex("\"main_url\"\\s*:\\s*\"([^\"]+)\"").find(html)?.groupValues?.get(1)
@@ -926,7 +1068,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         if(!url.startsWith("https://") && !url.startsWith("http://")) throw IOException("播放地址格式异常")
         val height=Regex("(\\d{3,4})p").find(url)?.groupValues?.get(1)?.toIntOrNull() ?: 0
         val quality=if(height>0) "${height}P"+(if(height>maxQuality) "（兼容资源）" else "") else "自动"
-        return StreamInfo(url,null,quality)
+        return StreamInfo(url,null,quality,"web")
     }
     companion object {
         /** The only signed player endpoint that still answers; see [stream]. */
@@ -952,8 +1094,24 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
          * The failure is not remembered as a failure - only the attempt is not repeated - so
          * that a person turning the set on does not pay for a registration attempt on every
          * episode, while a single minute later the registration is tried again.
+         *
+         * The window used to be a minute. That was long enough for every attempt inside it to
+         * be answered with the public page's ten-second sample: the box played ten seconds of
+         * 360p, said "failed", and did it again - which is what "播放总是重试" looked like from
+         * the sofa. Five seconds is long enough to keep a dead network from being asked on
+         * every episode and short enough that the next attempt is a real one.
          */
-        const val PLAYBACK_REGISTRATION_RETRY_MS = 60_000L
+        const val PLAYBACK_REGISTRATION_RETRY_MS = 5_000L
+        /**
+         * How long one device registration may take.
+         *
+         * It is a request the whole playback path depends on, and it happens once per session,
+         * so it can afford to wait longer than an address lookup: the lookup's ten seconds were
+         * measured against a stall of 10.04 s whose answer arrived 155 ms late - the request
+         * was killed a moment before it would have succeeded, and the box was left without an
+         * identity for the whole retry window.
+         */
+        const val REGISTRATION_CALL_TIMEOUT_S = 20L
         /**
          * The device parameters the playback request carries beside the registered identity.
          *

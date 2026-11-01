@@ -614,6 +614,181 @@ private fun run(args: Array<String>, report: ProbeReport) {
         }
         return
     }
+    if(args.contains("--register")) {
+        try {
+            val times=args.getOrNull(args.indexOf("--register")+1)?.toIntOrNull() ?: 20
+            var ok=0; var fail=0
+            repeat(times) { i ->
+                try {
+                    val identity=PlaybackDevice.register(repository.http,System.currentTimeMillis())
+                    ok++; say("#$i register OK device=${identity.deviceId} iid=${identity.iid}")
+                } catch(e: Exception) {
+                    fail++; say("#$i register FAIL ${e.javaClass.simpleName}: ${e.message}")
+                }
+                Thread.sleep(200)
+            }
+            say("register ok=$ok fail=$fail of $times")
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
+    if(args.contains("--doorprobe")) {
+        try {
+            val times=args.getOrNull(args.indexOf("--doorprobe")+1)?.toIntOrNull() ?: 3
+            val home=repository.home(type=ContentType.SHORT)
+            val detail=repository.detail(home.items.first().id)
+            val episode=detail.episodes.first()
+            repeat(times) { i ->
+                say("=== round $i ===")
+                repository.probeDoors(detail.series.id,episode,1080).forEach { say("  $it") }
+                Thread.sleep(500)
+            }
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
+    if(args.contains("--doors")) {
+        try {
+            val times=args.getOrNull(args.indexOf("--doors")+1)?.toIntOrNull() ?: 8
+            val home=repository.home(type=ContentType.SHORT)
+            val detail=repository.detail(home.items.first().id)
+            val episode=detail.episodes.first()
+            var good=0; var fallback=0
+            repeat(times) { i ->
+                try {
+                    val stream=repository.stream(detail.series.id,episode,1080)
+                    val host=java.net.URI(stream.url).host
+                    val request=okhttp3.Request.Builder().url(stream.url)
+                        .header("User-Agent",VendorConstants.VIDEO_UA)
+                        .header("Referer","https://novel.snssdk.com/")
+                        .header("Range","bytes=0-524287")
+                        .header("Accept-Encoding","identity").build()
+                    var total=0L; var http=0; var past=""
+                    repository.http.newCall(request).execute().use { response ->
+                        http=response.code
+                        response.header("Content-Range")?.let { cr ->
+                            val m=Regex("bytes (\\d+)-(\\d+)/(\\d+)").matchEntire(cr)
+                            if(m!=null) total=m.groupValues[3].toLong()
+                        }
+                    }
+                    if(total>0) {
+                        val next=okhttp3.Request.Builder().url(stream.url)
+                            .header("User-Agent",VendorConstants.VIDEO_UA)
+                            .header("Referer","https://novel.snssdk.com/")
+                            .header("Range","bytes=$total-${total+524287}")
+                            .header("Accept-Encoding","identity").build()
+                        repository.http.newCall(next).execute().use { r -> past="http=${r.code}" }
+                    }
+                    val usable=total>2L*1024*1024
+                    if(usable) good++ else fallback++
+                    say("#$i quality=${stream.quality} host=$host firstHTTP=$http fileBytes=$total pastEnd=$past ${if(usable) "GOOD" else "SHORT/BAD"}")
+                } catch(e: Exception) {
+                    say("#$i failed ${e.javaClass.simpleName}: ${e.message}")
+                }
+                Thread.sleep(800)
+            }
+            say("good=$good bad=$fallback of $times")
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
+    // The public page's own resource, measured against the sample rule: it is a ten-second
+    // preview, and the shipped code has to refuse it instead of playing it as the episode.
+    if(args.contains("--sample")) {
+        try {
+            val home=repository.home(type=ContentType.SHORT)
+            val detail=repository.detail(home.items.first().id)
+            val episode=detail.episodes.first()
+            val info=repository.probeWebStream(detail.series.id,episode,1080)
+            say("web url=${info.url} quality=${info.quality}")
+            val remote=RemoteVideo(repository.http,info)
+            try {
+                remote.prepare()
+                say("prepared durationMs=${remote.durationMs} total=${remote.total} - NOT REFUSED")
+            } catch(e: SampleClipException) {
+                say("refused as a sample: ${e.message} (sampleMs=${e.sampleMs})")
+            }
+            remote.close()
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
+    if(args.contains("--ranges")) {
+        try {
+            val home=repository.home(type=ContentType.SHORT)
+            val detail=repository.detail(home.items.first().id)
+            val episode=detail.episodes.first()
+            for(q in listOf(1080,720)) {
+                val stream=repository.stream(detail.series.id,episode,q)
+                say("--- asked=$q quality=${stream.quality} host=${java.net.URI(stream.url).host}")
+                var start=0L; var total=0L; var round=0
+                while(start<16L*1024*1024 && round<40) {
+                    val end=start+512*1024-1
+                    val request=okhttp3.Request.Builder().url(stream.url)
+                        .header("User-Agent",VendorConstants.VIDEO_UA)
+                        .header("Referer","https://novel.snssdk.com/")
+                        .header("Range","bytes=$start-$end")
+                        .header("Accept-Encoding","identity").build()
+                    val began=System.currentTimeMillis()
+                    try {
+                        repository.http.newCall(request).execute().use { response ->
+                            val bytes=response.body?.bytes() ?: ByteArray(0)
+                            val cr=response.header("Content-Range")
+                            say("  req=$start-$end http=${response.code} cr=$cr len=${bytes.size} ms=${System.currentTimeMillis()-began}")
+                            if(cr!=null) {
+                                val m=Regex("bytes (\\d+)-(\\d+)/(\\d+)").matchEntire(cr)
+                                if(m!=null) {
+                                    val from=m.groupValues[1].toLong(); val to=m.groupValues[2].toLong(); val full=m.groupValues[3].toLong()
+                                    if(full!=total) say("  !! total changed: $total -> $full")
+                                    total=full
+                                    if(from!=start) say("  !! range start mismatch: asked $start, got $from")
+                                    if(to>full-1) say("  !! range end beyond file: $to > ${full-1}")
+                                } else say("  !! Content-Range not parsable: $cr")
+                            } else say("  !! no Content-Range header")
+                            start+=bytes.size
+                        }
+                    } catch(e: Exception) {
+                        say("  req=$start-$end FAILED ${e.javaClass.simpleName}: ${e.message}")
+                        break
+                    }
+                    round++
+                }
+                say("  total=$total fetched_to=$start")
+            }
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
+    if(args.contains("--qualityurls")) {
+        try {
+            val home=repository.home(type=ContentType.SHORT)
+            val detail=repository.detail(home.items.first().id)
+            val episode=detail.episodes.first()
+            say("series=${detail.series.title} episode=${episode}")
+            for(q in listOf(1080,720,480)) {
+                try {
+                    val stream=repository.stream(detail.series.id,episode,q)
+                    val uri=java.net.URI(stream.url)
+                    say("asked=$q quality=${stream.quality} host=${uri.host} scheme=${uri.scheme}")
+                    say("  url=${stream.url.take(200)}")
+                    try {
+                        val addrs=java.net.InetAddress.getAllByName(uri.host)
+                        say("  dns -> "+addrs.joinToString(", "){ it.javaClass.simpleName+" "+it.hostAddress })
+                    } catch(e: Exception) { say("  dns failed: ${e.javaClass.simpleName} ${e.message}") }
+                } catch(e: Exception) {
+                    say("asked=$q failed: ${e.javaClass.simpleName} ${e.message}")
+                }
+            }
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
     val type=if(args.contains("--comic")) ContentType.COMIC else ContentType.SHORT
     val keyword=if(type==ContentType.COMIC) "修仙" else "总裁"
     // The client is shut down here as it is in every other branch. OkHttp's dispatcher runs

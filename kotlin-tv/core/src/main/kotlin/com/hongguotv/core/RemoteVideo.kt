@@ -24,6 +24,15 @@ class RemoteVideo(private val http: OkHttpClient, val info: StreamInfo): Closeab
     @Volatile private var prefix=byteArrayOf()
     /** True once the index has been read and the stream can be decrypted. */
     @Volatile private var ready=false
+    /**
+     * How long the media is, in milliseconds, as the container says.
+     *
+     * Zero when the container does not say. It is what tells a ten-second sample from an
+     * episode: the public page hosts `video/public/<id>/360p.mp4`, which is exactly ten
+     * seconds long (measured 2026-11-01), and that file used to be handed to the player as if
+     * it were the episode - ten seconds of 360p, then a playback failure, then a retry.
+     */
+    @Volatile var durationMs: Long=0; private set
 
     /**
      * One request for the bytes of [start]..[end].
@@ -88,8 +97,17 @@ class RemoteVideo(private val http: OkHttpClient, val info: StreamInfo): Closeab
         prefix=first.bytes
         val end=MediaCrypto.headerEnd(first.bytes,total)
         val header=if(end>first.bytes.size) first.bytes+range(first.bytes.size.toLong(),end-1L).bytes else first.bytes.copyOf(end)
-        prepared=MediaCrypto.prepare(header,info.key)
-        if(prepared.samples.any { it.end>total }) throw IOException("视频样本超出资源大小")
+        val index=MediaCrypto.prepare(header,info.key)
+        if(index.samples.any { it.end>total }) throw IOException("视频样本超出资源大小")
+        durationMs=MediaCrypto.mediaDurationMs(header) ?: 0L
+        // A clip that is over in a few seconds is not the episode. Playing it anyway is what
+        // made the box look broken: ten seconds of 360p, a failure, and a retry that did the
+        // same thing again.
+        //
+        // The index is only remembered once the clip has been accepted, so that a stream which
+        // was refused says so again the next time it is prepared.
+        if(durationMs in 1..SAMPLE_CLIP_MAX_MS) throw SampleClipException(durationMs)
+        prepared=index
         ready=true
         return this
     }
@@ -122,5 +140,12 @@ class RemoteVideo(private val http: OkHttpClient, val info: StreamInfo): Closeab
     private companion object {
         /** How many times one range may be continued before the server counts as broken. */
         const val MAX_RANGE_CONTINUATIONS=64
+        /**
+         * How long a resource may be before it counts as a sample rather than an episode.
+         *
+         * The public page's preview is ten seconds; an episode of a short drama is a few
+         * minutes. The bound sits above the sample and far below any real episode.
+         */
+        const val SAMPLE_CLIP_MAX_MS=12_000L
     }
 }

@@ -131,6 +131,34 @@ object MediaCrypto {
         if(sorted.zipWithNext().any { (a,b) -> a.end>b.start }) throw IOException("视频样本重叠")
         return Prepared(header,sorted)
     }
+    /**
+     * The length of the media, in milliseconds, as the container states it.
+     *
+     * The `mvhd` box carries a timescale and a duration, and the two together are the length of
+     * the media. It is what tells a sample from an episode: measured 2026-11-01, the public
+     * page's `360p.mp4` is exactly 10.000 s long and a real episode is 179.9 s.
+     *
+     * A container that does not say returns null rather than a guess: the caller treats an
+     * unknown length as "not a sample", and a wrong guess would refuse a real episode.
+     */
+    fun mediaDurationMs(data: ByteArray): Long? {
+        if(data.size<16) return null
+        val moov=box(data,data.u32(0).toInt()) ?: return null
+        if(moov.type!="moov") return null
+        val mvhd=find(data,"mvhd",moov.body,moov.end) ?: return null
+        val version=data[mvhd.body].u()
+        val timescale: Long
+        val duration: Long
+        if(version==0) {
+            if(mvhd.body+20>mvhd.end) return null
+            timescale=data.u32(mvhd.body+12); duration=data.u32(mvhd.body+16)
+        } else {
+            if(mvhd.body+32>mvhd.end) return null
+            timescale=data.u32(mvhd.body+20); duration=data.i64(mvhd.body+24)
+        }
+        if(timescale<=0L||duration<=0L) return null
+        return duration*1000L/timescale
+    }
     fun decrypt(data: ByteArray,start: Long,key: ByteArray?,prepared: Prepared): ByteArray {
         require(start>=0)
         val result=data.copyOf(); val end=start+data.size

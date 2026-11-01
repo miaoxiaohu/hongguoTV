@@ -180,6 +180,13 @@ class MainActivity: Activity() {
     private var retryPosition=0L
     private var requestedAutoplay=true
     private var retryAutoplay=true
+    /**
+     * 下一次自动重试最早可以是什么时候。
+     *
+     * 设备注册失败之后不能马上再问 —— core 那边有一个窗口，窗口没过之前再问也是白问。
+     * 这个值就是那个窗口剩下的时间。
+     */
+    private var retryNotBeforeMs=0L
     private var foreground=false
     private lateinit var connectivity: ConnectivityManager
     private var networkRegistered=false
@@ -1471,6 +1478,7 @@ class MainActivity: Activity() {
         video=prefetched
         var firstReady=true; var firstFrame=true
         if(!recovering) recovery.reset()
+        retryNotBeforeMs=0
         autoRecovery=false; readySince=0; startPosition=position.coerceAtLeast(0); requestedAutoplay=autoplay
         if(autoplay) sleepStopped=false
         screen="player"; episodeIndex=selectedIndex; group=episodeIndex/20
@@ -1511,7 +1519,23 @@ class MainActivity: Activity() {
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
         syncMediaSession()
         val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
-        work({ prefetched ?: RemoteVideo(repository.http,adopted ?: repository.stream(data.series.id,requestedId,maxQuality)).prepare() }, { remote ->
+        work({ prefetched ?: run {
+            val lookupStarted=android.os.SystemClock.elapsedRealtime()
+            val info=adopted ?: repository.stream(data.series.id,requestedId,maxQuality)
+            val lookupMs=android.os.SystemClock.elapsedRealtime()-lookupStarted
+            RemoteVideo(repository.http,info).prepare().also { remote ->
+            TvProbe.report("resolve", mapOf(
+                "episode" to (episodeIndex + 1),
+                "quality" to maxQuality,
+                "door" to info.door,
+                "lookupMs" to lookupMs,
+                "url" to remote.info.url,
+                "hasKey" to (remote.info.key != null),
+                "total" to remote.total,
+                "prefetched" to (prefetched != null),
+                "adopted" to (adopted != null)))
+        }}
+        }, { remote ->
             video=remote; quality=remote.info.quality
             val p=player ?: run {
                 val load=DefaultLoadControl.Builder().setBufferDurationsMs(15000,30000,1000,2000).setTargetBufferBytes(12*1024*1024).build()
@@ -1527,6 +1551,12 @@ class MainActivity: Activity() {
                 private fun active()=player===p && generation==ticket && p.currentMediaItem?.mediaId==requestedId
                 override fun onPlaybackStateChanged(state: Int) {
                     if(!active()) return
+                    TvProbe.report("state", mapOf(
+                        "state" to state,
+                        "episode" to (episodeIndex + 1),
+                        "positionMs" to p.currentPosition,
+                        "bufferedMs" to p.bufferedPosition,
+                        "totalMs" to p.duration))
                     if(state==Player.STATE_READY) {
                         if(!p.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)) {
                             playerFailure(PlaybackException("资源没有可解码的视频轨道",null,PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED))
@@ -1644,6 +1674,7 @@ class MainActivity: Activity() {
             } catch(e: Exception) {
                 remote?.close()
                 if(e !is CancelledException) android.util.Log.i("HongguoTV","Episode preparation failed key=$key elapsedMs=${android.os.SystemClock.elapsedRealtime()-started} ${e.javaClass.simpleName}")
+                TvProbe.report("prep_fail", mapOf("key" to key, "error" to TvProbe.chain(e), "elapsedMs" to (android.os.SystemClock.elapsedRealtime() - started)))
             }
             finally {
                 main.removeCallbacks(watchdog)
@@ -1659,10 +1690,21 @@ class MainActivity: Activity() {
         if(!recovery.remaining) { autoRecovery=false; playbackText.text="已自动重试 3 次，仍无法播放。可手动重试或切换清晰度。"; return }
         if(!networkAvailable()) { playbackText.text="网络已断开，联网后自动续播 · 第 ${episodeIndex+1} 集 ${formatTime(retryPosition)}"; return }
         val delay=recovery.delayMillis ?: return
-        playbackText.text="${if(retryAutoplay) "准备恢复播放" else "准备恢复暂停位置"} · ${delay/1000f} 秒后重试 ${recovery.attempts+1}/3 · ${formatTime(retryPosition)}"
-        retryPending=true; main.postDelayed(retryRunnable,delay)
+        // 有的时候不是网络不行，是设备注册还没到能再试的时候。早了也是白问，还白等一轮。
+        val wait=maxOf(delay,retryNotBeforeMs)
+        playbackText.text="${if(retryAutoplay) "准备恢复播放" else "准备恢复暂停位置"} · ${wait/1000f} 秒后重试 ${recovery.attempts+1}/3 · ${formatTime(retryPosition)}"
+        retryPending=true; main.postDelayed(retryRunnable,wait)
     }
     private fun playerFailure(problem: Throwable) {
+        TvProbe.report("player_failure", mapOf(
+            "error" to TvProbe.chain(problem),
+            "cls" to problem.javaClass.name,
+            "code" to (problem as? PlaybackException)?.errorCode,
+            "codeName" to (problem as? PlaybackException)?.errorCodeName,
+            "episode" to (episodeIndex + 1),
+            "quality" to library.maxQuality,
+            "positionMs" to currentPosition(),
+            "attempts" to recovery.attempts))
         retryPosition=currentPosition().coerceAtLeast(0); retryAutoplay=requestedAutoplay && !sleepStopped
         saveProgress(); cancelRecovery(); cancelPrefetch()
         playError=true; player?.pause(); progressBar.visibility=View.GONE; hud.visibility=View.VISIBLE; controls.removeAllViews(); controls.visibility=View.VISIBLE; panel=true
@@ -1671,14 +1713,24 @@ class MainActivity: Activity() {
         // 「播放失败」和「网络断了」是两回事：前者要换清晰度或换剧，后者等一会儿就好。
         // 说错了，用户就会去按「尝试 720P」——那一下跟网络一点关系都没有。
         val offline=isNetworkFailure(problem)
+        // 地址没拿到和画面播不了也是两回事：前者再问一次就好，后者才要换清晰度。
+        val sample=problem as? SampleClipException
+        val registration=problem as? RegistrationUnavailableException
+        val lookup=problem as? AddressLookupException
         playbackText.text=when {
             decoding -> "电视无法解码当前视频，可尝试更低清晰度。"
+            sample!=null -> "只取到 ${sample.sampleMs/1000} 秒试看片段，不是完整剧集，正在重新获取播放地址…"
+            registration!=null -> "播放设备注册未成功，正在重新获取播放地址…"
+            lookup!=null -> "获取播放地址${if(lookup.timedOut) "超时" else "失败"}，正在重新获取播放地址…"
             offline -> "网络连接失败，可重试或切换清晰度。"
             else -> "播放失败，可重试或切换清晰度。"
         }
+        // 注册不是马上就能再试的：它有它自己的窗口，早了也是白问。窗口有多长由 core 说了算。
+        retryNotBeforeMs=registration?.retryAfterMs ?: 0L
         val actions=row(); controls.addView(actions)
         addButton(actions,"立即重试") { playEpisode(episodeIndex,retryPosition,retryAutoplay) }.requestFocus()
-        addButton(actions,"尝试 720P") { library.maxQuality=720; playEpisode(episodeIndex,retryPosition,retryAutoplay) }
+        // 地址没拿到的时候，换清晰度没有意义 —— 那是另一个问题，别把用户引过去。
+        if(sample==null && registration==null && lookup==null) addButton(actions,"尝试 720P") { library.maxQuality=720; playEpisode(episodeIndex,retryPosition,retryAutoplay) }
         addButton(actions,"返回选集") { returnToDetail(true) }
         if(retryable && !sleepStopped) {
             addButton(controls,"停止自动重试") { cancelRecovery(); playbackText.text="自动重试已停止，观看位置已保留。" }

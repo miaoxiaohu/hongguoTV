@@ -24,7 +24,18 @@ class VideoDataSource(private val video: RemoteVideo): BaseDataSource(true) {
     override fun read(target: ByteArray,targetOffset: Int,length: Int): Int {
         if(length==0) return 0
         if(remaining==0L) return C.RESULT_END_OF_INPUT
-        if(offset>=buffer.size) { buffer=video.read(position,minOf(512*1024L,remaining).toInt()); offset=0 }
+        if(offset>=buffer.size) {
+            try {
+                buffer=video.read(position,minOf(512*1024L,remaining).toInt()); offset=0
+            } catch(e: Exception) {
+                TvProbe.report("read_error", mapOf(
+                    "position" to position,
+                    "want" to minOf(512*1024L,remaining),
+                    "total" to video.total,
+                    "error" to TvProbe.chain(e)))
+                throw e
+            }
+        }
         if(buffer.isEmpty()) throw java.io.EOFException("视频分段意外结束")
         // The bytes still to come are a file size, not a buffer size: a file of more than 2 GB
         // turned into a negative Int here, and the copy then ran off the end of the buffer.

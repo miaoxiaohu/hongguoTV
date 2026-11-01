@@ -266,10 +266,13 @@ class ContentRepositoryTest {
      * A registration that failed is not retried on every attempt.
      *
      * The person turning the set on must not pay for a registration attempt on every episode,
-     * so a failed registration is remembered for a minute - and only as an attempt that is not
+     * so a failed registration is remembered for a while - and only as an attempt that is not
      * repeated, not as a verdict.
+     *
+     * The window is measured from the moment the attempt *failed*, not from the moment it
+     * started: an attempt that took twenty seconds to fail has already spent its window.
      */
-    @Test fun aFailedRegistrationIsNotRetriedWithinTheSameMinute() {
+    @Test fun aFailedRegistrationIsNotRetriedInsideTheSameWindow() {
         var now=1_000_000L
         val registrations=java.util.concurrent.atomic.AtomicInteger()
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
@@ -285,11 +288,42 @@ class ContentRepositoryTest {
         }.build(),{ now })
         assertThrows(IOException::class.java) { repo.stream("456","123") }
         assertThrows(IOException::class.java) { repo.stream("456","123") }
-        assertEquals("the registration is not repeated within the minute",1,registrations.get())
-        // A minute later it is tried again.
+        assertEquals("the registration is not repeated inside the window",1,registrations.get())
+        // The window is short enough that the next attempt is a real one - a minute was long
+        // enough for every attempt inside it to be answered with the public page's sample.
+        assertTrue(ContentRepository.PLAYBACK_REGISTRATION_RETRY_MS<=10_000L)
         now+=ContentRepository.PLAYBACK_REGISTRATION_RETRY_MS
         assertThrows(IOException::class.java) { repo.stream("456","123") }
         assertEquals(2,registrations.get())
+    }
+
+    /**
+     * A registration that stalled is tried again on a fresh connection.
+     *
+     * Measured 2026-11-01 on the TV: the connection to the registration host sat still for
+     * 10.04 s and 15.03 s, and the answer that finally came was 155 ms past the deadline the
+     * lookup used. A stalled connection does not come back by being asked again on the same
+     * socket - the pooled connections are thrown away and the request goes out on a new one,
+     * which can land on another edge (that one was answered in 215 ms).
+     *
+     * A connection that was *refused* is talking to a host that is not there, so it is not
+     * tried twice: the answer would be the same one more time.
+     */
+    @Test fun aStalledRegistrationIsTriedAgainOnAFreshConnection() {
+        val registrations=java.util.concurrent.atomic.AtomicInteger()
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            val body=when(path) {
+                REGISTER_PATH -> { registrations.incrementAndGet(); throw java.net.SocketTimeoutException("timeout") }
+                PLAYBACK_PATH -> REFUSED
+                MODEL_PATH -> ""
+                else -> ""
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        assertThrows(IOException::class.java) { repo.stream("456","123") }
+        assertEquals("the stalled registration is tried again on a new connection",2,registrations.get())
     }
 
     /**
@@ -404,11 +438,11 @@ class ContentRepositoryTest {
     /**
      * A dead network must not be asked twice.
      *
-     * The public player page is another door to the same site, so it helps when the signed
-     * endpoint *answered* with something unusable. When the network itself is gone, the page is
-     * the same dead network: asking it as well doubled the silence before the user learned that
-     * the episode cannot be played, and the retry counter does not start until the attempt
-     * returns. Two attempts of the same dead network are one attempt too many.
+     * The signed endpoint sits on the same host as the registered one and the public player
+     * page is another door to the same site, so when the network itself is gone all of them
+     * are the same dead network. Asking them anyway doubled the silence before the user
+     * learned that the episode cannot be played, and the retry counter does not start until
+     * the attempt returns.
      */
     @Test fun aDeadNetworkDoesNotAskThePublicPageAsWell() {
         val paths=mutableListOf<String>()
@@ -416,11 +450,11 @@ class ContentRepositoryTest {
             paths+=request.url.encodedPath; throw java.net.ConnectException("timeout")
         }
         val e=assertThrows(IOException::class.java) { repo.stream("456","123") }
-        // The attempts go out a wave at a time rather than one after another, so what must hold
-        // is not a count but that the public page - the same dead network - is not asked as well.
-        assertTrue("the attempts go out a wave at a time",paths.size>=SignedRetryPolicy.WAVE_SIZE)
         assertFalse("the public page is the same dead network",paths.any { it==PUBLIC_PATH })
-        assertTrue(e.javaClass.simpleName,e is java.net.ConnectException)
+        assertFalse("the signed wave is the same dead network",paths.any { it==MODEL_PATH })
+        // The failure still says what it was: a network failure, not a refusal.
+        assertTrue(e.javaClass.simpleName,e is AddressLookupException)
+        assertTrue(e.javaClass.simpleName,e.cause is java.net.ConnectException)
     }
 
     /** A dropped handshake is the case that used to sit there for the whole connect timeout. */
@@ -430,8 +464,8 @@ class ContentRepositoryTest {
             paths+=request.url.encodedPath; throw java.net.SocketTimeoutException("timeout")
         }
         assertThrows(IOException::class.java) { repo.stream("456","123") }
-        assertTrue("the attempts go out a wave at a time",paths.size>=SignedRetryPolicy.WAVE_SIZE)
         assertFalse("the public page is the same dead network",paths.any { it==PUBLIC_PATH })
+        assertFalse("the signed wave is the same dead network",paths.any { it==MODEL_PATH })
     }
 
     /** A lookup the person called off must not turn into another request for nobody. */
@@ -441,8 +475,8 @@ class ContentRepositoryTest {
             paths+=request.url.encodedPath; throw CancelledException()
         }
         assertThrows(IOException::class.java) { repo.stream("456","123") }
-        assertTrue("the attempts go out a wave at a time",paths.size>=SignedRetryPolicy.WAVE_SIZE)
         assertFalse("a called-off lookup must not ask the public page as well",paths.any { it==PUBLIC_PATH })
+        assertFalse("a called-off lookup must not ask the signed wave as well",paths.any { it==MODEL_PATH })
     }
 
     /**

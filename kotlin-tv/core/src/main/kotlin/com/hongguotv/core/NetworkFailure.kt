@@ -58,6 +58,45 @@ fun isCancellation(error: Throwable): Boolean {
 }
 
 /**
+ * True when the request got nowhere because it waited and nothing came.
+ *
+ * This is the failure a second connection can walk away from: a connection that stalled is
+ * waiting for a server that will not answer, while a connection that was refused is talking to
+ * a host that is not there. Measured on the TV, 2026-11-01: one connection to the site's edge
+ * sat still for 10.04 s and 15.03 s, and a new connection to another edge was answered in
+ * 215 ms.
+ */
+fun isTimeoutFailure(error: Throwable): Boolean {
+    var cause: Throwable? = error
+    var depth = 0
+    while (cause != null && depth++ < 8) {
+        // SocketTimeoutException extends InterruptedIOException, and OkHttp's own call
+        // timeout is an InterruptedIOException as well.
+        if (cause is InterruptedIOException) return true
+        cause = cause.cause
+    }
+    return false
+}
+
+/**
+ * True when the playback identity could not be obtained.
+ *
+ * The identity is what the playback endpoint checks, so without it the only other door left is
+ * the public page - and that page hosts a ten-second sample, not the episode. The absence of an
+ * identity is therefore not an invitation to fall back: it is the reason the fallback has to
+ * stop.
+ */
+fun isRegistrationUnavailable(error: Throwable): Boolean {
+    var cause: Throwable? = error
+    var depth = 0
+    while (cause != null && depth++ < 8) {
+        if (cause is RegistrationUnavailableException) return true
+        cause = cause.cause
+    }
+    return false
+}
+
+/**
  * True when asking the same site a second way cannot help.
  *
  * This is the question the fallback has to answer before it is made. The public player page is
@@ -68,4 +107,5 @@ fun isCancellation(error: Throwable): Boolean {
  * cannot be played - which is the difference between a few seconds of silence and a minute of
  * it, because the retry counter does not even start until the attempt comes back.
  */
-fun fallbackCannotHelp(error: Throwable): Boolean = isNetworkFailure(error) || isCancellation(error)
+fun fallbackCannotHelp(error: Throwable): Boolean =
+    isNetworkFailure(error) || isCancellation(error) || isRegistrationUnavailable(error)
