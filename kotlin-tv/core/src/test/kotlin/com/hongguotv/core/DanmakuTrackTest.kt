@@ -16,7 +16,7 @@ import org.junit.Test
 class DanmakuTrackTest {
     private val band=1280
     private val short=100f          // 普通弹幕的宽度
-    private val long=520f           // 长句的宽度
+    private val wide=520f           // 长句的宽度
     private fun at(ms: Long,text: String="x")=Danmaku(text,ms,0)
 
     private fun timeline(
@@ -57,12 +57,12 @@ class DanmakuTrackTest {
 
     /** 字越宽，飘得越久。 */
     @Test fun aWiderCommentLivesLonger() {
-        val tl=timeline(listOf(at(0,"短"),at(20_000,"长")),width={ if (it.text=="长") long else short })
+        val tl=timeline(listOf(at(0,"短"),at(20_000,"长")),width={ if (it.text=="长") wide else short })
         val shortOne=tl.placed.first { it.danmaku.text=="短" }
         val longOne=tl.placed.first { it.danmaku.text=="长" }
         assertTrue(longOne.lifetimeMs>shortOne.lifetimeMs)
         assertEquals(DanmakuTiming.lifetimeMs(short,band),shortOne.lifetimeMs)
-        assertEquals(DanmakuTiming.lifetimeMs(long,band),longOne.lifetimeMs)
+        assertEquals(DanmakuTiming.lifetimeMs(wide,band),longOne.lifetimeMs)
     }
 
     /**
@@ -77,7 +77,7 @@ class DanmakuTrackTest {
         assertEquals(2,tl.placed.size)
         assertEquals("两条得在同一条轨道上",1,tl.placed.map { it.track }.toSet().size)
         // 第二条晚一点入场：它进轨道时第一条的尾巴刚好离开右缘。
-        assertEquals(586L,tl.placed[1].danmaku.enterAtMs)
+        assertEquals(DanmakuTiming.tailClearMs(short,band),tl.placed[1].danmaku.enterAtMs)
     }
 
     /** 同屏条数守得住上限：这就是「挡屏幕的是条数」的兜底。 */
@@ -110,5 +110,44 @@ class DanmakuTrackTest {
         val delayed=tl.placed.first { it.danmaku.enterAtMs>0L }
         assertTrue("被延后的要从右边飞进来",tl.visibleAt(delayed.danmaku.enterAtMs)
             .first { it.danmaku==delayed.danmaku }.elapsedMs==0L)
+    }
+
+    /**
+     * `Visible` 要带着自己的时长 —— app 层靠它算弹幕的位置（统一 8 秒算不出长句的位置）。
+     *
+     * 同一起点、同一时刻：窄的已经飞完了，宽的还在，而且它带的是宽的那条自己的时长。
+     */
+    @Test fun theVisibleOneCarriesItsOwnLifetime() {
+        val tl=timeline(listOf(at(0,"窄"),at(0,"宽")),width={ if (it.text=="宽") wide else short })
+        val visible=tl.visibleAt(9_000L)
+        assertEquals("窄的已经飞完，宽的还在",1,visible.size)
+        assertEquals("宽",visible[0].danmaku.text)
+        assertEquals(DanmakuTiming.lifetimeMs(wide,band),visible[0].lifetimeMs)
+    }
+
+    /**
+     * 同屏上限不再被轨道数卡住 —— 这正是尾随入场存在的理由。
+     *
+     * 七条轨道（比上限 12 少）照样能放到 12 条：以前一条轨道要等上一条整条飞完，
+     * 轨道数（7）直接成了同屏条数的硬顶，密度「多」（24）在默认行数下形同虚设。
+     */
+    @Test fun theOnScreenLimitIsNotCappedByTheTrackCount() {
+        val items=(0 until 40).map { at(0L,"挤进来的 $it") }
+        val tl=timeline(items,trackCount=7,maxOnScreen=12)
+        assertEquals("七条轨道也能放到上限十二条",12,tl.placed.size)
+        var peak=0
+        for(position in 0L..2_000L step 50L) peak=maxOf(peak,tl.visibleAt(position).size)
+        assertEquals("同屏峰值能到上限",12,peak)
+    }
+
+    /**
+     * 轨道比上限还少时，同屏条数也不再等于轨道数。
+     *
+     * 两条轨道上同时飘着的不止两条 —— 轨道是「横向错开」，不是「一条弹幕独占一条轨道」。
+     */
+    @Test fun evenTwoTracksHoldMoreThanTwoAtOnce() {
+        val items=(0 until 40).map { at(0L,"挤进来的 $it") }
+        val tl=timeline(items,trackCount=2,maxOnScreen=12)
+        assertTrue("两条轨道上同时飘着的不止两条（实际 ${tl.placed.size} 条）",tl.placed.size>2)
     }
 }

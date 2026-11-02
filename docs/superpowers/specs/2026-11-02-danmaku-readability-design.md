@@ -82,8 +82,9 @@ for (t in freeAt.indices) if (freeAt[t] <= at) { chosen = t; break }
    宽度由 app 层量好传进来（core 不碰 Android 的 `Paint`）：
    构造参数加 `bandWidth: Int` 与 `textWidthOf: (Danmaku) -> Float`。
    **向后兼容**：这两个参数可选 —— 不传时全部弹幕仍用统一的 `lifetimeMs`，
-   `Probe.kt` 与现有单测（`DanmakuTest` / `DanmakuDensityTest` / `DanmakuAnchorTest`）
-   一行都不用改。
+   `Probe.kt` 不用改。但「不传宽度」这条路径的行为**变了**：轨道释放从「等上一条整条飞完」
+   退回「整段独占」（见上面「量不到宽度时」一节），所以
+   `DanmakuTest` / `DanmakuDensityTest` 的断言要跟着新语义调整（Task 2 已改）。
 2. **轨道起点轮转**：找空轨道时从上次用的轨道往后环形找，不再永远从第 0 条开始。
 3. **尾随入场**：每条轨道记的不是「上一条飞完的时刻」，而是**它的尾巴清场的时刻**
    `freeAt[t] = 入场时间 + clear_i`。新弹幕只要 `freeAt[t] <= 入场时间` 就能进这条轨道。
@@ -127,16 +128,19 @@ for (t in freeAt.indices) if (freeAt[t] <= at) { chosen = t; break }
 - 量不出宽度时，**轨道释放**退回到「整段独占」（`clear = life`）—— 断言放在 `DanmakuTrackTest`
   （它是轨道层的语义，`DanmakuTiming` 只管算式本身）。
 
-`DanmakuTimelineTest`（新增）：
+`DanmakuTrackTest`（新增，实际文件名 `DanmakuTrackTest.kt`）：
 
 - **同轨两条弹幕不叠字**：同一轨道上，后一条的入场时间 ≥ 前一条的尾巴清场时刻。
 - **长句确实飘得更久**：宽度大的那条 `lifetimeMs` 更大。
 - **轨道铺开**：N 条弹幕铺到 K 条轨道时，K 条都被用到（不再全在第 0 条）。
 - **同屏上限守得住**：任意时刻可见条数 ≤ 密度档位上限（这次是 12/24，不是 7）。
 
-`DanmakuTest` / `DanmakuDensityTest` / `DanmakuAnchorTest`（现有）：
+`DanmakuTest` / `DanmakuDensityTest`（现有）：
 
-- 全部保持通过（向后兼容：不传 `bandWidth` / `textWidthOf` 时行为不变）。
+- 随新语义调整（Task 2 已改）：轨道释放语义从「等上一条整条飞完」变成「等它的尾巴离开右缘」，
+  所以「等一条走完才进场」这类断言的时刻要按各自时长算；`DanmakuAnchorTest` 未受影响，全部保持通过。
+- 不传 `bandWidth` / `textWidthOf` 时**行为变了**（轨道释放退回整段独占），不是「行为不变」：
+  那条路径上同屏条数由轨道数决定 —— 宁可少飘几条，也不能叠字（2026-11-02 用户拍板）。
 
 `DanmakuStyleTest` 扩写：
 

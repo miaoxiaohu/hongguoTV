@@ -129,9 +129,17 @@ class DanmakuTest {
         //
         // 判据用**入场时间**（`enterAtMs`），不是内容时间（`offsetMs`）：被延后的弹幕入场时间会
         // 比内容时间晚（最多晚两秒），拿内容时间去卡窗口，晚飘的那几条会被算成「窗口外」。
+        //
+        // 光卡窗口是不够的 —— 那两条恰好是 `visibleAt` 自己二分的窗口，实现保证了它们必然成立，
+        // 守不住任何东西。真正要守的是「内容时间仍然跟画面对得上」：看得见的每一条，内容时间都不晚于
+        // 播放位置，而且延后不超过两秒上限（`MAX_DELAY_MS`）—— 这两条实现自己没保证过，能抓住回归。
+        assertTrue("30 秒那一处总得有东西看得见",visible.isNotEmpty())
         for(row in visible) {
             assertTrue(row.danmaku.enterAtMs<=30_000L)
             assertTrue(row.danmaku.enterAtMs>30_000L-8_000L)
+            // 内容时间仍然跟画面对得上：延后不超过两秒上限
+            assertTrue(row.danmaku.offsetMs<=30_000L)
+            assertTrue(row.danmaku.enterAtMs-row.danmaku.offsetMs<=DanmakuTimeline.MAX_DELAY_MS)
         }
     }
 

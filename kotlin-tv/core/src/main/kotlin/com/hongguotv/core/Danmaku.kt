@@ -149,7 +149,7 @@ class DanmakuTimeline(
         val entered = ArrayList<Long>()
         val leaving = ArrayList<Long>()
         // 已放行弹幕里最长的那个时长：用来框定「可能还活着」的窗口。
-        var longest = 0L
+        var maxLifetimeSoFar = 0L
         // 轨道起点轮转用的游标。
         var nextTrack = 0
         for (item in items.sortedBy { it.enterAtMs }) {
@@ -172,9 +172,9 @@ class DanmakuTimeline(
                     continue
                 }
                 // 二、同屏塞得下吗？
-                if (aliveCount(entered, leaving, at, longest) < maxOnScreen) { admitted = true; break }
+                if (aliveCount(entered, leaving, at, maxLifetimeSoFar) < maxOnScreen) { admitted = true; break }
                 // 满了：等最早离场的那条腾出位置。
-                at = earliestLeaving(entered, leaving, at, longest)
+                at = earliestLeaving(entered, leaving, at, maxLifetimeSoFar)
             }
             // 等不到位置就丢。
             //
@@ -183,7 +183,7 @@ class DanmakuTimeline(
             if (!admitted || chosen < 0) continue
             nextTrack = (chosen + 1) % tracks
             freeAt[chosen] = at + clear
-            if (life > longest) longest = life
+            if (life > maxLifetimeSoFar) maxLifetimeSoFar = life
             insertEntered(entered, leaving, at, at + life)
             // 入场时间改成真正入场的时刻：晚飘的弹幕必须从右边飞进来。不改的话它一露面就摆在
             // 画面中间 —— 那正是「凭空冒出来」那个毛病。
@@ -195,10 +195,10 @@ class DanmakuTimeline(
     private val offsets = LongArray(placed.size) { placed[it].danmaku.enterAtMs }
 
     /** 已放行弹幕里最长的那个时长。 */
-    private val longestMs: Long = placed.maxOfOrNull { it.lifetimeMs } ?: 0L
+    private val maxLifetimeMs: Long = placed.maxOfOrNull { it.lifetimeMs } ?: 0L
 
     /** 第一个起点大于 [value] 的下标（没有就是表长）。 */
-    private fun firstAfter(value: Long): Int = lowerBound(offsets, value)
+    private fun firstAfter(value: Long): Int = firstGreaterThan(offsets, value)
 
     /**
      * 某一刻看得见的弹幕。
@@ -218,7 +218,7 @@ class DanmakuTimeline(
         val factor = if (speed > 0.05f) speed else 1f
         val end = firstAfter(positionMs)                             // 第一个起点 > 位置
         // 存活窗口按倍速放大：8 秒真实时间，在 2 倍速下是 16 秒的**视频**时间。
-        val begin = firstAfter(positionMs - (longestMs * factor).toLong())
+        val begin = firstAfter(positionMs - (maxLifetimeMs * factor).toLong())
         if (end <= begin) return emptyList()
         val out = ArrayList<Visible>(end - begin)
         for (i in begin until end) {
@@ -238,9 +238,9 @@ class DanmakuTimeline(
      * 时长各不相同，存活的那一批不再是一个连续区间，所以只能在这个小区间里逐条数
      * （区间长度受同屏上限约束，很小）。
      */
-    private fun aliveCount(entered: List<Long>, leaving: List<Long>, at: Long, longest: Long): Int {
+    private fun aliveCount(entered: List<Long>, leaving: List<Long>, at: Long, maxLifetime: Long): Int {
         var count = 0
-        val begin = lowerBound(entered, at - longest)
+        val begin = firstGreaterThan(entered, at - maxLifetime)
         for (i in begin until entered.size) {
             if (entered[i] > at) break
             if (leaving[i] > at) count++
@@ -253,9 +253,9 @@ class DanmakuTimeline(
      *
      * @return 一个**大于** [at] 的时刻（活着的东西离场时刻必然在后面）。
      */
-    private fun earliestLeaving(entered: List<Long>, leaving: List<Long>, at: Long, longest: Long): Long {
+    private fun earliestLeaving(entered: List<Long>, leaving: List<Long>, at: Long, maxLifetime: Long): Long {
         var best = Long.MAX_VALUE
-        val begin = lowerBound(entered, at - longest)
+        val begin = firstGreaterThan(entered, at - maxLifetime)
         for (i in begin until entered.size) {
             if (entered[i] > at) break
             if (leaving[i] > at && leaving[i] < best) best = leaving[i]
@@ -263,8 +263,8 @@ class DanmakuTimeline(
         return best
     }
 
-    /** 第一个大于 [value] 的下标。 */
-    private fun lowerBound(values: List<Long>, value: Long): Int {
+    /** 第一个大于 [value] 的下标（没有就是表长）。 */
+    private fun firstGreaterThan(values: List<Long>, value: Long): Int {
         var low = 0
         var high = values.size
         while (low < high) {
@@ -275,7 +275,7 @@ class DanmakuTimeline(
     }
 
     /** 第一个大于 [value] 的下标（数组版）。 */
-    private fun lowerBound(values: LongArray, value: Long): Int {
+    private fun firstGreaterThan(values: LongArray, value: Long): Int {
         var low = 0
         var high = values.size
         while (low < high) {
@@ -287,7 +287,7 @@ class DanmakuTimeline(
 
     /** 把入场时间插进已放行的那一串里，保持升序 —— 后面的二分靠的就是这个顺序。 */
     private fun insertEntered(entered: ArrayList<Long>, leaving: ArrayList<Long>, at: Long, end: Long) {
-        val low = lowerBound(entered, at)
+        val low = firstGreaterThan(entered, at)
         entered.add(low, at)
         leaving.add(low, end)
     }
