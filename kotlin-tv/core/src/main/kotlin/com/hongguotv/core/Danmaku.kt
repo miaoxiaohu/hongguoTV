@@ -62,14 +62,15 @@ internal fun parseDanmakuWindow(payload: String, startMs: Long): DanmakuWindow {
  * 弹幕的排布：哪条弹幕走哪一条轨道，在某个播放位置上还看不看得见。
  *
  * 放在 core 里、且不依赖 Android，是为了能测：轨道分配是那种「代码读起来对、屏幕上却挤成一团」
- * 的差别。同一时刻两条弹幕走同一条轨道就会叠字，所以分配时看的是上一条什么时候走完。
+ * 的差别。同一时刻两条弹幕走同一条轨道就会叠字，所以分配时看的是上一条的**尾巴**什么时候离开右缘
+ * （尾随入场，见 [DanmakuTiming.tailClearMs]）—— 水平错开，不会撞上。
  *
  * 排布还管「同屏最多几条」（[maxOnScreen]）：弹幕一多，屏幕上就是一片白字 —— 实测一集同屏最高
  * 36 条，铺在 7 行轨道上，画面直接被糊住。所以满员的时候后来的弹幕要晚点飘进来，等不到就丢。
  *
  * @param items 这一集的弹幕。
  * @param trackCount 屏幕上有几条轨道。
- * @param lifetimeMs 一条弹幕从右边走到左边要多久。
+ * @param lifetimeMs 所有弹幕共用一个时长（老接口：传了 [bandWidth] 与 [textWidthOf] 就按每条自己的算）。
  * @param maxOnScreen 同屏最多几条。
  *
  * 排布和可见性都按**入场时间**（[Danmaku.enterAtMs]）算，不是内容时间：入场时间才是
@@ -79,74 +80,125 @@ internal fun parseDanmakuWindow(payload: String, startMs: Long): DanmakuWindow {
 class DanmakuTimeline(
     items: List<Danmaku>,
     val trackCount: Int,
+    /**
+     * 所有弹幕共用一个时长。
+     *
+     * 这是老接口：传了 [bandWidth] 与 [textWidthOf] 就按每条自己的算，没传就用这个。
+     * 探针（`Probe.kt`）和现有单测走的是老接口。
+     */
     val lifetimeMs: Long,
     /**
      * 同屏最多几条。
      *
-     * 满员的时候后来的弹幕不是硬塞进来，而是**晚点飘进来** —— 等一条旧的走完位置空出来。
-     * 等不到（晚太多）就丢掉。
+     * 挡屏幕的不是「叠字」，是**条数**（实测一集同屏最高 36 条）。这个上限是用户选的固定档位，
+     * 与轨道数是两个独立的旋钮。
      */
-    val maxOnScreen: Int = DanmakuDensity.MEDIUM.maxOnScreen
+    val maxOnScreen: Int = DanmakuDensity.MEDIUM.maxOnScreen,
+    /** 飞行区间的宽度（整屏）。0 = 退回统一时长。 */
+    private val bandWidth: Int = 0,
+    /** 每条弹幕有多宽（像素）。null = 退回统一时长。 */
+    private val textWidthOf: ((Danmaku) -> Float)? = null
 ) {
     /** 一条弹幕占的位置。 */
-    data class Placed(val danmaku: Danmaku, val track: Int)
+    data class Placed(val danmaku: Danmaku, val track: Int, val lifetimeMs: Long)
 
     /** 某一刻还看得见的弹幕，以及它已经走了多久。 */
-    data class Visible(val danmaku: Danmaku, val track: Int, val elapsedMs: Long, val index: Int)
+    data class Visible(val danmaku: Danmaku, val track: Int, val elapsedMs: Long, val index: Int, val lifetimeMs: Long)
+
+    /** 这条弹幕飞完全程要多久。 */
+    private fun lifeOf(item: Danmaku): Long {
+        if (bandWidth <= 0 || textWidthOf == null) return lifetimeMs
+        return DanmakuTiming.lifetimeMs(textWidthOf.invoke(item), bandWidth)
+    }
 
     /**
-     * 每条弹幕的轨道，按入场时间排好。
+     * 这条弹幕的尾巴离开屏幕右缘要多久（从入场算起）。
      *
-     * 排轨之外还管一件事：**同屏最多几条**。满员的时候后来的弹幕不是硬塞进来，而是晚点飘进来 ——
-     * 等一条旧的走完、位置空出来；等不到（晚太多）就丢掉。
+     * 量不到宽度时退回「**整段独占**」（clear = life）：按 8% 估出来的清场时刻会**低估**真实的
+     * 尾巴离场时刻（尾巴真正离开右缘是 `life×w/(band+w)`），轨道提前释放，长句的尾巴还在屏上
+     * 就会被后一条追上 —— 同轨叠字，那正是这次要治的毛病。
+     *
+     * 代价是这条兼容路径上的同屏条数由轨道数决定（app 层总会量宽度，所以产品的路径不受影响）。
+     * 2026-11-02 用户拍板：宁可少飘几条，也不能叠字。
+     */
+    private fun clearOf(item: Danmaku, life: Long): Long {
+        if (bandWidth <= 0 || textWidthOf == null) return life
+        return DanmakuTiming.tailClearMs(textWidthOf.invoke(item), bandWidth)
+    }
+
+    /**
+     * 每条弹幕走哪条轨道。
+     *
+     * 两条规矩：
+     *
+     * 1. **尾随入场**：一条轨道等上一条的**尾巴**离开右缘就能接下一条（水平方向错开，
+     *    不叠字）。所有弹幕速度相同，尾巴清场之后两条就再也碰不上了。
+     *    以前是「整条飞完才放下一条」，轨道数（7）直接成了同屏条数的硬顶，
+     *    密度「多」（24）在默认行数下形同虚设。
+     * 2. **轨道起点轮转**：从上次用的轨道往后找空的。不轮转的话弹幕全堆在最上面两行，
+     *    下面 58% 的屏幕永远空着 —— 用户说的「摆得乱」。
+     *
+     * 排布还管**同屏最多几条**（[maxOnScreen]）：满员的时候后来的弹幕不是硬塞进来，
+     * 而是**晚点飘进来** —— 等一条旧的走完、位置空出来；等不到（晚太多）就丢掉。
      */
     val placed: List<Placed> = buildList {
-        // 每条轨道记住「上一条什么时候走完」，空闲的轨道就是走完时间 <= 下一条的起点。
-        val freeAt=LongArray(maxOf(1,trackCount))
-        // 已经放行的弹幕的入场时间（升序）：同屏有几条就是从这里数出来的。
-        val entered=ArrayList<Long>()
-        for(item in items.sortedBy { it.enterAtMs }) {
-            val want=item.enterAtMs
-            var at=want
-            var admitted=false
-            while(at-want<=MAX_DELAY_MS) {
-                // 同屏条数 = 入场时间落在 (at-全程, at] 里的那些。
-                val alive=aliveRange(entered,at,lifetimeMs)
-                if(alive.count()<maxOnScreen) { admitted=true; break }
-                // 满员了：等最早离场的那条腾出位置，再挤进来。
-                at=entered[alive.first]+lifetimeMs
+        val tracks = maxOf(1, trackCount)
+        // 每条轨道下一次能接人的时刻：上一条的尾巴离开右缘的时刻。
+        val freeAt = LongArray(tracks)
+        // 已放行弹幕的入场时间（升序）与离场时间（= 入场 + 自己的时长）。
+        val entered = ArrayList<Long>()
+        val leaving = ArrayList<Long>()
+        // 已放行弹幕里最长的那个时长：用来框定「可能还活着」的窗口。
+        var longest = 0L
+        // 轨道起点轮转用的游标。
+        var nextTrack = 0
+        for (item in items.sortedBy { it.enterAtMs }) {
+            val want = item.enterAtMs
+            val life = lifeOf(item)
+            val clear = clearOf(item, life)
+            var at = want
+            var admitted = false
+            var chosen = -1
+            while (at - want <= MAX_DELAY_MS) {
+                // 一、有轨道能接吗？从上次那条往后轮转着找。
+                chosen = -1
+                for (k in 0 until tracks) {
+                    val t = (nextTrack + k) % tracks
+                    if (freeAt[t] <= at) { chosen = t; break }
+                }
+                if (chosen < 0) {
+                    // 全都占着：等最早有轨道清场。
+                    at = freeAt.min()
+                    continue
+                }
+                // 二、同屏塞得下吗？
+                if (aliveCount(entered, leaving, at, longest) < maxOnScreen) { admitted = true; break }
+                // 满了：等最早离场的那条腾出位置。
+                at = earliestLeaving(entered, leaving, at, longest)
             }
             // 等不到位置就丢。
             //
             // 晚太多还飘出来的弹幕，跟眼前画面对不上 —— 观众看到的是一句跟画面无关的话，
             // 比没有弹幕更糟（跟「错过太久的弹幕不往回捞」是同一个道理）。
-            if(!admitted) continue
-            var chosen=-1
-            for(t in freeAt.indices) if(freeAt[t]<=at) { chosen=t; break }
-            if(chosen<0) {
-                // 全都还占着：挤最早走完的那一条，前一条会被覆盖。
-                chosen=freeAt.indices.minByOrNull { freeAt[it] } ?: 0
-            }
-            freeAt[chosen]=at+lifetimeMs
-            insertEntered(entered,at)
+            if (!admitted || chosen < 0) continue
+            nextTrack = (chosen + 1) % tracks
+            freeAt[chosen] = at + clear
+            if (life > longest) longest = life
+            insertEntered(entered, leaving, at, at + life)
             // 入场时间改成真正入场的时刻：晚飘的弹幕必须从右边飞进来。不改的话它一露面就摆在
             // 画面中间 —— 那正是「凭空冒出来」那个毛病。
-            add(Placed(item.copy(enterAtMs=at),chosen))
+            add(Placed(item.copy(enterAtMs = at), chosen, life))
         }
     }.sortedBy { it.danmaku.enterAtMs }
 
     /** 每条弹幕的起点，单独存一份是为了每帧能二分，而不是每帧扫全表。 */
-    private val offsets=LongArray(placed.size) { placed[it].danmaku.enterAtMs }
+    private val offsets = LongArray(placed.size) { placed[it].danmaku.enterAtMs }
+
+    /** 已放行弹幕里最长的那个时长。 */
+    private val longestMs: Long = placed.maxOfOrNull { it.lifetimeMs } ?: 0L
 
     /** 第一个起点大于 [value] 的下标（没有就是表长）。 */
-    private fun firstAfter(value: Long): Int {
-        var low=0; var high=offsets.size
-        while(low<high) {
-            val mid=(low+high)/2
-            if(offsets[mid]<=value) low=mid+1 else high=mid
-        }
-        return low
-    }
+    private fun firstAfter(value: Long): Int = lowerBound(offsets, value)
 
     /**
      * 某一刻看得见的弹幕。
@@ -154,8 +206,8 @@ class DanmakuTimeline(
      * 位置用播放器的播放位置算，不用墙钟：暂停时弹幕跟着停，跳转后按新位置显示，倍速播放时
      * 弹幕也跟着快 —— 这几件事只要用墙钟就一定做不对。
      *
-     * 看得见的弹幕在时间轴上是一段连续的区间（活得一样久），所以这里二分出那段区间，而不是
-     * 每帧把整集扫一遍 —— 播放时每 33 毫秒就要问一次。
+     * 看得见的弹幕在时间轴上是一段连续的区间（入场时间升序），所以这里二分出那段区间，
+     * 再逐条按自己的时长判断是不是已经走完 —— 时长不再一样，不能只看区间。
      *
      * @param positionMs 播放位置（**视频时间**轴）。
      * @param speed 播放倍速。弹幕在画面上飘过去要多久，按的是**真实时间**：2 倍速时画面内容
@@ -163,51 +215,81 @@ class DanmakuTimeline(
      *  出现的时间点仍按视频时间轴算，所以弹幕和画面的内容对得上。
      */
     fun visibleAt(positionMs: Long, speed: Float = 1f): List<Visible> {
-        val factor=if(speed>0.05f) speed else 1f
-        val end=firstAfter(positionMs)                             // 第一个起点 > 位置
+        val factor = if (speed > 0.05f) speed else 1f
+        val end = firstAfter(positionMs)                             // 第一个起点 > 位置
         // 存活窗口按倍速放大：8 秒真实时间，在 2 倍速下是 16 秒的**视频**时间。
-        val begin=firstAfter(positionMs-(lifetimeMs*factor).toLong())
-        if(end<=begin) return emptyList()
-        val out=ArrayList<Visible>(end-begin)
-        for(i in begin until end) {
-            val p=placed[i]
-            out+=Visible(p.danmaku,p.track,((positionMs-p.danmaku.enterAtMs)/factor).toLong(),i)
+        val begin = firstAfter(positionMs - (longestMs * factor).toLong())
+        if (end <= begin) return emptyList()
+        val out = ArrayList<Visible>(end - begin)
+        for (i in begin until end) {
+            val p = placed[i]
+            val elapsed = ((positionMs - p.danmaku.enterAtMs) / factor).toLong()
+            // 自己的时长走完了就是走了 —— 时长各不相同，不能只靠区间。
+            if (elapsed >= p.lifetimeMs) continue
+            out += Visible(p.danmaku, p.track, elapsed, i, p.lifetimeMs)
         }
         return out
     }
 
     /**
-     * 已经放行的弹幕里，[at] 这一刻**还活着**的是哪一段。
+     * 已经放行的弹幕里，[at] 这一刻**还活着**的是几条。
      *
-     * 活着的条件是「已经入场、但还没走完」：入场时间 <= at 且 入场时间 + 全程 > at。
-     * 已经放行的弹幕的入场时间是升序的，所以二分两下就有了。
-     *
-     * @return 活着的那些在 [entered] 里的下标范围；空的说明这一刻画面上一条都没有。
+     * 活着的条件是「已经入场、但还没走完」：入场时间 <= at 且 入场时间 + 自己的时长 > at。
+     * 时长各不相同，存活的那一批不再是一个连续区间，所以只能在这个小区间里逐条数
+     * （区间长度受同屏上限约束，很小）。
      */
-    private fun aliveRange(entered: List<Long>, at: Long, lifetimeMs: Long): IntRange {
-        val floor=at-lifetimeMs
-        var low=0; var high=entered.size
-        while(low<high) {
-            val mid=(low+high)/2
-            if(entered[mid]<=floor) low=mid+1 else high=mid
+    private fun aliveCount(entered: List<Long>, leaving: List<Long>, at: Long, longest: Long): Int {
+        var count = 0
+        val begin = lowerBound(entered, at - longest)
+        for (i in begin until entered.size) {
+            if (entered[i] > at) break
+            if (leaving[i] > at) count++
         }
-        val first=low
-        var up=first; var top=entered.size
-        while(up<top) {
-            val mid=(up+top)/2
-            if(entered[mid]<=at) up=mid+1 else top=mid
+        return count
+    }
+
+    /**
+     * 最早离场的那条什么时候离场 —— 满员时等它腾出位置。
+     *
+     * @return 一个**大于** [at] 的时刻（活着的东西离场时刻必然在后面）。
+     */
+    private fun earliestLeaving(entered: List<Long>, leaving: List<Long>, at: Long, longest: Long): Long {
+        var best = Long.MAX_VALUE
+        val begin = lowerBound(entered, at - longest)
+        for (i in begin until entered.size) {
+            if (entered[i] > at) break
+            if (leaving[i] > at && leaving[i] < best) best = leaving[i]
         }
-        return first until up
+        return best
+    }
+
+    /** 第一个大于 [value] 的下标。 */
+    private fun lowerBound(values: List<Long>, value: Long): Int {
+        var low = 0
+        var high = values.size
+        while (low < high) {
+            val mid = (low + high) / 2
+            if (values[mid] <= value) low = mid + 1 else high = mid
+        }
+        return low
+    }
+
+    /** 第一个大于 [value] 的下标（数组版）。 */
+    private fun lowerBound(values: LongArray, value: Long): Int {
+        var low = 0
+        var high = values.size
+        while (low < high) {
+            val mid = (low + high) / 2
+            if (values[mid] <= value) low = mid + 1 else high = mid
+        }
+        return low
     }
 
     /** 把入场时间插进已放行的那一串里，保持升序 —— 后面的二分靠的就是这个顺序。 */
-    private fun insertEntered(entered: ArrayList<Long>, at: Long) {
-        var low=0; var high=entered.size
-        while(low<high) {
-            val mid=(low+high)/2
-            if(entered[mid]<at) low=mid+1 else high=mid
-        }
-        entered.add(low,at)
+    private fun insertEntered(entered: ArrayList<Long>, leaving: ArrayList<Long>, at: Long, end: Long) {
+        val low = lowerBound(entered, at)
+        entered.add(low, at)
+        leaving.add(low, end)
     }
 
     companion object {
@@ -217,7 +299,7 @@ class DanmakuTimeline(
          * 两秒。晚一点是「网络慢了点」，观众还等得起；晚太多飘出来的弹幕跟眼前画面对不上，
          * 那就不如不飘。
          */
-        const val MAX_DELAY_MS=2_000L
+        const val MAX_DELAY_MS = 2_000L
     }
 }
 

@@ -123,7 +123,16 @@ class DanmakuTest {
         val timeline=DanmakuTimeline(many,trackCount=4,lifetimeMs=8_000L,maxOnScreen=Int.MAX_VALUE)
         val visible=timeline.visibleAt(30_000L)
         assertTrue("30 秒那一处最多八十来条",visible.size<=90)
-        assertEquals(30_000L,visible.last().danmaku.offsetMs)
+        // 看得见的都得在窗口里：入场时间不超过播放位置，差值不超过全程。
+        // 2026-11-02 起轨道排满了就丢（不再「挤轨道」），所以不能再断言「最后一条正好是
+        // 30 秒那条」—— 那条可能已经被丢了。
+        //
+        // 判据用**入场时间**（`enterAtMs`），不是内容时间（`offsetMs`）：被延后的弹幕入场时间会
+        // 比内容时间晚（最多晚两秒），拿内容时间去卡窗口，晚飘的那几条会被算成「窗口外」。
+        for(row in visible) {
+            assertTrue(row.danmaku.enterAtMs<=30_000L)
+            assertTrue(row.danmaku.enterAtMs>30_000L-8_000L)
+        }
     }
 
     // ---- 倍速 ----
