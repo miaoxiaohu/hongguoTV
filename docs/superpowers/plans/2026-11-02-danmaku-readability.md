@@ -20,6 +20,9 @@
 - adb 用 `D:\Programs\android-sdk\platform-tools\adb.exe`（37.0.1）；`C:\Users\server\.local\bin\adb.exe` 是另一份，别混用（会互杀 adb server）。
 - 本机录屏量像素的工具链已确认可用：Python 3.14 + PIL 11.3 + numpy 2.4、ffmpeg（在 PATH）。
 - 现有测试不许删：`DanmakuTest` / `DanmakuDensityTest` / `DanmakuAnchorTest` / `DanmakuStyleTest` 必须全绿（需要改断言的地方在任务里写明了为什么）。
+- **「量不到宽度」时轨道释放退回整段独占**（`clear = life`）—— 2026-11-02 用户拍板：
+  按 8% 估出来的清场时刻会低估真实的尾巴离场时刻，宁可这条兼容路径上少飘几条，也不许同轨叠字。
+  app 层总会量宽度，所以产品的路径走的是「已量宽度」那条，尾随入场的完整收益不受影响。
 - 注释用中文，写清楚「为什么」，不写「是什么」—— 这是本仓库的既有风格。
 
 ---
@@ -331,6 +334,19 @@ class DanmakuTrackTest {
         }
     }
 
+    /**
+     * 量不到宽度时退回「整段独占」：轨道要等上一条整条飞完才放下一条。
+     *
+     * 这条兼容路径只有探针（`Probe.kt`）和不传宽度的既有单测在走，app 层总会量宽度。
+     * 宁可这条路径上少飘几条，也不能让它同轨叠字 —— 按 8% 估出来的清场时刻会低估
+     * 真实的尾巴离场时刻，轨道提前释放就会追上还在屏上的长句。
+     */
+    @Test fun withoutWidthsTheTrackIsHeldForTheWholeLife() {
+        val items=listOf(at(0,"第一条"),at(200,"第二条"))
+        val tl=DanmakuTimeline(items,trackCount=1,lifetimeMs=8_000L,maxOnScreen=12)
+        assertEquals("等不到空位就丢（要等八秒，晚了两秒上限）",1,tl.placed.size)
+    }
+
     /** 延迟飘进来的弹幕是从右边飞进来的，不是一露面就摆在画面中间。 */
     @Test fun aDelayedOneStillEntersFromTheRightEdge() {
         val items=(0 until 40).map { at(0L,"挤进来的 $it") }
@@ -393,12 +409,15 @@ class DanmakuTimeline(
     /**
      * 这条弹幕的尾巴离开屏幕右缘要多久（从入场算起）。
      *
-     * 量不到宽度时按普通弹幕估（8%）—— 宁可估计，也不要退回到「整段独占」：
-     * 整段独占会把同屏条数卡在轨道数上，密度档位就白给了。
+     * 量不到宽度时退回「**整段独占**」（clear = life）：按 8% 估出来的清场时刻会**低估**真实的
+     * 尾巴离场时刻（尾巴真正离开右缘是 `life×w/(band+w)`），轨道提前释放，长句的尾巴还在屏上
+     * 就会被后一条追上 —— 同轨叠字，那正是这次要治的毛病。
+     *
+     * 代价是这条兼容路径上的同屏条数由轨道数决定（app 层总会量宽度，所以产品的路径不受影响）。
+     * 2026-11-02 用户拍板：宁可少飘几条，也不能叠字。
      */
     private fun clearOf(item: Danmaku, life: Long): Long {
-        if (bandWidth <= 0 || textWidthOf == null)
-            return (life * DanmakuTiming.DEFAULT_WIDTH_RATIO).toLong()
+        if (bandWidth <= 0 || textWidthOf == null) return life
         return DanmakuTiming.tailClearMs(textWidthOf.invoke(item), bandWidth)
     }
 
@@ -603,6 +622,19 @@ Expected: `DanmakuTrackTest` 6 条全过；**旧的 `DanmakuTest.theVisibleRowsA
 ```
 
 改完再跑一次 `:core:test`，Expected: 全绿。
+
+**另外还要改 `DanmakuDensityTest`**（不改会挂）：它的 `DanmakuTimeline(...)` 构造没传宽度，
+走的是「量不到宽度」那条路径 —— 而那条路径现在退回**整段独占**（`clear = life`），
+7 条轨道各自要占满 8 秒，于是「三十六条挤进来、上限十二」只能放下 **7** 条，
+`theScreenNeverHoldsMoreThanTheLimit` 与 `theDefaultLimitIsTheMediumOne` 断言的 `12` 会失效。
+
+改法：**给 `DanmakuDensityTest` 里每一处 `DanmakuTimeline(...)` 构造加上 `bandWidth = 1280` 与
+`textWidthOf = { 100f }`**，让它走 app 层真正走的那条路径（已量宽度 → 尾随入场 → 密度档位守得住）。
+**断言一个字都不用改** —— 改完它们仍然是 12。
+
+为什么这么改：密度上限本来就是给用户选的旋钮，产品路径（app 层总会量宽度）下它必须守得住；
+「量不到宽度」的那条兼容路径只有探针和旧单测在走，在那儿同屏条数由轨道数决定是已知取舍
+（见规格「量不到宽度时」一节）。
 
 - [ ] **Step 5: 提交**
 

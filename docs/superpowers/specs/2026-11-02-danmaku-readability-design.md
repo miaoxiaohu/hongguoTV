@@ -68,8 +68,13 @@ for (t in freeAt.indices) if (freeAt[t] <= at) { chosen = t; break }
 - `clear` 是尾随入场的核心：弹幕飞到「尾巴越过右缘」那一刻，这条轨道就能接下一条。
   推导：x(e) = band − (e/life)×(band+w)，尾巴越过右缘 ⟺ x+w ≤ band ⟺ e ≥ life×w/(band+w)；
   代入 life 后化简就是 `clear = 7.5s × w/band`。
-- **量不到宽度时**（core 里没有 `Paint`）：按「一条普通弹幕约占屏宽 8%」估算，
-  即 `clear = 0.08 × life`。这样 `Probe.kt` 与现有单测不传宽度也能保持原来的行为手感。
+- **量不到宽度时**（core 里没有 `Paint`）：时长按「一条普通弹幕约占屏宽 8%」估算，
+  但**轨道释放退回「整段独占」**（`clear = life`，见 `DanmakuTimeline.clearOf`）——
+  按 8% 估出来的清场时刻会**低估**真实的尾巴离场时刻（尾巴真正离开右缘是 `life×w/(band+w)`），
+  轨道提前释放，长句的尾巴还在屏上就会被后一条追上，同轨叠字。
+  宁可让这条兼容路径上的同屏条数由轨道数决定，也不能叠字。
+  （2026-11-02 用户拍板。app 层总会量宽度，所以**产品的路径走的是「已量宽度」那条**，
+  尾随入场的完整收益不受影响；退回整段独占的只有 `Probe.kt` 与不传宽度的既有单测。）
 
 ### core/Danmaku.kt —— `DanmakuTimeline`
 
@@ -119,7 +124,8 @@ for (t in freeAt.indices) if (freeAt[t] <= at) { chosen = t; break }
 - 文字越宽 → 时长越长，且严格递增。
 - 时长与宽度线性一致：两条弹幕的 `life / (1 + w/band)` 相等（同一个 v）。
 - 尾巴清场时间与宽度成正比：`clear = 7.5s × w/band`。
-- 量不出宽度时退回到「整段独占」（clear = life）。
+- 量不出宽度时，**轨道释放**退回到「整段独占」（`clear = life`）—— 断言放在 `DanmakuTrackTest`
+  （它是轨道层的语义，`DanmakuTiming` 只管算式本身）。
 
 `DanmakuTimelineTest`（新增）：
 
