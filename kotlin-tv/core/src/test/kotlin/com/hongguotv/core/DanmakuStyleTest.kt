@@ -81,4 +81,40 @@ class DanmakuStyleTest {
         assertEquals("自动",DanmakuRows.label(DanmakuRows.AUTO))
         assertEquals("5 行",DanmakuRows.label(5))
     }
+
+    /**
+     * 密度调高时字号降一档。
+     *
+     * 字多了还按大字号飘，屏幕上就是一片白字 —— 用户说的「挡屏幕」。
+     */
+    @Test fun aDenserScreenUsesSmallerText() {
+        val height=720
+        val medium=DanmakuLayouts.resolve(height,DanmakuSize.NORMAL,DanmakuRows.AUTO,DanmakuDensity.MEDIUM)
+        val high=DanmakuLayouts.resolve(height,DanmakuSize.NORMAL,DanmakuRows.AUTO,DanmakuDensity.HIGH)
+        assertTrue("密度高时字号要小",high.textSize<medium.textSize)
+        assertEquals(medium.textSize*0.85f,high.textSize,0.01f)
+    }
+
+    /** 密度低的时候不放大 —— 放大了可能溢出屏幕。 */
+    @Test fun aQuieterScreenDoesNotEnlargeTheText() {
+        val height=720
+        val normal=DanmakuLayouts.resolve(height,DanmakuSize.NORMAL,DanmakuRows.AUTO,DanmakuDensity.MEDIUM)
+        val low=DanmakuLayouts.resolve(height,DanmakuSize.NORMAL,DanmakuRows.AUTO,DanmakuDensity.LOW)
+        assertEquals(normal.textSize,low.textSize,0.01f)
+    }
+
+    /** 不传密度就是「中」—— 老调用点（app 之外）行为不变。 */
+    @Test fun withoutADensityTheTextIsTheMediumOne() {
+        val height=720
+        assertEquals(
+            DanmakuLayouts.resolve(height,DanmakuSize.NORMAL,DanmakuRows.AUTO,DanmakuDensity.MEDIUM).textSize,
+            DanmakuLayouts.resolve(height,DanmakuSize.NORMAL,DanmakuRows.AUTO).textSize,
+            0.01f
+        )
+    }
+
+    /** 「淡」那档的描边必须够实：白字全靠那道黑边才看得清。 */
+    @Test fun theFaintestTierStillHasASolidEdge() {
+        assertTrue(DanmakuAlpha.LIGHT.edge>=180)
+    }
 }

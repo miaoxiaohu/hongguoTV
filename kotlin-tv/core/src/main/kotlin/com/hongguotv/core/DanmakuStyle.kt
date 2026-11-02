@@ -51,9 +51,11 @@ enum class DanmakuDensity(val maxOnScreen: Int, val label: String) {
  *
  * 描边（黑边）比填充更实：电视上的画面五花八门，白字全靠这道黑边才看得清。填充淡一点没关系，
  * 边淡了字就真的糊在画面里了 —— 所以两档的 alpha 不是同一个比例。
+ *
+ * 淡档的描边从 160 抬到 180：白字在亮画面上全靠这道黑边撑住，边淡了字就糊在画面里了。
  */
 enum class DanmakuAlpha(val fill: Int, val edge: Int, val label: String) {
-    SOLID(255,220,"不透明"), HALF(165,200,"半透明"), LIGHT(105,160,"淡");
+    SOLID(255,220,"不透明"), HALF(165,200,"半透明"), LIGHT(105,180,"淡");
     companion object {
         /** 认不出来的名字按「半透明」算：旧备份、旧记录里没有这个字段。 */
         fun fromStored(value: String?)=entries.firstOrNull { it.name==value } ?: HALF
@@ -89,14 +91,32 @@ object DanmakuLayouts {
     const val MAX_BAND=0.7f
 
     /**
+     * 密度对字号的影响。
+     *
+     * 密度调高时字号降一档：同屏的条数多了还按大字号飘，屏幕上就是一片白字。
+     * 密度低的时候**不放大** —— 放大了可能溢出屏幕。
+     */
+    fun densityScale(density: DanmakuDensity): Float = when (density) {
+        DanmakuDensity.LOW -> 1f
+        DanmakuDensity.MEDIUM -> 1f
+        DanmakuDensity.HIGH -> 0.85f
+    }
+
+    /**
      * 排一次版。
      *
      * @param heightPx 画面高度（像素）。
      * @param size 字号档位。
      * @param requestedRows 想要的行数，[DanmakuRows.AUTO] 表示按屏幕高度自己算。
+     * @param density 同屏条数档位：密度高时字号降一档。
      */
-    fun resolve(heightPx: Int,size: DanmakuSize,requestedRows: Int):DanmakuLayout {
-        val textSize=(baseTextSize(heightPx)*size.scale).coerceIn(14f,88f)
+    fun resolve(
+        heightPx: Int,
+        size: DanmakuSize,
+        requestedRows: Int,
+        density: DanmakuDensity = DanmakuDensity.MEDIUM
+    ): DanmakuLayout {
+        val textSize = (baseTextSize(heightPx) * size.scale * densityScale(density)).coerceIn(14f, 88f)
         val trackHeight=(textSize*1.5f).toInt().coerceAtLeast(1)
         if(requestedRows==DanmakuRows.AUTO) {
             val band=(heightPx*AUTO_BAND).toInt()
