@@ -84,15 +84,42 @@ class DanmakuOverlay(context: Context) : View(context) {
     fun setItems(items: List<Danmaku>) {
         source=items
         if(items.isEmpty()) { timeline=null; widths=FloatArray(0); pending=null; invalidate(); return }
-        if(textSizePx<=0) { pending=items; invalidate(); return }
+        if(textSizePx<=0||width<=0) { pending=items; invalidate(); return }
         pending=null
+        // 量宽度要用当前字号，所以画笔先设好，再去量、去截。
         fill.textSize=textSizePx
         edge.textSize=textSizePx
-        edge.strokeWidth=(textSizePx*.1f).coerceAtLeast(1f)
-        val laid=DanmakuTimeline(items,trackCount,lifetimeMs(),density.maxOnScreen)
+        // 描边粗一点：白字在电视上那种五花八门的画面里，全靠这道黑边才看得清。
+        edge.strokeWidth=(textSizePx*.14f).coerceAtLeast(1f)
+        // 超长的先截短：一条比屏还宽的弹幕要飘两屏宽才走完，看着就是一大坨。
+        val fitted=items.map { it.copy(text=fit(it.text)) }
+        // 每条有多宽，core 要靠它算飞行时长和尾巴清场的时间。量一次就够 —— 每帧 measureText
+        // 在这台机器上是白白的开销。
+        val measured=HashMap<String,Float>()
+        fun widthOf(text:String):Float = measured.getOrPut(text) { fill.measureText(text) }
+        val laid=DanmakuTimeline(fitted,trackCount,lifetimeMs(),density.maxOnScreen,
+            bandWidth=width,textWidthOf={ widthOf(it.text) })
         timeline=laid
-        widths=FloatArray(laid.placed.size) { fill.measureText(laid.placed[it].danmaku.text) }
+        widths=FloatArray(laid.placed.size) { widthOf(laid.placed[it].danmaku.text) }
         invalidate()
+    }
+
+    /**
+     * 太宽的文字截短。
+     *
+     * 超过屏宽九成的文字要飘两屏宽才走完，挡着画面看不清 —— 截掉加省略号。
+     */
+    private fun fit(text:String):String {
+        val limit=width*.9f
+        if(limit<=0f) return text
+        if(fill.measureText(text)<=limit) return text
+        var low=0
+        var high=text.length
+        while(low<high) {
+            val mid=(low+high+1)/2
+            if(fill.measureText(text.substring(0,mid)+"…")<=limit) low=mid else high=mid-1
+        }
+        return text.substring(0,low)+"…"
     }
 
     /** 弹幕的位置从哪儿来。 */
@@ -122,14 +149,14 @@ class DanmakuOverlay(context: Context) : View(context) {
      */
     private fun applyLayout() {
         if(viewHeight<=0) return
-        val laid=DanmakuLayouts.resolve(viewHeight,size,requestedRows)
+        val laid=DanmakuLayouts.resolve(viewHeight,size,requestedRows,density)
         layout=laid
         textSizePx=laid.textSize
         trackHeightPx=laid.trackHeight
         trackCount=laid.trackCount
         fill.textSize=textSizePx
         edge.textSize=textSizePx
-        edge.strokeWidth=(textSizePx*.1f).coerceAtLeast(1f)
+        edge.strokeWidth=(textSizePx*.14f).coerceAtLeast(1f)
         // 透明度：填充是白字，描边是黑边，两者按档位走。
         fill.color=Color.argb(alpha.fill,255,255,255)
         edge.color=Color.argb(alpha.edge,0,0,0)
@@ -191,9 +218,9 @@ class DanmakuOverlay(context: Context) : View(context) {
         val baseline0=textSizePx
         for(v in visible) {
             val w=if(v.index<widths.size) widths[v.index] else 0f
-            val x=DanmakuMotion.xAt(v.elapsedMs,laid.lifetimeMs,bandWidth,w)
+            val x=DanmakuMotion.xAt(v.elapsedMs,v.lifetimeMs,bandWidth,w)
             // 整条都在屏外就不画：一个字都不露的时候画了也没用。
-            if(DanmakuMotion.visibleTextRange(v.elapsedMs,laid.lifetimeMs,bandWidth,w)==null) continue
+            if(DanmakuMotion.visibleTextRange(v.elapsedMs,v.lifetimeMs,bandWidth,w)==null) continue
             val baseline=baseline0+v.track*trackHeightPx
             canvas.drawText(v.danmaku.text,x,baseline,edge)
             canvas.drawText(v.danmaku.text,x,baseline,fill)
