@@ -117,3 +117,19 @@
 - 写临时 .ps1 时**正文只能有 ASCII**（跟上面 ANSI/GBK 那条同源）：中文注释会让 5.1 解析报
   「Unexpected token '}'」，不是语法写错了。
 
+## 版本号与发布（2026-11-02 定）
+
+- **versionCode 是 CI 从 tag 算出来的，不是手填的**：
+  `code = major*1000000 + minor*1000 + patch`（`.github/workflows/release.yml`）。
+  所以 tag `kotlin-v0.9.81` → 9081；tag `kotlin-v0.9.80` → **9080**，跟 9081 差一档。
+- **文档里写的 versionCode 必须等于 CI 算出来的那个数**。两边对不上，后果不是「文档难看」：
+  电视端 `AppUpdater` 只在 `新 versionCode > 已装 versionCode` 时提示更新，
+  只要有人照文档装了一个比官方 tag 算出来的数更大的包，**这一支就再也发不出更新了**
+  （2026-11-02 的 0.9.80 就差点这么栽：文档写 9081，CI 出的是 9080，最后整版改成 0.9.81/9081）。
+- 本地手工出包用 `HONGGUOTV_VERSION_CODE` / `HONGGUOTV_VERSION_NAME` 注入，**必须与 tag 算出来的一致**。
+  出包前先删 `app/build`（AGP 的 `GenerateBuildConfig` 不跟踪版本号，不删会留着上一次的版本号）。
+- **`-dbg` 实验版不能跟正式版抢同一个 versionCode**：实验版要**严格小于**正式版，
+  否则正式版推过去电视也不提示更新。实验版占掉 9080，正式版就得是 9081（→ versionName 0.9.81）。
+- 推 tag 前查一遍已发布的版本：`gh release list --repo miaoxiaohu/hongguoTV`，
+  CI 守卫要求新 tag 的 versionCode **新于所有已发布的 kotlin-v 版本**。
+
