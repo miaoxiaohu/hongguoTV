@@ -14,7 +14,7 @@
 - **判据用硬指标，不看图**（AGENTS.md）。视觉结论必须来自单测断言或逐帧量像素。
 - **core 里不许出现 Android API**（`Paint`/`Canvas`/`Context`）—— core 是 JVM 模块，量宽度的活交给 app。
 - **正式交付包不许带任何诊断/探针代码**（AGENTS.md）。临时探针只能活在临时工作区，撤干净后重新出包。
-- 覆盖安装要求**同签名 + versionCode 严格大于**已装版本。实验版 `-dbg` 用 versionCode **9080**，正式版用 **9081**（versionName `0.9.80`）—— 正式版必须越过实验版。
+- 覆盖安装要求**同签名 + versionCode 严格大于**已装版本。实验版 `-dbg` 用 versionCode **9080**，正式版用 **9081**（versionName `0.9.81`）—— 正式版必须越过实验版。
 - 出包/装包后回读版本：`adb -s 192.168.1.30:5555 shell dumpsys package com.hongguotv.nativeapp | Select-String versionName`。
 - 测完**必须退出 App**：`adb -s 192.168.1.30:5555 shell am force-stop com.hongguotv.nativeapp`。
 - adb 用 `D:\Programs\android-sdk\platform-tools\adb.exe`（37.0.1）；`C:\Users\server\.local\bin\adb.exe` 是另一份，别混用（会互杀 adb server）。
@@ -880,16 +880,16 @@ git commit -m "feat: 弹幕层按每条文字宽度算时长，超长截断，�
 
 ---
 
-### Task 5: 实机验收（像素判据）+ 正式包 0.9.80
+### Task 5: 实机验收（像素判据）+ 正式包 0.9.81
 
 **Files:**
 - 临时：`kotlin-tv/app/src/main/kotlin/com/hongguotv/nativeapp/DanmakuOverlay.kt`（探针，**不提交**）
-- Create: `kotlin-tv/RELEASE_0.9.80.md`
-- Modify: `kotlin-tv/README.md`（加 0.9.80 段落）、`kotlin-tv/CHANGELOG.md`（加一条）
+- Create: `kotlin-tv/RELEASE_0.9.81.md`
+- Modify: `kotlin-tv/README.md`（加 0.9.81 段落）、`kotlin-tv/CHANGELOG.md`（加一条）
 
 **Interfaces:**
 - Consumes: Task 1~4 的全部成果。
-- Produces: 0.9.80 正式包（versionCode **9081**，versionName **0.9.80**，同发布签名）。
+- Produces: 0.9.81 正式包（versionCode **9081**，versionName **0.9.81**，同发布签名）。
 
 - [ ] **Step 1: 临时探针（只在工作区，绝不提交）**
 
@@ -978,13 +978,13 @@ Expected: `git status --short` 里**没有**任何 `M`（探针改动全撤干�
 ```
 cd kotlin-tv
 $env:HONGGUOTV_VERSION_CODE="9081"
-$env:HONGGUOTV_VERSION_NAME="0.9.80"
+$env:HONGGUOTV_VERSION_NAME="0.9.81"
 .\gradlew.bat :app:assembleRelease --console=plain --no-daemon
 ```
 
 - [ ] **Step 5: 装正式包并实机复核**
 
-1. 装到 Palm，回读版本，确认是 `0.9.80` / `9081`。
+1. 装到 Palm，回读版本，确认是 `0.9.81` / `9081`。
 2. 走设置页：首页按两下 `keyevent 19`（↑）到导航行，再按 5 下 `keyevent 22`（→）到「设置」，`keyevent 23` 确认。
 3. 左列找到「弹幕设置」那一行，进去把「数量」切到「多」，确认摘要文案里的字号档位跟着变小（密度 HIGH → 字号 ×0.85）。
 4. 回读落盘：
@@ -997,7 +997,7 @@ $env:HONGGUOTV_VERSION_NAME="0.9.80"
 
 - [ ] **Step 6: 写发布说明**
 
-创建 `kotlin-tv/RELEASE_0.9.80.md`，照 `RELEASE_0.9.79.md` 的格式（标题 + `<!-- notes -->` 摘要块 + 逐条说明 +
+创建 `kotlin-tv/RELEASE_0.9.81.md`，照 `RELEASE_0.9.79.md` 的格式（标题 + `<!-- notes -->` 摘要块 + 逐条说明 +
 「最低 Android 8.0 / API 26，versionCode 9081」），内容写清：
 
 - 弹幕改成固定像素速度：长句自动多飘两秒半。
@@ -1007,13 +1007,13 @@ $env:HONGGUOTV_VERSION_NAME="0.9.80"
 - 描边加粗、「淡」档描边抬实、超长弹幕截断。
 - 把 Step 3 量出来的像素数据写进去（实测数字，不是形容）。
 
-并在 `kotlin-tv/README.md` 顶部段落加 0.9.80 一节、`kotlin-tv/CHANGELOG.md` 加一条。
+并在 `kotlin-tv/README.md` 顶部段落加 0.9.81 一节、`kotlin-tv/CHANGELOG.md` 加一条。
 
 - [ ] **Step 7: 提交并推送**
 
 ```
-git add kotlin-tv/RELEASE_0.9.80.md kotlin-tv/README.md kotlin-tv/CHANGELOG.md
-git commit -m "docs: 0.9.80 弹幕可读性与排布"
+git add kotlin-tv/RELEASE_0.9.81.md kotlin-tv/README.md kotlin-tv/CHANGELOG.md
+git commit -m "docs: 0.9.81 弹幕可读性与排布"
 git push origin main
 ```
 

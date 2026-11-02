@@ -11,7 +11,7 @@ import kotlin.math.roundToLong
  * 这是用户说的「看不清 / 读不完」的第一来源。
  *
  * 现在改成**固定像素速度**：速度对所有弹幕一致（按屏宽定，约 7.5 秒过一屏），
- * 字越多飘的时间自然越长。20 个字能比 4 个字多拿两秒半。
+ * 字越多飘的时间自然越长。20 个字能比 4 个字多拿约 2.43 秒。
  *
  * 尾随入场（`tailClearMs`）是同一套算式的副产品：弹幕的尾巴一离开屏幕右缘，
  * 它那条轨道就能接下一条 —— 水平方向错开，不会叠字。
@@ -48,7 +48,8 @@ object DanmakuTiming {
      * ⟺ e ≥ 全程 × 文字宽 / (屏宽 + 文字宽)；代入 `lifetimeMs` 后化简成
      * 「基准时间 × 文字宽 / 屏宽」。
      *
-     * 100px 的普通弹幕 586 毫秒就清场，520px 的长句要 3047 毫秒 ——
+     * 宽 100 px 的弹幕尾巴 586 毫秒清场；按默认宽度比（屏宽 8%）算的普通弹幕约 102 px，
+     * 约 600 毫秒 —— 520px 的长句要 3047 毫秒 ——
      * 长句在自己那条轨道上占得久，这是对的：它也宽，撞上后来的弹幕会更难看。
      */
     fun tailClearMs(textWidth: Float, bandWidth: Int): Long {
@@ -56,7 +57,11 @@ object DanmakuTiming {
         return (BASE_SECONDS * 1000f * widthRatio(textWidth, bandWidth)).roundToLong()
     }
 
-    /** 文字占屏宽的比例。量不到宽度就按普通弹幕估。 */
+    /**
+     * 文字占屏宽的比例。量不到宽度就按普通弹幕估。
+     *
+     * 上界 1 只是兜底：app 层已把文字截到屏宽 90%，产品路径走不到这个分支。
+     */
     private fun widthRatio(textWidth: Float, bandWidth: Int): Float =
         if (textWidth <= 0f) DEFAULT_WIDTH_RATIO else (textWidth / bandWidth).coerceIn(0f, 1f)
 }

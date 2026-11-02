@@ -33,6 +33,13 @@ class DanmakuOverlay(context: Context) : View(context) {
     private var timeline: DanmakuTimeline?=null
     /** 每条弹幕的宽度，算一次就够 —— 每帧 measureText 在这台机器上是白白的开销。 */
     private var widths=FloatArray(0)
+    /**
+     * 文字宽度的测量缓存：同一串字只量一次。
+     *
+     * 截断（`fit`）和排版量的是同一批字，共用一个缓存就不用把同一串字量两遍。
+     * 字号一改，量出来的宽度就作废 —— `setItems` 每次都先把它清空。
+     */
+    private val measured=HashMap<String,Float>()
     /** 尺寸还没定下来时先存着，定下来再排 —— 字号是 0 时量出来的宽度全是 0。 */
     private var pending: List<Danmaku>?=null
     private var positionSource:()->Long={ 0L }
@@ -91,12 +98,12 @@ class DanmakuOverlay(context: Context) : View(context) {
         edge.textSize=textSizePx
         // 描边粗一点：白字在电视上那种五花八门的画面里，全靠这道黑边才看得清。
         edge.strokeWidth=(textSizePx*.14f).coerceAtLeast(1f)
+        // 字号变了，之前量过的宽度就作废：缓存先清掉，别拿旧字号的宽度去算时长。
+        measured.clear()
         // 超长的先截短：一条比屏还宽的弹幕要飘两屏宽才走完，看着就是一大坨。
         val fitted=items.map { it.copy(text=fit(it.text)) }
         // 每条有多宽，core 要靠它算飞行时长和尾巴清场的时间。量一次就够 —— 每帧 measureText
         // 在这台机器上是白白的开销。
-        val measured=HashMap<String,Float>()
-        fun widthOf(text:String):Float = measured.getOrPut(text) { fill.measureText(text) }
         val laid=DanmakuTimeline(fitted,trackCount,lifetimeMs(),density.maxOnScreen,
             bandWidth=width,textWidthOf={ widthOf(it.text) })
         timeline=laid
@@ -112,15 +119,20 @@ class DanmakuOverlay(context: Context) : View(context) {
     private fun fit(text:String):String {
         val limit=width*.9f
         if(limit<=0f) return text
-        if(fill.measureText(text)<=limit) return text
+        if(widthOf(text)<=limit) return text
         var low=0
         var high=text.length
         while(low<high) {
             val mid=(low+high+1)/2
-            if(fill.measureText(text.substring(0,mid)+"…")<=limit) low=mid else high=mid-1
+            if(widthOf(text.substring(0,mid)+"…")<=limit) low=mid else high=mid-1
         }
+        // 二分是按 UTF-16 码元切的，可能落在代理对中间：半个 emoji 画出来是一块豆腐。
+        if(low>0&&text[low-1].isHighSurrogate()) low--
         return text.substring(0,low)+"…"
     }
+
+    /** 量一段文字有多宽（像素）。同一串字只量一次 —— 走 `measured` 缓存。 */
+    private fun widthOf(text:String):Float = measured.getOrPut(text) { fill.measureText(text) }
 
     /** 弹幕的位置从哪儿来。 */
     fun setPositionSource(source: ()->Long) { positionSource=source }
@@ -227,11 +239,16 @@ class DanmakuOverlay(context: Context) : View(context) {
         }
     }
 
-    /** 一条弹幕从右边走到左边要多久。 */
+    /**
+     * 一条弹幕从右边走到左边要多久。
+     *
+     * core 的兜底值：产品路径每条都按自己的宽度算时长（core 的基准是 7.5 秒过一屏），
+     * 这个值在 app 里走不到 —— 留着是因为 core 的老接口要一个统一时长。
+     */
     private fun lifetimeMs(): Long = LIFETIME_MS
 
     companion object {
-        /** 约 8 秒走完全屏。 */
+        /** core 的兜底值：产品路径每条按自己的宽度算时长，用不到它。 */
         const val LIFETIME_MS=8_000L
         /** 30 帧一秒：这个画面的滚动速度用不着 60 帧。 */
         private const val FRAME_MS=33L
