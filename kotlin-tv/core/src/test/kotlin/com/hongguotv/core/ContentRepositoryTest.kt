@@ -172,19 +172,19 @@ class ContentRepositoryTest {
     }
 
     /**
-     * The playback request carries the identity the platform registered.
+     * The playback request carries the registered identity and the signature.
      *
      * A made-up identity is refused with an empty body - that is the whole reason the
      * registration exists - so the request has to carry the two numbers the registration
-     * answered with, and it must not carry a signature: the endpoint tells a signed request
-     * apart from an unsigned one and refuses the signed one.
+     * answered with.
+     *
+     * 2026-11-02: it also has to carry the signature again. A request with the registered
+     * identity but no signature headers is answered with HTTP 200 and a zero-byte body, so
+     * the six signature headers are part of what makes the request answer.
      */
-    @Test fun thePlaybackRequestCarriesTheRegisteredIdentityAndNoSignature() {
+    @Test fun thePlaybackRequestCarriesTheRegisteredIdentityAndTheSignature() {
         val queries=mutableListOf<String>()
         val headers=mutableListOf<String>()
-        val repo=repository(playback=inlinePlaybackAnswer(inlineRendition("1080p","bytevc1")).toString()) { request ->
-            throw AssertionError("unexpected request ${request.url}")
-        }
         // The interceptor records the query and the headers of the playback request.
         val recording=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             val request=chain.request()
@@ -204,10 +204,12 @@ class ContentRepositoryTest {
         assertEquals(1,queries.size)
         assertTrue(queries.first(),queries.first().contains("device_id=3313301318833834"))
         assertTrue(queries.first(),queries.first().contains("iid=3313301318833834"))
-        // No signature: the endpoint refuses a request that carries one.
-        assertFalse(headers.first(),headers.first().contains("X-Argus",ignoreCase=true))
-        assertFalse(headers.first(),headers.first().contains("X-SS-STUB",ignoreCase=true))
+        // The six signature headers the endpoint asks for.
+        for(header in listOf("X-Argus","X-Gorgon","X-Medusa","X-Khronos","X-Ladon","X-Helios"))
+            assertTrue(header,headers.first().contains(header,ignoreCase=true))
     }
+
+
 
     /** The screen resolution is part of the query, so it has to be encoded the way the app does. */
     @Test fun thePlaybackQueryEncodesTheScreenResolutionLikeTheAppDoes() {
@@ -244,8 +246,14 @@ class ContentRepositoryTest {
         assertEquals(listOf(REGISTER_PATH,PLAYBACK_PATH),paths)
     }
 
-    /** The device is registered once, not once per episode. */
-    @Test fun theDeviceIsRegisteredOnlyOnceForTheWholeRepository() {
+    /**
+     * The device is registered again for the next episode.
+     *
+     * A registered identity is good for exactly one address lookup: the second lookup with
+     * the same identity comes back with an empty body, and it keeps saying so. Measured
+     * 2026-11-05: ten lookups with one identity answered once and were empty nine times.
+     */
+    @Test fun theDeviceIsRegisteredForEveryEpisodeBecauseAnIdentityOnlyAsksOnce() {
         val registrations=java.util.concurrent.atomic.AtomicInteger()
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             val request=chain.request(); val path=request.url.encodedPath
@@ -259,7 +267,7 @@ class ContentRepositoryTest {
         }.build())
         repo.stream("456","123")
         repo.stream("456","123")
-        assertEquals("the device is registered once and then reused",1,registrations.get())
+        assertEquals("an identity is spent by one lookup, so the second episode registers again",2,registrations.get())
     }
 
     /**
@@ -446,9 +454,13 @@ class ContentRepositoryTest {
      */
     @Test fun aDeadNetworkDoesNotAskThePublicPageAsWell() {
         val paths=mutableListOf<String>()
-        val repo=repository(register={ throw java.net.ConnectException("timeout") }) { request ->
-            paths+=request.url.encodedPath; throw java.net.ConnectException("timeout")
-        }
+        // The registration answers; the network dies on the playback request itself.
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            if(path!=REGISTER_PATH) { paths+=path; throw java.net.ConnectException("timeout") }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(REGISTERED.toResponseBody()).build()
+        }.build())
         val e=assertThrows(IOException::class.java) { repo.stream("456","123") }
         assertFalse("the public page is the same dead network",paths.any { it==PUBLIC_PATH })
         assertFalse("the signed wave is the same dead network",paths.any { it==MODEL_PATH })
@@ -537,7 +549,16 @@ class ContentRepositoryTest {
     }
 
     @Test fun missingEpisodeExplainsThatOnlyTheFirstThreeAreHosted() {
-        val e=assertThrows(IOException::class.java) { failingRepository(404).stream("456","123") }
+        // The registration answers, so the playback request is really made and refused; the
+        // public page is what says that this episode is not hosted.
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request()
+            val isRegister=request.url.encodedPath==REGISTER_PATH
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(if(isRegister) 200 else 404).message("x")
+                .body((if(isRegister) REGISTERED else "").toResponseBody()).build()
+        }.build())
+        val e=assertThrows(IOException::class.java) { repo.stream("456","123") }
         assertEquals("该来源每部剧只提供前 3 集，本集暂无资源",e.message)
     }
 
@@ -579,9 +600,10 @@ class ContentRepositoryTest {
      */
     @Test fun anEmptySignedAnswerDoesNotBlameTheShowForHavingOnlyThreeEpisodes() {
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val path=chain.request().url.encodedPath
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
-                .code(if(chain.request().url.encodedPath==MODEL_PATH) 200 else 404).message("x")
-                .body("".toResponseBody()).build()
+                .code(if(path==MODEL_PATH||path==REGISTER_PATH) 200 else 404).message("x")
+                .body((if(path==REGISTER_PATH) REGISTERED else "").toResponseBody()).build()
         }.build())
         val e=assertThrows(IOException::class.java) { repo.stream("456","123") }
         assertEquals("播放接口返回空内容",e.message)
@@ -589,7 +611,16 @@ class ContentRepositoryTest {
     }
 
     @Test fun otherStatusesKeepThePlainHttpError() {
-        val e=assertThrows(IOException::class.java) { failingRepository(503).stream("456","123") }
+        // The registration answers, so the 503 below is the playback request's own status and
+        // has to reach the person as it is.
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request()
+            val isRegister=request.url.encodedPath==REGISTER_PATH
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(if(isRegister) 200 else 503).message("error")
+                .body((if(isRegister) REGISTERED else "").toResponseBody()).build()
+        }.build())
+        val e=assertThrows(IOException::class.java) { repo.stream("456","123") }
         assertEquals("内容请求失败（HTTP 503）",e.message)
     }
 

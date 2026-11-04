@@ -810,36 +810,24 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
     /**
      * The playback endpoint as it answers today.
      *
-     * Two things changed on 2026-10-27 and both of them are visible in the request this method
-     * makes. The endpoint stopped accepting a signed request - one that carries the signature
-     * headers and an identity that was made up on the spot is answered with HTTP 200 and a
-     * zero-byte body - and it started accepting an unsigned request that carries the identity
-     * the platform registered. So the signature is gone from this path, and the identity comes
-     * from [PlaybackDevice] rather than from a random generator.
+     * 2026-10-27: the endpoint stopped accepting a signed request - one that carries the
+     * signature headers and an identity that was made up on the spot is answered with HTTP 200
+     * and a zero-byte body - and it started accepting an unsigned request that carries the
+     * identity the platform registered.
+     *
+     * 2026-11-02: that was not the end of it. The endpoint asks for the signature again, and
+     * the request that carries the registered identity but no signature headers is answered
+     * the same silent way - HTTP 200, zero bytes. The catalogue kept working, so the only
+     * symptom was that every episode played ten seconds of sample and then stopped. The
+     * request is signed the way [Signer] signs every other request: the query carries the
+     * registered identity and the timestamp, and the six signature headers ride along.
      *
      * The answer holds one entry per episode that was asked for, and the model it carries usually
      * has the renditions inline; only some answers point at a second address instead.
      */
     private fun registeredStream(id: String, maxQuality: Int): StreamInfo {
-        val identity=playbackIdentity()
-        val query=LinkedHashMap<String,String>(PLAYBACK_DEVICE_PARAMS)
-        query["device_id"]=identity.deviceId
-        query["iid"]=identity.iid
-        query["_rticket"]=clock().toString()
-        val encoded=query.entries.joinToString("&") { "${playbackEncode(it.key)}=${playbackEncode(it.value)}" }
         val body="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}""".toByteArray()
-        val request=Request.Builder().url("$PLAYBACK_API?$encoded")
-            .header("User-Agent",PLAYBACK_UA)
-            .header("Accept","application/json; charset=utf-8,application/x-protobuf")
-            .header("Content-Type","application/json; charset=UTF-8")
-            .post(body.toRequestBody("application/json; charset=UTF-8".toMediaType()))
-            .build()
-        val text=addressLookup { client -> RequestScope.execute(client.newCall(request)) { response ->
-            if(!response.isSuccessful) throw HttpStatusException(response.code)
-            response.body?.string() ?: throw IOException("播放信息为空")
-        } }
-        // The same zero-byte answer the signed path gets when it is refused.
-        if(text.isBlank()) throw EmptySignedAnswerException()
+        val text=signedPlaybackWithFreshIdentity(body)
         val answer=JSONObject(text)
         val code=if(answer.has("code")) answer.optInt("code",-1) else answer.optInt("Code",-1)
         if(code!=0) throw IOException("播放接口暂不可用")
@@ -860,6 +848,75 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             info=outer.optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
         }
         return pickStream(info,maxQuality)
+    }
+    /**
+     * The playback answer, asked with an identity that has not been used yet.
+     *
+     * A registered identity is good for exactly one address lookup. The second lookup with the
+     * same identity comes back with an empty body - the endpoint saying that this identity has
+     * been used - and it keeps saying so. So the identity is spent as it is handed out, and a
+     * lookup that comes back empty registers a new one and asks again.
+     *
+     * Measured 2026-11-05: ten lookups with one identity answered once and were empty nine
+     * times; the eleventh, with a freshly registered identity, answered at once.
+     */
+    private fun signedPlaybackWithFreshIdentity(body: ByteArray): String {
+        var refusal: Exception?=null
+        for(attempt in 0..1) {
+            val identity=try { takePlaybackIdentity() }
+            catch(e: Exception) { refusal=e; continue }
+            val text=try { signedPlaybackAnswer(identity,body) }
+            catch(e: Exception) { refusal=e; "" }
+            if(text.isNotBlank()) return text
+        }
+        throw refusal ?: EmptySignedAnswerException()
+    }
+    /**
+     * The registered identity, spent as it is handed out.
+     *
+     * The endpoint lets one identity ask for one address, so the identity is dropped here
+     * rather than kept for the next episode.
+     */
+    @Synchronized private fun takePlaybackIdentity(): PlaybackIdentity {
+        val identity=playbackIdentity()
+        registeredIdentity=null
+        return identity
+    }
+    /**
+     * The playback answer, with the second host as the way out.
+     *
+     * The main host answers with an empty body for this client, and the same signed request
+     * on the second host carries the whole model. Both are signed separately: the signature
+     * covers the query and the timestamp, so a request signed for one host is not a request
+     * signed for the other.
+     */
+    private fun signedPlaybackAnswer(identity: PlaybackIdentity, body: ByteArray): String {
+        val device=LinkedHashMap<String,String>(PLAYBACK_DEVICE_PARAMS)
+        device["device_id"]=identity.deviceId
+        device["iid"]=identity.iid
+        var refusal: Exception?=null
+        for(host in PLAYBACK_HOSTS) {
+            val text=try { signedPlaybackText(host,device,body) }
+            catch(e: Exception) { refusal=e; "" }
+            if(text.isNotBlank()) return text
+        }
+        throw refusal ?: EmptySignedAnswerException()
+    }
+    /**
+     * One signed playback request.
+     *
+     * The signature is made here rather than in [Signer.sign] alone because the endpoint wants
+     * the registered identity in the query and inside the signature at the same time.
+     */
+    private fun signedPlaybackText(host: String, device: Map<String,String>, body: ByteArray): String {
+        val signed=signer.sign("https://$host/novel/player/multi_video_model/v1/",device,body)
+        val request=Request.Builder().url(signed.url)
+        for((k,v) in signed.headers) request.header(k,v)
+        request.post(body.toRequestBody("application/json; charset=UTF-8".toMediaType()))
+        return addressLookup { client -> RequestScope.execute(client.newCall(request.build())) { response ->
+            if(!response.isSuccessful) throw HttpStatusException(response.code)
+            response.body?.string() ?: ""
+        } }
     }
     /** The renditions a model carries, in either of the two shapes they arrive in. */
     private fun renditions(info: JSONObject): List<JSONObject> {
@@ -1051,6 +1108,14 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
          * not the same: this one carries a registered identity and no signature at all.
          */
         const val PLAYBACK_API = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/"
+        /**
+         * The hosts the playback endpoint is asked, in order.
+         *
+         * The first one answers with an empty body for this client; the second one carries the
+         * same answer. Both are asked on every episode, because the first one is the one that
+         * works when the endpoint stops singling this client out.
+         */
+        val PLAYBACK_HOSTS = listOf("api5-normal-sinfonlineb.fqnovel.com","api5-normal-hl.fqnovel.com")
         /**
          * The user agent the playback request wears.
          *
