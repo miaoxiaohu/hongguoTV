@@ -173,6 +173,17 @@
 - 推 tag 前查一遍已发布的版本：`gh release list --repo miaoxiaohu/hongguoTV`，
   CI 守卫要求新 tag 的 versionCode **新于所有已发布的 kotlin-v 版本**。
 
+### 发布实测（2026-11-05，kotlin-v0.9.84）
+
+- 推 tag 后 CI 的 `Build and publish TV update` 约 **5 分钟**出 release（另有 `Verify Kotlin standalone APK` 约 4 分钟、
+  `Verify and publish Docker` 约 1 分钟，都跟着 main 推送跑）。
+- release 资产四个：`hongguotv-kotlin-<版本>-android8.apk`、`hongguotv-kotlin-v<版本>-source.zip`、
+  `SHA256SUMS`、`update.json`。**电视端读的是 `releases/latest/download/update.json`**，
+  所以新 release 必须抢到 `latest` 指针（`gh release` 发布时会自动设）。
+- **本地手工出的包和 CI 出的包 sha256 不一样**（签名时间戳等），但**证书指纹一致** → 能互相覆盖安装。
+  所以核对「能不能覆盖」要看证书，不要比 sha256：
+  `apksigner verify --print-certs <apk>`（本机在 `D:\Programs\android-sdk\build-tools\36.0.0\apksigner.bat`）。
+
 ## 播放页触控（0.9.83 起）
 
 - 四类手势：**单击画面**切 HUD 显隐、**双击画面**播放/暂停、**左右拖**跟手拖进度（实时预览目标时间，**松手才跳转**）、
