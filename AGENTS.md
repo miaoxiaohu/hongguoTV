@@ -4,10 +4,12 @@
 
 ## 源解析检测（每日 03:00）
 
-- 检测脚本：`scripts\daily-source-check.ps1`
+- 检测脚本：`D:\document\project\time_task\hongguoTV\daily-source-check.ps1`
+  （2026-10-29 起归置到 time_task；本仓库 `scripts\daily-source-check.ps1` 是旧副本，不再由 cron 调用）
 - 定时任务：Mavis 的 cron「红果TV 源解析每日检测」，`0 3 * * *`（Asia/Shanghai）。
-- 脚本自己判定并推送（Bark，group=`HongguoTV源解析`）：正常静默，异常才推一条。
-  退出码：`0` 正常 / `10` 有异常（已推送）/ `20` 探针没编译。
+- **不推 Bark**（2026-11-04 起按用户要求停用推送）：脚本默认不推，异常只由 cron 会话回报一句。
+  要推必须显式加 `-Push`。
+  退出码：`0` 正常 / `10` 有异常（结果在脚本 stdout 的「异常明细：」段里）/ `20` 探针没编译。
 
 ### 探针是什么
 
@@ -52,6 +54,30 @@
 - **投影上的推装服务掉了要用户自己去开**，别在后台无限轮询等它（2026-11-01 用户交代）。
 - Palm 息屏时按键不生效：`input keyevent KEYCODE_WAKEUP` + `wm dismiss-keyguard` 之后才能操作。
 - 应用是强制横屏的：坐标按 **1280x720** 算，别按 `wm size` 报的 720x1280。
+
+### 怎么读自绘 UI、怎么操作（2026-11-04 实机补）
+
+- **自绘 UI 拿控件只能靠 uiautomator dump**：
+  `adb shell uiautomator dump /sdcard/u.xml` 之后 `cat /sdcard/u.xml`。
+  能读到文本、焦点（`focused="true"`）、勾选态 —— 设页、弹幕面板都是自绘的，dump 是唯一读法。
+- **`input tap` 不触发 onClick**，只把焦点挪过去。操作一律走 `keyevent`：
+  确认 23 / 下 20 / 上 19 / 右 22 / 左 21 / 返回 4。
+- **App 的弹幕不是纯白**：半透明填充（HALF 档亮度上限约 200）+ 不透明黑描边。
+  统计字高要用**亮度阈值约 165**，用纯白阈值（>225）会一行都检不出来。
+- **改设备上的设置**可以直接改 SharedPreferences（`adb shell` 已是 root，**没有 su**）：
+  `adb shell "sed -i 's|>MEDIUM<|>HIGH<|' /data/data/com.hongguotv.nativeapp/shared_prefs/native-library-v1.xml"`。
+  绕过了 UI，所以**验收完必须改回去**（双引号里写 `\"` 会失败，用不含引号的 `>MEDIUM<` 模式）。
+  ⚠️ **但外部改 prefs 对「弹幕密度」不生效**（2026-11-04 实测）：App 启动后会把自己那份 prefs
+  覆盖回去，设置页摘要仍显示旧档位。**密度只能走 App 自己的设置页 UI 改**；
+  回读 prefs 只证明「落盘了」，**不证明字号真的变了** —— 必须用像素量。
+- **改密度的 UI 路径**：设置页 → 左侧「弹幕设置」→ 第 4 行「弹幕数量」→ 确认展开候选
+  （候选竖排：少 6 / 中 12 / 多 24，**每次打开光标都停在第一项**，不记忆上次）→ ↓ 几下选档
+  → **再按一次确认生效，面板不关**。选「多」= 两下 ↓，选「中」= 一下 ↓。
+- **录屏必须阻塞式**：`adb shell screenrecord --time-limit 45` 要同步等它跑完。
+  后台化会被打断，写不出 moov atom，文件只有几十 KB —— 用「文件 > 400 KB」判断是否真有画面。
+- **「在播」的可靠判据是 `dumpsys media_session` 里的 `state=PLAYING(3)`**。
+  不能用「界面上没有『立即重试』按钮」判断（重试中的页面也没有那个按钮）。
+  **播放中绝不能按 23**（那是暂停键），会把正在播的片停掉。
 
 ## 弹幕入场（2026-11-01 定，别改回去）
 
@@ -108,7 +134,8 @@
   选「淡」要按两下 ↓。按 → 是换列，在竖排列表里不换项。
 - 落盘位置：SharedPreferences `native-library-v1`，键 `danmakuDensity` / `danmakuAlpha`
   （存的是 `LOW`/`MEDIUM`/`HIGH`、`SOLID`/`HALF`/`LIGHT`）。
-  读法：`adb shell "su -c 'cat /data/data/com.hongguotv.nativeapp/shared_prefs/native-library-v1.xml'"`。
+  读法：`adb shell "cat /data/data/com.hongguotv.nativeapp/shared_prefs/native-library-v1.xml"`
+  （adb shell **已经是 root，没有 su**，别套 `su -c`）。
 - 播放中的 HUD：`↑` 开更多面板 → 「播放设置」在第 5 项（先 `↓` 再 `→`）；子菜单是 6 项，
   **「弹幕设置」是第 6 项**，进去是五行面板（开关/大小/行数/数量/透明度），按确认就地展开候选；
   HUD 面板会自动隐藏，走键要快（每步 250~400ms）。
@@ -116,6 +143,19 @@
   **返回键在候选展开时先收候选，再按才关面板**。
 - 写临时 .ps1 时**正文只能有 ASCII**（跟上面 ANSI/GBK 那条同源）：中文注释会让 5.1 解析报
   「Unexpected token '}'」，不是语法写错了。
+
+### 量弹幕像素的两个判据（2026-11-04 实机建立）
+
+实机验收弹幕样式**只能靠像素**，别用看图，也别信设置页摘要。工具在 `tmp/`（本地产物，不提交）：
+
+    python tmp\danmu_h.py <video.mp4> <outdir> 300 165   # 字高：亮度阈值 165，只看 y<300 的弹幕区
+    python tmp\tracks.py <outdir> 165 300              # 轨道间距：同行相邻行带起点差的众数
+
+- **轨道间距是更硬的判据**：行高 = 字号×1.5，只跟样式算式有关，不受字形和画面内容干扰。
+  720 高：MEDIUM = 25.92×1.5 = **38 px**，HIGH（字号 ×0.85）= **33 px**。
+- **字高是辅助判据**：字形会因内容而变，只能看众数/中位数。MEDIUM 实测众数 24 px，
+  HIGH 众数 21 px（24×0.85 = 20.4）。两档分布几乎不重叠才算数。
+- **要量的是同一集、同一屏、同一亮度阈值的两个档位**，否则没有可比性。
 
 ## 版本号与发布（2026-11-02 定）
 
@@ -132,4 +172,49 @@
   否则正式版推过去电视也不提示更新。实验版占掉 9080，正式版就得是 9081（→ versionName 0.9.81）。
 - 推 tag 前查一遍已发布的版本：`gh release list --repo miaoxiaohu/hongguoTV`，
   CI 守卫要求新 tag 的 versionCode **新于所有已发布的 kotlin-v 版本**。
+
+## 播放页触控（0.9.83 起）
+
+- 四类手势：**单击画面**切 HUD 显隐、**双击画面**播放/暂停、**左右拖**跟手拖进度（实时预览目标时间，**松手才跳转**）、
+  **上下拖**调系统媒体音量（`STREAM_MUSIC`，与电视音量键同一条路）。
+- 接入方式是 **Activity 层拦截**：`MainActivity.dispatchTouchEvent` 里接管，**`dispatchKeyEvent` 一行不动**
+  （遥控器与触控并存，互不干涉）。判定机在 core `TouchGesture.kt`（纯 Kotlin，不依赖 Android SDK）。
+- 常量都在 core companion，**别改**：`SLOP_DP=8f`、`SECONDS_PER_DP=0.5f`、`VOLUME_STEP_DP=24f`、`DOUBLE_TAP_MS=300L`。
+- **HUD 按钮的放行是「整轮生效」**：在 `ACTION_DOWN` 那一刻决定这一轮归谁。
+  命中 HUD 可点击按钮 → 整轮都不插手（否则点「播放」会先变成一次单击把 HUD 关了，按钮根本没被点到）；
+  手指按下后移出按钮范围也不改判（半路抢走会让 core 处于半截状态，算出乱七八糟的目标位置）。
+- **Palm 实机坐标映射（2026-11-04 实测）**：App 窗口横屏 1280x720，但显示 rotation=0 竖屏 720x1280，
+  **App 的 x 轴 ↔ 物理 x 轴、y 轴 ↔ 物理 y 轴（无 90° 旋转）** —— 画面正中 = **物理 `(360, 640)`**。
+  （电视端原生横屏，点画面正中同样是 `640 360`。）
+- **换算**：Palm density 360 → **1dp = 2.25px**。横滑位移秒数 = `px / 2.25 × 0.5`；
+  音量档数 = `px / 2.25 / 24`（向零取整）。实测：200px → +45s；400px → ±7 档。
+- **播放中 uiautomator dump 拿不到空闲状态**（进度条/弹幕持续刷新 → `could not get idle state`，树是残的）：
+  **先 `input keyevent 23` 暂停**，画面静止后再 dump，HUD 文字与播放时间都读得到。
+- **物理竖屏顶部那条是状态栏/通知栏**：在那里做纵向滑动会把通知栏拉下来，之后 tap/swipe/keyevent 全落空。
+  纵向滑动一律用下半屏（y 300~1100）；恢复：`KEYCODE_WAKEUP` + `wm dismiss-keyguard` + `cmd statusbar collapse`。
+- 实机验收记录：`docs/PLAYER_TOUCH_VERIFICATION.md`（五项手势 + 遥控器无退化，2026-11-04 Palm 全通过）。
+
+## 播放源取址（2026-11-02 站方变化，别改回去）
+
+- 站方 `novel/player/multi_video_model/v1/` 从 **2026-11-02** 起**重新要求签名**：
+  带注册身份但不带六个签名头的请求，会被回成 HTTP 200 + **0 字节**。
+  目录、搜索、详情照常，只有「播放」全废 —— 表现是每集只放 10 秒试看片段
+  （`hongguoduanju.com/video/public/<id>/360p.mp4`，约 1.2MB，360p），然后报「播放失败」。
+- **现在的请求形态**：注册身份 + `Signer.sign` 的六头签名
+  （X-Argus / X-Gorgon / X-Medusa / X-Khronos / X-Ladon / X-Helios），
+  query 由 `Signer.encode` 生成（带 `ts` 秒 + `_rticket` 毫秒）。core `ContentRepository.registeredStream`。
+- **一个注册身份只能问一次地址**（2026-11-05 实测：同一身份连续问 10 次，第 1 次成功、其余 9 次全空；
+  重新注册后立刻成功）。所以身份**用一次就扔**：`takePlaybackIdentity()` 取出后立刻把 `registeredIdentity` 置空；
+  拿到空体就重新注册再来一轮（`signedPlaybackWithFreshIdentity`，最多两轮）。
+- **主域对本客户端回空体，备用域 `api5-normal-hl.fqnovel.com` 才带答案**
+  （HTTP 200 / 24406 字节 / `code=0`，`data[vid].video_model`）。两个域各自签名（签名覆盖 query），
+  空体就换域重发 —— 主机表在 `ContentRepository.PLAYBACK_HOSTS`。
+- 对照实现：`sunnysky123/hongguo-web` 的 `server/src/service/app-source.js` 记着同样三件事
+  （2026-10-27 改用注册身份、2026-11-02 重新要签名、空响应换备用域并重注册身份）。
+  他们的纯 JS 签名有 branch 0 状态推进的坑（约 1/3 签名无效），**别照抄那段 hack** —— 
+  我们的 `Signer` 实测签名有效。
+- 排查「接口回空体」的顺序：① 是不是同一个身份问了第二次；② 是不是主域在挑这个客户端；
+  ③ 最后才动网络层（**别默认换 PassWall 节点**）。
+- 验证手段：`--play=real-drama` 端到端（目录→详情→签名取址→真读 1MB 媒体字节），
+  成功/失败数看 `kotlin-tv\probe-report.txt`（UTF-8，每次覆盖）。
 

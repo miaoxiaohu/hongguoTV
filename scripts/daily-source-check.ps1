@@ -24,6 +24,8 @@ param(
   [int]$TimeoutMinutes = 25,
   # 只检测不发通知（调试用）
   [switch]$NoPush,
+  # 显式要推 Bark 才推；默认不推（2026-11-04 起按用户要求停用推送）
+  [switch]$Push,
   # 报告与日志目录，默认 <repo>\logs\source-check
   [string]$ReportDir = ''
 )
@@ -174,7 +176,7 @@ $body += "日志：$ReportDir"
 $bodyText = ($body -join "`n")
 if ($bodyText.Length -gt 500) { $bodyText = $bodyText.Substring(0, 500) }
 
-if (-not $NoPush) {
+if ($Push -and -not $NoPush) {
   Send-Bark -Title "红果TV 源解析异常（$($bad.Count)/$($results.Count) 项失败）" -Body $bodyText | Out-Null
 }
 Write-Host "异常明细：`n$bodyText"
