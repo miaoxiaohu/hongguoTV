@@ -262,6 +262,16 @@ class PlaybackGestureTest {
         assertTrue(m.onUp(150f,200f,10L) is TouchIntent.Scrub)
     }
 
+    @Test fun 斜滑锁横向后纵滑不产生音量档位() {
+        // 单独验音量这一路：锁了横向之后再往纵向走，move 必须一直是 None（不发音量）。
+        val m=TouchGestureMachine()
+        m.onDown(100f,100f,0L,600_000L,0L)
+        m.onMove(140f,112f)              // 锁横向
+        assertEquals(TouchIntent.None,m.onMove(150f,200f))   // 改成纵向走
+        assertEquals(TouchIntent.None,m.onMove(150f,260f))   // 再往下 60dp
+        assertTrue(m.onUp(150f,260f,10L) is TouchIntent.Scrub)
+    }
+
     @Test fun 横滑按相对位移算目标位置() {
         val m=TouchGestureMachine()
         m.onDown(100f,100f,60_000L,600_000L,0L)
