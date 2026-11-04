@@ -47,6 +47,8 @@ class PlayerTouchController(
     private var volumeHide: Runnable?=null
     /** HUD 的宿主视图：用来判断落点是不是在按钮上。由 MainActivity 赋值。 */
     var hudHost: View?=null
+    /** 这一轮手势是不是已经判给 HUD 按钮了。 */
+    private var hudBlocked=false
     /** 按下瞬间的进度快照：拖动期间位置和时长都不再变。 */
     private var durationSnapshot=0L
     private var positionSnapshot=0L
@@ -124,6 +126,9 @@ class PlayerTouchController(
      */
     fun handleTouch(event: MotionEvent): Boolean {
         val action=event.actionMasked
+        // 这一轮点在了 HUD 按钮上：整轮都不插手，交给按钮自己处理。
+        // 手指按下后移出按钮范围也不改判 —— 半路抢走会让按钮的点击变得不可预测。
+        if(hudBlocked && action!=MotionEvent.ACTION_DOWN) return false
         // 第二根手指按下：不喂给手势机。
         // core 的 onDown 会把进行中的拖动状态清掉，多指进来用户的进度拖动会无声丢失。
         if(action==MotionEvent.ACTION_POINTER_DOWN) return false
@@ -132,6 +137,10 @@ class PlayerTouchController(
         val x=px/density; val y=py/density
         when(action) {
             MotionEvent.ACTION_DOWN -> {
+                // 落在 HUD 的可点击按钮上就整轮放行：按钮自己有 onClick，
+                // 点在它们身上时手势不该抢，否则点「播放」会先变成一次单击把 HUD 关了，按钮根本没被点到。
+                if(onHudButton(event)) { hudBlocked=true; return false }
+                hudBlocked=false
                 gestureFinished=false
                 durationSnapshot=durationProvider()
                 positionSnapshot=positionProvider()

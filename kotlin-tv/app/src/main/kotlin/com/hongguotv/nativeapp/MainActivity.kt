@@ -302,6 +302,8 @@ class MainActivity: Activity() {
     private lateinit var progressBar: ProgressBar
     private lateinit var controls: LinearLayout
     private var panel=false
+    /** 播放页的触控通道：只管手指，遥控器照旧走 dispatchKeyEvent。 */
+    private var touchController: PlayerTouchController?=null
     private var transportPlay: TextView?=null
     private var sleepButton: TextView?=null
     private var speedDialog: AlertDialog?=null
@@ -365,6 +367,10 @@ class MainActivity: Activity() {
         super.onCreate(state)
         window.decorView.systemUiVisibility=View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }; setContentView(root)
+        touchController=PlayerTouchController(this,
+            onToggleHud={ if(this::hud.isInitialized && hud.visibility==View.VISIBLE) hidePlaybackOverlay() else showHud() },
+            onPlayPause={ togglePlayback() },
+            onScrub={ target -> seekTo(target) })
         // 焦点图跟着布局走：每一次布局落定都重算一次落点。
         // 布局变了（异步内容到了、封面高度改了）落点就得跟着变 —— 只算一次的话，
         // 换页之后按方向键还是会落到上一屏的位置上。
@@ -1514,6 +1520,8 @@ class MainActivity: Activity() {
             controls=column().apply { setPadding(0,dp(12),0,0); visibility=View.GONE }; hud.addView(controls)
             root.addView(ScrollView(this).apply { isVerticalScrollBarEnabled=false; addView(hud) },FrameLayout.LayoutParams(-1,-2,Gravity.BOTTOM))
         }
+        touchController?.hudHost=hud
+        touchController?.attach(root,{ player?.duration?.coerceAtLeast(0L) ?: 0L },{ currentPosition() })
         playbackTitle.text="${data.series.title}  ·  第 ${episodeIndex+1} 集"
         // 重试中的这一集，原因得留着：倒计时和「正在获取播放地址…」都不能把它顶掉。
         playbackText.text=withFailureReason("正在获取播放地址…"); progressBar.progress=0; progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
@@ -1972,6 +1980,7 @@ class MainActivity: Activity() {
         library.save(BackupProgress(data.series,data.episodes[episodeIndex],episodeIndex,p.currentPosition.coerceAtLeast(0),p.duration.coerceAtLeast(0),completed || p.playbackState==Player.STATE_ENDED,System.currentTimeMillis()))
     }
     private fun releasePlayer() {
+        touchController?.detach()
         cancelRecovery(); cancelPrefetch(); mediaSession.deactivate(); tvTools.close()
         val wasForeground=foreground; foreground=false
         val oldPanel=episodePanel; episodePanel=null; oldPanel?.dismiss(); foreground=wasForeground
@@ -1997,6 +2006,14 @@ class MainActivity: Activity() {
     }
     @Deprecated("TV remote back is handled through the activity")
     override fun onBackPressed()=goBack()
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        // 只有播放页、且没有错误面板/选集面板时才接管。
+        if(screen=="player" && !playError && episodePanel==null) {
+            val controller=touchController
+            if(controller!=null && controller.handleTouch(event)) return true
+        }
+        return super.dispatchTouchEvent(event)
+    }
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if(screen=="player") {
             val key=event.keyCode
