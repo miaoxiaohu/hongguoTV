@@ -2010,9 +2010,29 @@ class MainActivity: Activity() {
         // 只有播放页、且没有错误面板/选集面板时才接管。
         if(screen=="player" && !playError && episodePanel==null) {
             val controller=touchController
-            if(controller!=null && controller.handleTouch(event)) return true
+            if(controller!=null) {
+                // 系统手势区每次按下实时读一遍：跟着旋转、跟着用户改手势灵敏度。
+                if(event.actionMasked==MotionEvent.ACTION_DOWN) {
+                    val gesture=systemGestureInsets()
+                    controller.setSystemGestureInsets(gesture.first,gesture.second)
+                }
+                if(controller.handleTouch(event)) return true
+            }
         }
         return super.dispatchTouchEvent(event)
+    }
+
+    /**
+     * 系统手势区（屏幕左右边缘）的宽度，单位 px。
+     *
+     * 全面屏手势导航的设备上，从边缘起手的横滑会跟系统的返回手势打架 ——
+     * 进度拖了一半，页面又退了。读不到手势区（API 29 以下、三键导航、电视）
+     * 就返回 0，App 照旧接管横滑拖进度，不需要额外的设置项。
+     */
+    private fun systemGestureInsets(): Pair<Int,Int> {
+        val insets=androidx.core.view.ViewCompat.getRootWindowInsets(window.decorView) ?: return Pair(0,0)
+        val gesture=insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemGestures())
+        return Pair(gesture.left,gesture.right)
     }
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if(screen=="player") {

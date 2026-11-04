@@ -17,6 +17,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import com.hongguotv.core.SystemGestureEdge
 import com.hongguotv.core.TouchGestureMachine
 import com.hongguotv.core.TouchIntent
 
@@ -49,6 +50,12 @@ class PlayerTouchController(
     var hudHost: View?=null
     /** 这一轮手势是不是已经判给 HUD 按钮了。 */
     private var hudBlocked=false
+    /** 系统手势区（左右边缘）：起手落在里面，这一轮整个让给系统。 */
+    private var gestureEdge=SystemGestureEdge.NONE
+    /** 这一轮是不是已经因为落在系统手势区里而让给系统了。 */
+    private var edgeBlocked=false
+    /** 播放页的根视图：拿来把落点换算成窗口坐标。 */
+    private var touchRoot: View?=null
     /** 按下瞬间的进度快照：拖动期间位置和时长都不再变。 */
     private var durationSnapshot=0L
     private var positionSnapshot=0L
@@ -68,6 +75,7 @@ class PlayerTouchController(
 
     fun attach(root: FrameLayout,durationMs: ()->Long,positionMs: ()->Long) {
         detach()
+        touchRoot=root
         val density=activity.resources.displayMetrics.density
         val label=TextView(activity).apply {
             textSize=22f; setTextColor(Color.WHITE); gravity=Gravity.CENTER
@@ -119,6 +127,8 @@ class PlayerTouchController(
         preview=null; previewText=null; previewBar=null; volumeBox=null; volumeText=null; volumeHide=null
         machine.reset()
         gestureFinished=false
+        edgeBlocked=false
+        touchRoot=null
     }
 
     /**
@@ -126,6 +136,9 @@ class PlayerTouchController(
      */
     fun handleTouch(event: MotionEvent): Boolean {
         val action=event.actionMasked
+        // 这一轮起手落在系统手势区里：整轮都不插手，交给系统去做它自己的返回手势。
+        // 只要第一下不消费，系统才接得住那个手势；中途插手会把返回打断。
+        if(edgeBlocked && action!=MotionEvent.ACTION_DOWN) return false
         // 这一轮点在了 HUD 按钮上：整轮都不插手，交给按钮自己处理。
         // 手指按下后移出按钮范围也不改判 —— 半路抢走会让按钮的点击变得不可预测。
         if(hudBlocked && action!=MotionEvent.ACTION_DOWN) return false
@@ -139,8 +152,12 @@ class PlayerTouchController(
             MotionEvent.ACTION_DOWN -> {
                 // 落在 HUD 的可点击按钮上就整轮放行：按钮自己有 onClick，
                 // 点在它们身上时手势不该抢，否则点「播放」会先变成一次单击把 HUD 关了，按钮根本没被点到。
-                if(onHudButton(event)) { hudBlocked=true; return false }
+                if(onHudButton(event)) { hudBlocked=true; edgeBlocked=false; return false }
                 hudBlocked=false
+                // 起手落在系统手势区里 → 整轮让给系统：App 这一轮不消费，
+                // 系统照常走返回手势，进度也不会被动。
+                if(blocksSystemGesture(event)) { edgeBlocked=true; return false }
+                edgeBlocked=false
                 gestureFinished=false
                 durationSnapshot=durationProvider()
                 positionSnapshot=positionProvider()
@@ -171,11 +188,41 @@ class PlayerTouchController(
                 main.removeCallbacks(confirmSingle)
                 machine.reset()
                 gestureFinished=false
+                edgeBlocked=false
                 hidePreview(); hideVolume()
             }
             else -> return false
         }
         return true
+    }
+
+    /**
+     * 设置系统手势区（屏幕左右边缘）的宽度，单位 px。
+     *
+     * 全面屏手势导航的设备上，边缘起手的横滑会和系统的返回手势打架 ——
+     * 「进度拖了一半，页面又退了」。手势区宽度为 0（三键导航、电视、没开手势导航）时，
+     * 避让自动不生效，行为跟以前一模一样，不需要额外的设置项。
+     */
+    fun setSystemGestureInsets(leftPx: Int, rightPx: Int) {
+        val density=activity.resources.displayMetrics.density
+        gestureEdge=SystemGestureEdge(leftPx/density,rightPx/density)
+    }
+
+    /**
+     * 这一下是不是起手在系统手势区里。
+     *
+     * 坐标系要跟系统给的一致：落点用窗口坐标（`event.x` 相对窗口内容区），
+     * 手势区宽度也按窗口算 —— 系统给的 inset 就是相对窗口的。两边坐标系不一致，
+     * 边缘就会算歪（真机上偏一点，边缘手势就漏判）。
+     */
+    private fun blocksSystemGesture(event: MotionEvent): Boolean {
+        val root=touchRoot ?: return false
+        if(root.width<=0) return false
+        val density=activity.resources.displayMetrics.density
+        val loc=IntArray(2); root.getLocationInWindow(loc)
+        val xDp=(primaryXY(event).first-loc[0])/density
+        val widthDp=root.width/density
+        return gestureEdge.blocks(xDp,widthDp)
     }
 
     /**
