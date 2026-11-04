@@ -52,6 +52,13 @@ class PlaybackGestureTest {
         assertEquals(0L,(back.onUp(0f,100f,10L) as TouchIntent.Scrub).targetMs)
     }
 
+    @Test fun 横滑越过片尾被夹在总时长减五百毫秒() {
+        val m=TouchGestureMachine()
+        m.onDown(100f,100f,0L,600_000L,0L)
+        m.onMove(1400f,100f)              // +1300dp = +650 秒，远超总时长
+        assertEquals(599_500L,(m.onUp(1400f,100f,10L) as TouchIntent.Scrub).targetMs)
+    }
+
     @Test fun 拖动期间不给意图抬起才给一次() {
         val m=TouchGestureMachine()
         m.onDown(100f,100f,0L,600_000L,0L)
