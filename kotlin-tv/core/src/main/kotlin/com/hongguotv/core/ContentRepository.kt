@@ -231,7 +231,14 @@ class PublicPageHasNoEpisodeException: IOException("该来源每部剧只提供�
  * The exception says exactly what it is, so the fallback can tell it apart from a refusal and
  * stay where it is: without an identity the public page can only offer the sample.
  */
-class RegistrationUnavailableException(val retryAfterMs: Long = 0L): IOException("播放设备注册未成功，请稍后重试")
+/**
+ * The playback device could not be registered.
+ *
+ * [retryAfterMs] is how long the attempt is not repeated, and [reason] says what happened in
+ * words the person in front of the set can act on: the site refusing to hand out a device is a
+ * different thing from the network being down, and the two want opposite answers.
+ */
+class RegistrationUnavailableException(val retryAfterMs: Long = 0L, val reason: String = ""): IOException(if(reason.isEmpty()) "播放设备注册未成功，请稍后重试" else reason)
 
 /**
  * The source answered with the ten-second sample instead of the episode.
@@ -302,6 +309,24 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
     @Volatile private var registeredIdentity: PlaybackIdentity?=null
     @Volatile private var registrationFailedAt=0L
     /**
+     * The moment until which the site is left alone.
+     *
+     * Measured 2026-11-05: the registration endpoint answers HTTP 200 with `device_id` and
+     * `install_id` both zero - it is not handing out a device to this client right now. Asking
+     * again immediately does not help and piles the requests up on the same limit, so a refusal
+     * is backed off for minutes rather than seconds.
+     */
+    @Volatile private var registrationRefusedUntil=0L
+    /**
+     * The addresses already looked up, and when each of them was looked up.
+     *
+     * One registered identity buys one signed request, and that request can carry a whole
+     * window of episodes - so the addresses that come back are worth keeping. A person who
+     * watches three episodes in a row then pays for one registration, not three.
+     */
+    private val addressCache=LinkedHashMap<String,CachedAddress>()
+
+    /**
      * Registers one anonymous device, or hands back the one this repository already has.
      *
      * @throws IOException when the registration cannot be made or does not answer with the two
@@ -310,6 +335,8 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
     @Synchronized private fun playbackIdentity(): PlaybackIdentity {
         registeredIdentity?.let { return it }
         val now=clock()
+        // The site refused to hand out a device: that window is minutes long, not seconds.
+        if(registrationRefusedUntil>now) throw RegistrationUnavailableException(registrationRefusedUntil-now,REGISTRATION_REFUSED_REASON)
         if(registrationFailedAt>0 && now-registrationFailedAt<PLAYBACK_REGISTRATION_RETRY_MS) {
             // The window is measured from the moment the attempt *failed*, not from the moment it
             // started: an attempt that took twenty seconds to fail has already spent its window.
@@ -318,7 +345,17 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             throw RegistrationUnavailableException(PLAYBACK_REGISTRATION_RETRY_MS-(now-registrationFailedAt))
         }
         val identity=try { registerIdentity(now) }
-        catch(e: Exception) { registrationFailedAt=clock(); throw e }
+        catch(e: Exception) {
+            registrationFailedAt=clock()
+            // A refusal is not a network hiccup: it is the site saying it is not handing out
+            // devices to this client right now, and the answer to that is to wait, not to ask
+            // again. Asking again is what makes the limit last longer.
+            if(isRegistrationRefused(e)) {
+                registrationRefusedUntil=clock()+PLAYBACK_REGISTRATION_REFUSED_BACKOFF_MS
+                throw RegistrationUnavailableException(PLAYBACK_REGISTRATION_REFUSED_BACKOFF_MS,REGISTRATION_REFUSED_REASON)
+            }
+            throw e
+        }
         registeredIdentity=identity
         registrationFailedAt=0
         return identity
@@ -343,6 +380,21 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             try { return PlaybackDevice.register(registrationHttp,now) }
             catch(second: Exception) { second.addSuppressed(first); throw second }
         }
+    }
+    /**
+     * Whether the registration was refused rather than broken.
+     *
+     * A refusal is the site saying it is not handing out a device to this client right now; a
+     * broken connection is the network. The two want opposite answers: one wants a wait, the
+     * other wants a retry.
+     */
+    private fun isRegistrationRefused(error: Throwable): Boolean {
+        var cause: Throwable?=error
+        while(cause!=null) {
+            if(cause is PlaybackRegistrationRefusedException) return true
+            cause=cause.cause
+        }
+        return false
     }
     /**
      * One address lookup, and a second one on a fresh connection when the first died of the network.
@@ -752,9 +804,17 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * The public player page is the last one: it needs no signature and survives the API going
      * away again, but it hosts only the first three episodes at 360p.
      */
-    fun stream(seriesId: String, id: String, maxQuality: Int = 1080): StreamInfo {
+    /**
+     * The address of one episode.
+     *
+     * [window] is the run of episodes the episode sits in - the list the detail page holds. It
+     * is not used to choose a different episode: it is used so that one registration can serve
+     * the whole run, which is the only way the registration limit stops being the thing that
+     * breaks a long show.
+     */
+    fun stream(seriesId: String, id: String, maxQuality: Int = 1080, window: List<String> = emptyList()): StreamInfo {
         require(seriesId.matches(Regex("[0-9]{1,30}")) && id.matches(Regex("[0-9]{1,30}")))
-        return try { streamDoors(seriesId,id,maxQuality) }
+        return try { streamDoors(seriesId,id,maxQuality,window) }
         catch(e: Exception) {
             // The caller is the person waiting in front of the set, so a failure of the network
             // is named as what it is: the address could not be obtained, and the next thing that
@@ -778,8 +838,8 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      *
      * The doors themselves are described on [stream]; this is where the order is decided.
      */
-    private fun streamDoors(seriesId: String, id: String, maxQuality: Int): StreamInfo {
-        try { return registeredStream(id,maxQuality) }
+    private fun streamDoors(seriesId: String, id: String, maxQuality: Int, window: List<String>): StreamInfo {
+        try { return registeredStream(id,maxQuality,window) }
         catch(registered: Exception) {
             // The signed door sits on the same host as the registered one, so when the first
             // attempt died of the network the second one dies of the same network - and the
@@ -825,29 +885,93 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * The answer holds one entry per episode that was asked for, and the model it carries usually
      * has the renditions inline; only some answers point at a second address instead.
      */
-    private fun registeredStream(id: String, maxQuality: Int): StreamInfo {
-        val body="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}""".toByteArray()
-        val text=signedPlaybackWithFreshIdentity(body)
-        val answer=JSONObject(text)
+    private fun registeredStream(id: String, maxQuality: Int, window: List<String>): StreamInfo {
+        // An address that was already fetched is an address that costs nothing.
+        cachedAddress(id)?.let { return it }
+        // One signed request carries a whole window of episodes, and that is the whole point:
+        // the registration - the thing the site limits - is spent once for the window instead
+        // of once per episode.
+        val ids=windowFor(id,window)
+        val batch=batchAddresses(ids,maxQuality)
+        batch.forEach { (key,value) -> rememberAddress(key,value) }
+        batch[id]?.let { return it }
+        // The answer came back and this episode was not in it: the model it carries holds only
+        // renditions the television cannot decode, and the site answers one episode asked on
+        // its own with a different model. So it is asked on its own.
+        val single=batchAddresses(listOf(id),maxQuality)
+        single.forEach { (key,value) -> rememberAddress(key,value) }
+        return single[id] ?: throw AddressLookupException(false,IOException("没有取到这一集的播放地址"))
+    }
+    /**
+     * The addresses of several episodes, asked in one signed request.
+     *
+     * The endpoint takes a list of ids: measured 2026-11-05, fifteen of them come back with the
+     * whole model for each, and twenty are refused with 「video_id list len over limit:20」.
+     */
+    private fun batchAddresses(ids: List<String>, maxQuality: Int): Map<String, StreamInfo> {
+        val list=ids.joinToString(",") { "\"$it\"" }
+        val body="""{"biz_param":{"detail_page_version":0,"device_level":$PLAYBACK_DEVICE_LEVEL,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":[$list]}}""".toByteArray()
+        val answer=JSONObject(signedPlaybackWithFreshIdentity(body))
         val code=if(answer.has("code")) answer.optInt("code",-1) else answer.optInt("Code",-1)
         if(code!=0) throw IOException("播放接口暂不可用")
         val data=answer.optJSONObject("data") ?: throw IOException("播放信息为空")
-        // The model hangs under the episode that was asked for; the older shape put it straight
-        // under `data`.
-        val raw=data.optJSONObject(id)?.opt("video_model") ?: data.opt("video_model")
-        val model=when(raw) {
-            is JSONObject -> raw
-            is String -> runCatching { JSONObject(raw) }.getOrNull() ?: throw IOException("播放信息为空")
-            else -> throw IOException("播放信息为空")
+        val out=LinkedHashMap<String,StreamInfo>()
+        for(id in ids) {
+            // The model hangs under the episode that was asked for; the older shape put it
+            // straight under `data`.
+            val raw=data.optJSONObject(id)?.opt("video_model") ?: data.opt("video_model")
+            val model=when(raw) {
+                is JSONObject -> raw
+                is String -> runCatching { JSONObject(raw) }.getOrNull()
+                else -> null
+            }
+            // One episode that cannot be decoded does not sink the other fourteen.
+            if(model==null) continue
+            val stream=runCatching { episodeStream(model,maxQuality) }.getOrNull() ?: continue
+            out[id]=stream
         }
-        var info=model
-        if(renditions(model).isEmpty()) {
-            val fallback=fallbackApi(model)
-            if(!fallback.startsWith("https://")) throw IOException("播放地址格式异常")
-            val outer=JSONObject(text(fallback,client=addressHttp))
-            info=outer.optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
-        }
+        return out
+    }
+    /**
+     * The address of one episode, out of the model the answer carries.
+     *
+     * A model whose renditions are all ByteVC2 holds nothing the television can decode - the
+     * site hands those out when a whole window is asked for at once, while the same episode
+     * asked on its own comes back with ByteVC1. The second address the model points at is the
+     * way out, so it is asked for whenever the model itself has nothing to play.
+     */
+    private fun episodeStream(model: JSONObject, maxQuality: Int): StreamInfo {
+        if(playableRenditions(model).isNotEmpty()) return pickStream(model,maxQuality)
+        val fallback=fallbackApi(model)
+        if(!fallback.startsWith("https://")) throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
+        val outer=JSONObject(text(fallback,client=addressHttp))
+        val info=outer.optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
         return pickStream(info,maxQuality)
+    }
+    /**
+     * The episodes one request carries, with the wanted one among them.
+     *
+     * The window starts at the wanted episode, so the ones after it - the ones the person is
+     * about to watch - are in the same answer.
+     */
+    private fun windowFor(id: String, window: List<String>): List<String> {
+        if(window.isEmpty()) return listOf(id)
+        val index=window.indexOf(id)
+        if(index<0) return listOf(id)
+        val last=(window.size-PLAYBACK_BATCH_SIZE).coerceAtLeast(0)
+        val from=index.coerceAtMost(last)
+        return window.subList(from,minOf(window.size,from+PLAYBACK_BATCH_SIZE)).toList()
+    }
+    /** The address that was already fetched for an episode, if it is still worth having. */
+    private fun cachedAddress(id: String): StreamInfo? {
+        val entry=addressCache[id] ?: return null
+        if(clock()-entry.at>ADDRESS_CACHE_TTL_MS) { addressCache.remove(id); return null }
+        return entry.stream
+    }
+    /** Keeps an address, so that the episodes around it do not have to be asked for again. */
+    private fun rememberAddress(id: String, stream: StreamInfo) {
+        if(addressCache.size>=ADDRESS_CACHE_MAX) addressCache.remove(addressCache.keys.first())
+        addressCache[id]=CachedAddress(stream,clock())
     }
     /**
      * The playback answer, asked with an identity that has not been used yet.
@@ -918,12 +1042,29 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             response.body?.string() ?: ""
         } }
     }
-    /** The renditions a model carries, in either of the two shapes they arrive in. */
-    private fun renditions(info: JSONObject): List<JSONObject> {
-        val out=mutableListOf<JSONObject>()
-        info.optJSONArray("video_list")?.let { array -> for(i in 0 until array.length()) array.optJSONObject(i)?.let { out.add(it) } }
-        info.optJSONObject("video_list")?.let { map -> for(key in map.keys()) map.optJSONObject(key)?.let { out.add(it) } }
+    /**
+     * The renditions a model carries, in either of the two shapes they arrive in.
+     *
+     * The array shape says what each rendition is inside the entry; the object shape keys the
+     * entries by the definition, and then the key is the only place the size is written down.
+     */
+    private fun renditions(info: JSONObject): List<Pair<String,JSONObject>> {
+        val out=mutableListOf<Pair<String,JSONObject>>()
+        info.optJSONArray("video_list")?.let { array -> for(i in 0 until array.length()) array.optJSONObject(i)?.let { out.add("" to it) } }
+        info.optJSONObject("video_list")?.let { map -> for(key in map.keys()) map.optJSONObject(key)?.let { out.add(key to it) } }
         return out
+    }
+    /**
+     * The renditions a television can actually decode.
+     *
+     * ByteVC2 renditions declare themselves as `bvc2` and ship no avcC/hvcC record at all, so
+     * Android's extractor finds an audio track and no video track. Only ByteVC1 (HEVC) plays.
+     */
+    private fun playableRenditions(info: JSONObject): List<Pair<String,JSONObject>> = renditions(info).filter { (_,item) ->
+        val meta=item.optJSONObject("video_meta")
+        val codec=item.str("codec_type").ifEmpty { meta?.str("codec_type").orEmpty() }.lowercase()
+        if(codec in setOf("bytevc2","bvc2")) return@filter false
+        item.str("main_url").ifEmpty { item.str("backup_url") }.isNotEmpty()
     }
     /** The second address a model points at, in the shape it arrives in. */
     private fun fallbackApi(model: JSONObject): String {
@@ -945,18 +1086,14 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      */
     private fun pickStream(info: JSONObject, maxQuality: Int): StreamInfo {
         val seed=info.str("key_seed")
-        val rows=renditions(info).mapNotNull { item ->
+        val rows=playableRenditions(info).mapNotNull { (key,item) ->
             val meta=item.optJSONObject("video_meta")
-            val codec=item.str("codec_type").ifEmpty { meta?.str("codec_type").orEmpty() }.lowercase()
-            // ByteVC2 renditions declare themselves as `bvc2` and ship no avcC/hvcC record at all, so
-            // Android's extractor finds an audio track and no video track. Only ByteVC1 (HEVC) plays.
-            if(codec in setOf("bytevc2","bvc2")) return@mapNotNull null
             val url=item.str("main_url").ifEmpty { item.str("backup_url") }
             if(url.isEmpty()) return@mapNotNull null
             val definition=item.str("definition").ifEmpty { meta?.str("definition").orEmpty() }
             val height=qualityNumber(definition.ifEmpty {
                 item.str("quality_desc").ifEmpty { item.str("height").ifEmpty {
-                    item.str("vheight").ifEmpty { meta?.str("vheight").orEmpty() } } } })
+                    item.str("vheight").ifEmpty { meta?.str("vheight").orEmpty() }.ifEmpty { key } } } })
             Rendition(url,height,item)
         }.sortedByDescending { it.height }
         val selected=rows.firstOrNull { it.height<=maxQuality } ?: rows.lastOrNull()
@@ -971,8 +1108,10 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
     }
     /** One rendition of a model: where it is, how big it is, and what the entry said about it. */
     private class Rendition(val url: String, val height: Int, val item: JSONObject)
+    /** One cached address: the stream, and the moment it was fetched. */
+    private class CachedAddress(val stream: StreamInfo, val at: Long)
     private fun signedStream(id: String, maxQuality: Int): StreamInfo {
-        val payload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"video_id":"$id"}""".toByteArray()
+        val payload="""{"biz_param":{"detail_page_version":0,"device_level":$PLAYBACK_DEVICE_LEVEL,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"video_id":"$id"}""".toByteArray()
         // A fresh identity per signed attempt: the previously hardcoded pair is shared by every
         // client built from the drpys sources and is now silently blocked (HTTP 200, empty body),
         // and replaying one generated pair turns later answers back into empty bodies as well -
@@ -1138,6 +1277,48 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
          * every episode and short enough that the next attempt is a real one.
          */
         const val PLAYBACK_REGISTRATION_RETRY_MS = 5_000L
+        /**
+         * How long the site is left alone after it refused to hand out a device.
+         *
+         * The refusal is not a network hiccup and it does not go away by asking again: the
+         * requests pile up on the same limit, and the window gets longer rather than shorter.
+         * Measured 2026-11-05: eight registrations in a row all came back with `device_id` and
+         * `install_id` zero, and a registration a while later was answered at once.
+         */
+        const val PLAYBACK_REGISTRATION_REFUSED_BACKOFF_MS = 10*60_000L
+        /** What the refusal says, in words the person in front of the set can act on. */
+        const val REGISTRATION_REFUSED_REASON = "站方暂时没有给这台设备发号，稍后会自动重试"
+        /**
+         * How many episodes one signed request may carry.
+         *
+         * Measured 2026-11-05: fifteen come back with the whole model for each of them, and
+         * twenty are refused with 「video_id list len over limit:20」. Fifteen is the size that
+         * fits, and it is what turns one registration per episode into one registration per
+         * fifteen episodes.
+         */
+        const val PLAYBACK_BATCH_SIZE = 15
+        /**
+         * The device level the playback request declares.
+         *
+         * This is the knob that decides which codec the site hands over. Measured 2026-11-05 on
+         * 《悍妇边军》第一季, fifteen episodes asked for at once:
+         *
+         *  - level 3 (what this client used to declare): six episodes came back with ByteVC1,
+         *    nine with ByteVC2. The bytes behind the ByteVC2 addresses really are `bvc2` - the
+         *    container says so - and no television can decode that.
+         *  - level 0 and level 1: all fifteen came back with ByteVC1, and the bytes behind those
+         *    addresses are `hvc1`, which is HEVC - the format a television does decode.
+         *
+         * So the nine episodes that could not be played were not a broken window: the request
+         * was asking for the codec the site reserves for devices that can decode ByteVC2.
+         * Level 1 is declared because it answers the same as level 0 - ByteVC1 - and 1 is the
+         * level measured together with level 0 on the same episode.
+         */
+        const val PLAYBACK_DEVICE_LEVEL = 1
+        /** How long an address stays usable. */
+        const val ADDRESS_CACHE_TTL_MS = 2*60*60*1000L
+        /** How many addresses are kept at once. */
+        const val ADDRESS_CACHE_MAX = 120
         /**
          * How long one device registration may take.
          *

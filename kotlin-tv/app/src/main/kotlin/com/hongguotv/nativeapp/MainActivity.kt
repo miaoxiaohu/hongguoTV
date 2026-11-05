@@ -1326,7 +1326,7 @@ class MainActivity: Activity() {
             // 详情页一打开就把用户马上要看的那一集备上：这一刻网络是空的，画面还没开始播。
             // 按播放的时候地址和首包都已经在手上了，不必再从头问一遍地址、等一遍首包。
             // 计费网络不备：那一兆是白花的，用户还没说要播。
-            if(!resume&&result.episodes.isNotEmpty()&&!connectivity.isActiveNetworkMetered) prepareEpisode(result.series.id,result.episodes[target.index],library.maxQuality,preparedPage,pagePreparation)
+            if(!resume&&result.episodes.isNotEmpty()&&!connectivity.isActiveNetworkMetered) prepareEpisode(result.series.id,result.episodes[target.index],library.maxQuality,preparedPage,pagePreparation,window=result.episodes)
             if(resume) playEpisode(target.index,target.position,autoplay=detailAutoplay) else showDetail(false)
         }, { problem -> error(body,problem) { openDetail(series,resume,detailAutoplay) } })
     }
@@ -1529,7 +1529,8 @@ class MainActivity: Activity() {
         syncMediaSession()
         val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
         work({ prefetched ?: run {
-            val info=adopted ?: repository.stream(data.series.id,requestedId,maxQuality)
+            // 取址带上一段剧集：一次注册换一整段地址，连着看时不会每集都去注册一次。
+            val info=adopted ?: repository.stream(data.series.id,requestedId,maxQuality,data.episodes)
             RemoteVideo(repository.http,info).prepare()
         }}, { remote ->
             video=remote; quality=remote.info.quality
@@ -1624,7 +1625,7 @@ class MainActivity: Activity() {
         if(preparedNext.isFresh(key) || nextPreparation.job?.isDone==false) return
         if(prefetchAttempts>=3 || (prefetchAttempts>0 && now-prefetchAttemptAt<15_000) || connectivity.isActiveNetworkMetered || !networkAvailable()) return
         cancelPrefetch(); prefetchAttemptAt=now; prefetchAttempts++
-        prepareEpisode(data.series.id,id,quality,preparedNext,nextPreparation,giveUpOnTimeout=true)
+        prepareEpisode(data.series.id,id,quality,preparedNext,nextPreparation,giveUpOnTimeout=true,window=data.episodes)
     }
     /**
      * 提前备好一集：地址、首包、1MB 预热，三样都齐了才算备好。
@@ -1634,7 +1635,7 @@ class MainActivity: Activity() {
      *
      * 备好的东西放在槽里：一次只备一集，备下一集的时候上一集已经被取走了。
      */
-    private fun prepareEpisode(seriesId: String,id: String,quality: Int,slot: PreparedSlot<RemoteVideo>,preparation: Preparation,giveUpOnTimeout: Boolean=false) {
+    private fun prepareEpisode(seriesId: String,id: String,quality: Int,slot: PreparedSlot<RemoteVideo>,preparation: Preparation,giveUpOnTimeout: Boolean=false,window: List<String> = emptyList()) {
         val key="$id:$quality"
         if(isDestroyed||slot.isFresh(key)) return
         // 同一件事只备一集：已经在备的那份停掉，用户马上要按的这一集更重要。
@@ -1656,7 +1657,8 @@ class MainActivity: Activity() {
         preparation.job=worker.submit {
             var remote: RemoteVideo?=null
             try {
-                val info=scope.run { repository.stream(seriesId,id,quality) }
+                // 备集同样带着剧集窗口：备下一集和播下一集用的是同一批地址，不会多注册一次。
+                val info=scope.run { repository.stream(seriesId,id,quality,window) }
                 resolved.address=info
                 // 首包和预热都走仓库那个客户端：它的连接池是热的，握手不用重来一遍。
                 // 每集另起一个客户端，看着干净，实则每集都要重新握手一次 CDN。
@@ -1714,7 +1716,7 @@ class MainActivity: Activity() {
         playbackFailureReason=when {
             decoding -> "电视无法解码当前视频，可尝试更低清晰度。"
             sample!=null -> "只取到 ${sample.sampleMs/1000} 秒试看片段，不是完整剧集，正在重新获取播放地址…"
-            registration!=null -> "播放设备注册未成功，正在重新获取播放地址…"
+            registration!=null -> registration.reason.ifEmpty { "播放设备注册未成功，正在重新获取播放地址…" }
             lookup!=null -> "获取播放地址${if(lookup.timedOut) "超时" else "失败"}，正在重新获取播放地址…"
             offline -> "网络连接失败，可重试或切换清晰度。"
             else -> "播放失败，可重试或切换清晰度。"

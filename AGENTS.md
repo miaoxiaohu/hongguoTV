@@ -229,3 +229,87 @@
 - 验证手段：`--play=real-drama` 端到端（目录→详情→签名取址→真读 1MB 媒体字节），
   成功/失败数看 `kotlin-tv\probe-report.txt`（UTF-8，每次覆盖）。
 
+### 「又播不了」先分清是哪一边（2026-11-05 定）
+
+用户说「播放不了」时，**先跑探针、再看实机，不要直接改代码**：
+
+1. **跑探针**（`daily-source-check.ps1` 或 `--play=real-drama`）。探针绿 = 站方和我们的代码都没问题，
+   问题在**电视上的包是旧的**；探针红 = 站方又变了，回到上面那节做对照实验。
+2. **查 Palm 上的版本**（`adb shell dumpsys package com.hongguotv.nativeapp`）。Palm 是替身机，
+   装了新版就等于验证过新包本身没坏。
+3. **查电视上的版本** —— 电视上没有 adb over network（`192.168.1.26:5555` 直接拒绝连接），
+   推装服务 `192.168.1.26:10000` 常年掉线（10000~10030 全不通），**只能靠用户看**：
+   电视上打开 App → 设置 → 「版本与更新」，或看更新弹窗里显示的版本号。
+4. **判定**：电视上 versionCode ≤ 9083 = 旧包，**必然播不了**（11-02 之后旧包走的是
+   「注册身份 + 无签名」形态，站方回空体 → 回落网页门 → 只剩 10 秒试看片）。
+   这种情况的正解是**升级电视上的 App**，不是改 core。
+
+### 电视升级到新版的四条路（按可靠性排）
+
+1. **App 内自动更新**（最省事）：电视上打开 App 停在前台，每 6 小时查一次
+   （`AppUpdater.kt` 的 poll 间隔，首次进入有延迟）。线上 `releases/latest/download/update.json`
+   已是 0.9.84/9084，匿名可取。设置 →「版本与更新」可手动触发。
+   - 注意：**点「稍后」会把该版本推迟一天**（`deferred_code`/`deferred_until`），
+     推了更新没提示多半是这个。
+   - Android 8 没有静默安装权限，下载完仍要在系统弹窗里确认一次。
+2. **推装服务**：`scripts/push-to-tv.ps1`（先探活 `/api/info`，再推，再等电视上出现目标版本）。
+   **服务掉了要用户自己去投影上开**，不要在后台无限轮询。
+3. **电视浏览器手动装**：电视上有 TV Bro（`com.phlox.tvwebbrowser`），
+   用本机 HTTP 服务（端口用 **8899**，8000 被 Windows 占着）把 APK 挂出去，
+   在电视浏览器里下载后安装。
+4. **ADB**：电视没开 adb over network，这条路目前不通。
+
+### 推装服务的老规矩（别再踩）
+
+- 推之前**必须先 `GET /api/info` 探活**，否则表现成「上传失败」而不是「服务没起」。
+- 掉线后等 1~6 分钟通常能自己回来，**值得等**（`autoStart: true`）。
+- 端口关着时 10000~10030 都不通、电视 ping 得通 —— **电视活着 ≠ 服务活着**。
+- 电视上 8080 会开着但**不响应 HTTP**（是别的服务，别误认成推装服务）。
+
+## 播放取址：批量 + device_level（2026-11-06 定，别改回去）
+
+这一节的根因是 **站方用 `biz_param.device_level` 决定它发什么编码**，跟签名、跟身份都无关。
+
+- **`device_level=3` → 站方发 ByteVC2**（`gear_des_key` 里写 `2:bytevc2`，抓前 256KB 实测
+  容器 fourcc = `bvc2,mp4a`）。**电视解不了**，表现为「有地址、有时长、一播就黑/报错」。
+  之前的代码硬编码 `device_level:3`，所以每一集都取到不可播的地址 —— 这才是「又播不了」的真正原因。
+- **`device_level=0` 和 `device_level=1` → 站方发 ByteVC1**（`gear_des_key` 里写 `1:bytevc1`，
+  实测容器 fourcc = `hvc1,mp4a`，**就是真 HEVC**，电视能硬解）。
+  实测同一集《悍妇边军第一季》EP `7702043421581511704`：level=3 给 5 条 bytevc2；
+  level=0 / level=1 给 bytevc1 + `hvc1,mp4a`。**两个值答案一样**。
+- 生产代码固定用 **`ContentRepository.PLAYBACK_DEVICE_LEVEL = 1`**（批量体和单集体都用它）。
+  🔴 **别改成 3**，也别以为换 `use_os_player` / `prefer_codec=h264` / `video_codec_type=1` /
+  `detail_page_version=1` 能绕开 —— **实测这些参数在 level=3 下全都无效，仍给 bytevc2**。
+- **判据必须看真实容器 fourcc，不能信 `gear_des_key` 标签**：抓媒体前 256KB 读 moov，
+  看 `bvc2` 还是 `hvc1`。标签说是 bytevc1 但实际是 bvc2 的情况也存在。
+
+### 一次注册换一整批剧集（15 集）
+
+- **一个注册身份只能问一次地址**（见上一节）。逐集取址 = 每集一次注册 → 必然触顶
+  `device_register` 的限流（`device_id=0` / `install_id=0`）。
+- 解法是 **批量取址**：一次注册 + 一次签名请求，body 用
+  `{"biz_param":{...},"mixed_video_id_map":{"1004":["<id1>",...]}}`，一次最多 **15 集**。
+  回答 160KB，含全部 15 集的 `video_model`。
+- **站方硬上限 20**：超过报 `code:100001`、`debug_info:"video_id list len over limit:20"`。
+  生产取 **15**（留余量）。
+- **省不掉注册**：自造身份批量直接 0/12（站方按身份查设备）。方向只能是「少注册」。
+- 取址结果进 **地址缓存**：TTL 2 小时、上限 120 条（`ContentRepository` 的地址缓存）。
+  命中缓存的集耗时 0ms。
+
+### 注册被拒的长退避
+
+- `device_register` 返回 `code != 0` 或 device_id/iid 为空 = **被限流**，不是网络故障。
+  这时**不要立刻重试**（只会加深限流），走 **10 分钟长退避**
+  （`PLAYBACK_REGISTRATION_RETRY_MS`，普通失败仍保留 5 秒窗口，两者别搞混）。
+- `PlaybackDevice.register()` 抛 `PlaybackRegistrationRefusedException`，
+  core 转成 `RegistrationUnavailableException.reason`，App 把 reason 显示给用户（别只写「播放失败」）。
+- 排查顺序：① 是不是同一个身份问了第二次；② 是不是主域在挑这个客户端；③ 最后才动网络层
+  （**别默认换 PassWall 节点**）。
+
+### 生产链路实测基线（2026-11-06）
+
+- 窗口探针：**ok=15/15，registrations=1，elapsedMs≈1671**；EP1 真读 262144 字节，
+  EP2~15 全部命中缓存（0ms），quality 全 1080P，fourcc 全 `hvc1,mp4a`。
+- 0.9.86 / 9086 正式包已出（Palm 实机：HEVC 硬解正常，首帧 445ms）。
+
+

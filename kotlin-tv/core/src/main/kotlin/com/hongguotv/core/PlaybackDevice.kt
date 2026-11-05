@@ -44,6 +44,16 @@ internal data class PlaybackIdentity(val deviceId: String, val iid: String)
  * also means a test can register as many devices as it likes without one answer leaking into
  * the next.
  */
+/**
+ * The registration endpoint answered, but not with an identity.
+ *
+ * Measured 2026-11-05: the answer comes back with HTTP 200 and with `device_id` and
+ * `install_id` both zero - the endpoint saying it is not handing out a device to this client
+ * right now. Asking again immediately does not help and makes it worse: the requests pile up on
+ * the same limit, so the caller has to back off instead of retrying.
+ */
+class PlaybackRegistrationRefusedException(message: String): IOException(message)
+
 internal object PlaybackDevice {
     private const val REGISTER_URL =
         "https://log5-applog-lf.fqnovel.com/service/2/device_register/" +
@@ -97,8 +107,9 @@ internal object PlaybackDevice {
         }
         val deviceId = responseId(json, "device_id")
         val iid = responseId(json, "install_id")
-        if (code != 0 || deviceId.isEmpty() || iid.isEmpty())
-            throw IOException("播放设备注册未返回可用身份 code=$code device=$deviceId iid=$iid")
+        if (code != 0) throw PlaybackRegistrationRefusedException("播放设备注册被拒绝 code=$code")
+        if (deviceId.isEmpty() || iid.isEmpty())
+            throw PlaybackRegistrationRefusedException("播放设备注册没有发回可用身份（站方这次没放号，稍后再试）")
         return PlaybackIdentity(deviceId, iid)
     }
 

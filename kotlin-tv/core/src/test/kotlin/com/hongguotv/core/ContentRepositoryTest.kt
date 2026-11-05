@@ -247,13 +247,16 @@ class ContentRepositoryTest {
     }
 
     /**
-     * The device is registered again for the next episode.
+     * The address is fetched once and then kept.
      *
      * A registered identity is good for exactly one address lookup: the second lookup with
      * the same identity comes back with an empty body, and it keeps saying so. Measured
      * 2026-11-05: ten lookups with one identity answered once and were empty nine times.
+     *
+     * So the address that came back is kept and the second episode is answered from it - the
+     * registration the site limits is not spent twice for the same episode.
      */
-    @Test fun theDeviceIsRegisteredForEveryEpisodeBecauseAnIdentityOnlyAsksOnce() {
+    @Test fun theAddressIsFetchedOnceAndThenKept() {
         val registrations=java.util.concurrent.atomic.AtomicInteger()
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             val request=chain.request(); val path=request.url.encodedPath
@@ -267,7 +270,8 @@ class ContentRepositoryTest {
         }.build())
         repo.stream("456","123")
         repo.stream("456","123")
-        assertEquals("an identity is spent by one lookup, so the second episode registers again",2,registrations.get())
+        // The address is kept, so the second episode costs nothing: no second registration.
+        assertEquals("the address is kept, so the second episode does not register again",1,registrations.get())
     }
 
     /**
