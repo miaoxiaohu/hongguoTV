@@ -55,6 +55,26 @@
 - Palm 息屏时按键不生效：`input keyevent KEYCODE_WAKEUP` + `wm dismiss-keyguard` 之后才能操作。
 - 应用是强制横屏的：坐标按 **1280x720** 算，别按 `wm size` 报的 720x1280。
 
+### 往 App 输入框里输中文（2026-11-06 实机打通）
+
+- `adb shell input text` **不支持中文**；剪贴板注入在 Android 17 上被封
+  （`cmd clipboard set-text` 无输出、`service call clipboard` 回 No items）。
+- Gboard 逐字母敲拼音、靠猜候选词，**不要走这条路**
+  （实测「hanfubianjun」+空格上屏的是「韩服变军」这种错词）。
+- 可行解法是 **ADBKeyboard**（`https://github.com/senzhk/ADBKeyBoard/raw/master/ADBKeyboard.apk`，17 KB）：
+  1. `adb install -r -g <apk>` —— **装之前先按 4 关掉 Play Protect 弹窗**，
+     否则安装会被弹窗挡掉、`pm list packages` 里根本查不到这个包（当时误判成「没装上」）。
+  2. `ime enable com.android.adbkeyboard/.AdbIME` + `ime set com.android.adbkeyboard/.AdbIME`。
+  3. 注入用 **Base64 通道**，绕开 PowerShell 5.1 控制台编码：
+     `am broadcast -a ADB_INPUT_B64 --es msg <base64(utf8)>`
+     （`ADB_INPUT_TEXT` 直接带中文会被控制台编码搞坏）。
+- 注入后用 `uiautomator dump` 读回 EditText 里的文字核对，确认真的进去了。
+- 拿到文字后：**回车 66 触发搜索**；选中搜索结果卡片后**还要再按一次确认 23** 才进详情页；
+  详情页选集时点一下只是移焦点，**同样要按 23** 才会切集播放。
+- **验收完必须还原**：`ime set com.google.android.inputmethod.latin/.LatinIME`
+  + `ime disable com.android.adbkeyboard/.AdbIME` + `adb uninstall com.android.adbkeyboard`；
+  顺手把 `package_verifier_enable` / `verifier_verify_adb_installs` 改回 1。
+
 ### 怎么读自绘 UI、怎么操作（2026-11-04 实机补）
 
 - **自绘 UI 拿控件只能靠 uiautomator dump**：
