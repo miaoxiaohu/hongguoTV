@@ -339,5 +339,9 @@
 - 窗口探针：**ok=15/15，registrations=1，elapsedMs≈1671**；EP1 真读 262144 字节，
   EP2~15 全部命中缓存（0ms），quality 全 1080P，fourcc 全 `hvc1,mp4a`。
 - 0.9.86 / 9086 正式包已出（Palm 实机：HEVC 硬解正常，首帧 445ms）。
+- **0.9.86 电视端也已实机确认**：投影 XGIMI TV 上用推装服务装上 CI 包（versionCode 9086，覆盖掉 0.9.85-dbg），
+  《悍妇边军第一季》**在投影上正常播放** —— 电视端的 `device_level=1` + 批量取址 这条修正确实闭环。
+  推装服务仍是老规矩：先 `GET /api/info` 探活，装完 `/api/launch` 顺手拉起 App；
+  服务掉线时电视依然 ping 得通但 10000 端口不通。
 
 
