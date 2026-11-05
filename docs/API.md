@@ -2,6 +2,12 @@
 
 服务面向家庭网络，原生客户端共享此协议。所有成功 JSON 响应均使用 UTF-8；失败返回非 2xx 和 `{ "error": "可显示的信息" }`。上游失败不会返回空列表伪装成成功。
 
+> **已知问题（2026-11-06 实测）**：本服务的**播放取址链路 `/api/episodes/:id/play|stream` 已经失效** ——
+> 站方自 2026-11-02 起重新要求签名，服务端用**写死的设备身份 + 纯 JS 签名**去请求，
+> 站方一律回「未知异常」（level=3 / level=1 × 主域 / 备用域 四种组合实测全灭）。
+> 首页 / 搜索 / 详情走 `hongguoduanju.com`，**不依赖这套签名，仍可用**。
+> 当前可用的交付形态是 [Kotlin 独立版](../kotlin-tv/README.md)，它不依赖本服务。
+
 | 请求 | 返回 |
 | --- | --- |
 | `GET /health` | `service: hongguotv`、`version`、`apiVersion: 1`、`upstream: unverified`；只检查进程 |

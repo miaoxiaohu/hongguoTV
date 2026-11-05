@@ -343,5 +343,25 @@
   《悍妇边军第一季》**在投影上正常播放** —— 电视端的 `device_level=1` + 批量取址 这条修正确实闭环。
   推装服务仍是老规矩：先 `GET /api/info` 探活，装完 `/api/launch` 顺手拉起 App；
   服务掉线时电视依然 ping 得通但 10000 端口不通。
+## server/（Node bridge）播放取址已失效（2026-11-06 实测）
+
+`server/` 是保留的 React Native 版内容服务（Node bridge）。**Kotlin 独立版不依赖它**，
+但仍在用旧方式部署的人，它的**播放取址链路已经彻底失效**。
+
+- 失效点**不在 `device_level`，在签名 + 设备身份**：`server/vendor/hongguo.cjs` 用纯 JS 签名
+  （`x-gorgon` / `x-argus` / `x-medusa` / `x-khronos` / `x-ladon` / `x-helios`），
+  且 `DEVICE`（第 28-36 行）是**写死的** iid/device_id 常量，**没有 device_register 步骤**。
+- 2026-11-06 实测（悍妇 EP1 `7702043421581511704`，用 vm 加载 vendor 直接调 `requestVideoModel`）：
+  **level=3 / level=1 × 主域 / 备用域 四种组合 100% 失败**，报 `video_model failed: 未知异常`。
+  即先卡在签名/身份，根本走不到编码选择那一步。
+- 🔴 **别只把 `server/vendor/hongguo.cjs:441` 的 `device_level: 3` 改成 1**：签名先失败，改了也无效
+  （实测 level=1 同样「未知异常」）。纯 JS 签名还有 branch 0 状态推进的老坑，别照抄那段 hack。
+- 浏览侧（首页 / 搜索 / 详情）走网站 `hongguoduanju.com`，**不依赖这套签名，仍可用**；
+  只有 `/api/episodes/:id/play|stream` 这一段坏了。
+- 要修就得把 Kotlin 的 `Signer` + `ContentRepository`（注册身份 → 六头签名 → 批量取址）
+  重写进 Node，工作量大。**当前交付路径是 Kotlin 独立版**（`kotlin-tv/`），它不连这个服务。
+- Kotlin 侧生产值是 `ContentRepository.PLAYBACK_DEVICE_LEVEL = 1`，见上面
+  「播放取址：批量 + device_level」。`kotlin-tv/core/.../Probe.kt:101,431` 里两处硬编码的
+  `device_level:3` 是**探针对照组**（裸签名请求），不在生产路径上。
 
 

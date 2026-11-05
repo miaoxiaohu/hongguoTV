@@ -152,6 +152,11 @@ docker compose --env-file .env -f server/compose.yaml up -d --build
 
 也提供 `ghcr.io/n3urda/hongguotv-bridge:0.1.1` 的 AMD64 / ARM64 镜像，以及根目录的镜像部署 Compose；私有镜像登录、更新和排查见 [Docker 部署指南](docs/DOCKER.md)。服务参数为 `BRIDGE_HOST`、`PORT`、`BRIDGE_TOKEN`；Node 进程不会自动读取 `.env`，应由 shell 或部署工具传入环境变量。
 
+> ⚠️ **Node 内容服务的播放取址已失效**（2026-11-06 实测）：站方自 2026-11-02 起重新要求签名，
+> 而本服务用写死的设备身份 + 纯 JS 签名请求，站方一律回「未知异常」。
+> 首页 / 搜索 / 详情仍可用，只有 `/api/episodes/:id/play|stream` 这一段坏了。
+> **当前交付形态是 Kotlin 独立版（`kotlin-tv/`），不依赖这个服务**，见 [原生版说明](kotlin-tv/README.md)。
+
 ## 开发与验证
 
 **当前交付的是 Kotlin 原生独立版**（`kotlin-tv/`）。构建它需要 JDK 17、Android SDK Platform 36 / Build Tools 36.0.0：
