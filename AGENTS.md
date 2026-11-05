@@ -6,10 +6,20 @@
 
 - 检测脚本：`D:\document\project\time_task\hongguoTV\daily-source-check.ps1`
   （2026-10-29 起归置到 time_task；本仓库 `scripts\daily-source-check.ps1` 是旧副本，不再由 cron 调用）
-- 定时任务：Mavis 的 cron「红果TV 源解析每日检测」，`0 3 * * *`（Asia/Shanghai）。
+- 定时任务：Mavis 的 cron「红果TV 源解析每日检测、自动修复与发版」，`0 3 * * *`（Asia/Shanghai）。
 - **不推 Bark**（2026-11-04 起按用户要求停用推送）：脚本默认不推，异常只由 cron 会话回报一句。
   要推必须显式加 `-Push`。
   退出码：`0` 正常 / `10` 有异常（结果在脚本 stdout 的「异常明细：」段里）/ `20` 探针没编译。
+- **2026-11-05 起任务升级为「检测 + 自动修复 + 发版」**：探针报异常时，任务自己
+  读证据 → 定位站方变更 → 改 `kotlin-tv/core` 代码 → 编译 + 跑单测/lint → 重跑探针验证 →
+  **推 main + 打 `kotlin-vX.Y.Z` tag → 等 CI 出 release → 验资产和 update.json**。
+  验收基线：real-drama / comic-drama 各 8 集全通过、fourcc 全 `hvc1,mp4a`、单测与 lint 全绿。
+  最多自动修 2 轮；修不好就如实报告，不要反复瞎改，也不要改测试来凑绿。
+  **没修好或测试没过就不发版** —— 半修好的包比不发更糟。
+  版本号规则照下面「版本号与发布」那节：CI 从 tag 算 versionCode，新 tag 必须**严格新于所有已发布的
+  kotlin-v 版本**（发版前先 `gh release list` 查），一次运行最多发一个版本。
+  改动范围只限 `kotlin-tv/`；`server/` 的纯 JS 签名链路已知失效，不要去修。
+  每次修完要把新事实补回本文件，并写 `kotlin-tv/RELEASE_<版本>.md` 与 CHANGELOG 条目。
 
 ### 探针是什么
 
