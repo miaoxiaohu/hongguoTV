@@ -377,6 +377,12 @@
   （`toybox nc -s <ip> -p <port> -L sh -c 'cat >> /data/local/tmp/hit.txt'`，
   电视和 Palm 上都有 toybox nc），让手机访问该端口，然后看 hit 文件里有没有它的请求。
   **没有 = 包根本没到目标机器，跟 HTTP 层无关。**
+- **判决结果（2026-11-07 实测收口）**：电视 18899、Palm 8890 两个纯 TCP 探针的 hit 文件里
+  只有 PC 上 Chrome 的请求（User-Agent 是 `Windows NT 10.0`），**没有 iPhone Safari 的请求** ——
+  iPhone 那两次访问的包**根本没到这两台无线设备**。加上 ping 的 `Destination Host Unreachable`
+  和电视 ARP 里 iPhone 的 MAC 被清零，三条证据一致：**路由器 AP / 客户端隔离**。
+- 顺带说明：这个 `nc -L` 探针**只收不回**，所以浏览器打开它会一直转圈到超时 —— 「打不开」是预期行为，
+  不是故障；PC 自己 curl 也会超时（exit 28），但请求同样会被记进 hit 文件，这正好证明探针是活的。
 - **代码侧无解**：自签 https 证书在 iOS 上要手动信任描述文件，不可行。
   只能从路由器侧解决（关掉 AP / 客户端隔离，或给 iPhone 换一张允许互访的网）。
 - 电视端能做的是把提示写清楚（「需连接同一局域网」「会话最长 30 分钟，过期会自动换一张新码」）。
