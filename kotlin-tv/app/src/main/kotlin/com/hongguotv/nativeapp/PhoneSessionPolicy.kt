@@ -36,6 +36,19 @@ internal class PhoneSessionPolicy {
         url=nextUrl
     }
 
+    /** 这个会话是不是当前正在展示的那个。 */
+    fun isCurrent(candidate: Closeable): Boolean=session===candidate
+
+    /**
+     * 会话过期了才该换码 —— 而且**只有过期的正是当前会话**才算。
+     *
+     * 被新码顶掉的旧会话不会立刻关（要留宽限期，让手机扫到旧码时看到一句中文提示），
+     * 但它自己的过期定时器还在跑。那个定时器一响，以前会无条件让电视换码，
+     * 于是把**当前**这张新码关掉、再换第三张 —— 用户手里刚扫的那张当场变成死地址，
+     * 手机浏览器只能报「无法访问此网站」。屏幕上那张码的定时器永远不该被别人家的响铃收走。
+     */
+    fun expire(candidate: Closeable,action: ()->Unit) { if(isCurrent(candidate)) action() }
+
     /** 会话结束（提交过一次、App 退出）：彻底关掉，端口不再留着。 */
     fun release() {
         session?.close()

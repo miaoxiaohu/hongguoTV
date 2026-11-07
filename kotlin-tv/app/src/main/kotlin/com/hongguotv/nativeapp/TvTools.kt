@@ -82,11 +82,15 @@ class TvTools(private val activity: Activity) {
         open(next,anchor=phoneAnchor)
         renderPhoneCode(content,url)
     }
-    private fun deliverPhoneQuery(query: String) {
+    private fun deliverPhoneQuery(query: String,from: PhoneSearchServer) {
         val submit=phoneSubmit
-        val current=phoneDialog
-        closeSession()
-        current?.dismiss()
+        // 旧会话提交的内容照样送到电视；但只有它是**当前**这张码时，才把屏幕上的码收掉。
+        // 否则一张早已被顶掉的码提交一次，会把用户手上正在用的新码一起关掉。
+        if(sessions.isCurrent(from)) {
+            val current=phoneDialog
+            closeSession()
+            current?.dismiss()
+        }
         submit?.invoke(query)
     }
     /**
@@ -201,7 +205,11 @@ class TvTools(private val activity: Activity) {
     private fun startPhoneSession(owner: AlertDialog?,content: LinearLayout?,address: String) {
         worker.execute {
             try {
-                val session=PhoneSearchServer(address,{ query -> main.post { deliverPhoneQuery(query) } },{ main.post { expirePhoneSession() } })
+                // 回调里要判断「过期的/提交的是不是当前这张码」，所以先把 session 变量声明出来。
+                // 服务端线程虽然是在构造里起来的，但这两个回调最早也要 30 分钟后或用户提交时才响，
+                // 那时赋值早就完成了。
+                lateinit var session: PhoneSearchServer
+                session=PhoneSearchServer(address,{ query -> main.post { deliverPhoneQuery(query,session) } },{ main.post { sessions.expire(session) { expirePhoneSession() } } })
                 main.post {
                     if(owner!=null && owner!==this@TvTools.dialog) { session.close(); return@post }
                     sessions.attach(session,session.url); phoneUrl=session.url

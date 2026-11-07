@@ -356,36 +356,49 @@
   `OK` / `Not Found` 等。
 - **别再凭「curl 能通」就断定服务端没问题** —— curl 会自己补 `Date`。
 
-#### 原因二：iPhone 的**入站**被路由器按客户端隔离挡了（网络问题，代码侧无解）
+#### 原因二：屏幕上那张码被**上一张码**的过期定时器换掉了（代码问题，已修 0.9.92）
 
-- **实测矩阵（2026-11-07）**：
+- **现象**：弹窗里二维码和地址都在，手机扫了就是「无法访问此网站」；同一时刻 PC `curl` 同一地址 **200**。
+- **判据（这次的决胜观测）**：盯着「屏幕上的地址」和「这个地址还通不通」两条线一起看。
+  2026-11-07 22:31 生成的码（`:40897`）22:33 还是 200，22:35 屏幕上换成了 `:33347`，
+  22:36 `:40897` 连接被拒 —— **会话只开了 4 分钟就被换掉，而 TTL 是 30 分钟**。
+- **根因**：`PhoneSessionPolicy.attach()` 换新会话时**故意不关旧会话**（要留宽限期，让手机扫到旧码看到「已失效」提示）。
+  但旧会话自己的 30 分钟定时器还在跑，一响就回调 `onExpired` → `expirePhoneSession()`，
+  而它里面的 `closeSession()` 关的是**当前**挂着的会话 —— 也就是刚换上的新码。
+  新码被顶掉、又生成第三张，用户手上那张从此永远连不上。
+  时间线也对得上：22:05 排查时生成过一张码，30 分钟后正好是 22:35。
+- **修法（别再退回）**：过期回调先认身份 —— `PhoneSessionPolicy.expire(candidate){}` 只在
+  `session===candidate` 时才执行换码；`deliverPhoneQuery(query, from)` 同理，只有提交的是当前码才收弹窗。
+  **凡是「会话的回调」，都要先问一句「你还是当前那个吗」，否则旧对象的定时器会拆掉新对象。**
+- **教训**：`curl` 能开 ≠ 用户能开。**要复现用户的失败，得用他手上那个地址**，而不是自己新生成一个。
 
-  | 起点 | 目标 | 结果 |
-  |---|---|---|
-  | iPhone | PC 192.168.1.11（**有线**）上的服务 | **能打开** |
-  | iPhone | Palm 192.168.1.30（无线）上的服务 | 打不开 |
-  | iPhone | 电视 192.168.1.25（无线）上的服务 | 打不开 |
-  | PC → iPhone | ping | 通，0% 丢包 |
-  | Palm → iPhone | ping | **Destination Host Unreachable** |
-  | 电视 → iPhone | ping | **Destination Host Unreachable**，100% 丢包 |
+#### 原因二的旧结论（已撤回）
 
-- **关键判据**：`Destination Host Unreachable` 是**路由器主动回的错**，不是目标不响应。
-  电视的 ARP 表里 iPhone 那条变成 `00:00:00:00:00:00`、flags=0。
-  → **路由器知道 iPhone 在哪，但拒绝转发过去** = 客户端隔离 / AP 隔离。
-- PC 是有线（Intel 82574L），Palm 和电视都走 Wi-Fi —— **有线能进，无线进不来**。
-- **判定方法（很干净）**：在目标设备上起一个纯 TCP 监听并把收到的内容落盘
-  （`toybox nc -s <ip> -p <port> -L sh -c 'cat >> /data/local/tmp/hit.txt'`，
-  电视和 Palm 上都有 toybox nc），让手机访问该端口，然后看 hit 文件里有没有它的请求。
-  **没有 = 包根本没到目标机器，跟 HTTP 层无关。**
-- **判决结果（2026-11-07 实测收口）**：电视 18899、Palm 8890 两个纯 TCP 探针的 hit 文件里
-  只有 PC 上 Chrome 的请求（User-Agent 是 `Windows NT 10.0`），**没有 iPhone Safari 的请求** ——
-  iPhone 那两次访问的包**根本没到这两台无线设备**。加上 ping 的 `Destination Host Unreachable`
-  和电视 ARP 里 iPhone 的 MAC 被清零，三条证据一致：**路由器 AP / 客户端隔离**。
-- 顺带说明：这个 `nc -L` 探针**只收不回**，所以浏览器打开它会一直转圈到超时 —— 「打不开」是预期行为，
-  不是故障；PC 自己 curl 也会超时（exit 28），但请求同样会被记进 hit 文件，这正好证明探针是活的。
-- **代码侧无解**：自签 https 证书在 iOS 上要手动信任描述文件，不可行。
-  只能从路由器侧解决（关掉 AP / 客户端隔离，或给 iPhone 换一张允许互访的网）。
-- 电视端能做的是把提示写清楚（「需连接同一局域网」「会话最长 30 分钟，过期会自动换一张新码」）。
+这一段以前写的是「iPhone 的入站被路由器按客户端隔离挡掉了、代码侧无解」，**这个判断是错的**。
+2026-11-07 22:45 复核：iPhone 醒着时电视 ping 它**通**（4 收 2，RTT 44—120 ms），
+Safari 打开新生成的码**正常显示输入页**（0.9.91、0.9.92 各验一次）。
+之前那些 `Destination Host Unreachable` / `100% 丢包` / ARP `FAILED`，全是**手机锁屏进省电**时采的样：
+iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
+→ **别拿 ping 判断 iPhone 的死活，要让它真打开一次页面。**
+
+以下几条是这轮排查留下的**仍然有效**的资产，别丢：
+
+- **网络拓扑**（root 已拿到，别再从头查）：`192.168.1.1` 是 x86 iStoreOS，**没有无线**，
+  br-lan = eth1 + eth2，DHCP 由它发；Wi-Fi 由 `192.168.1.2`（小米 BE36「MIFI」，2.4G `wl1` ch6 / 5G `wl0` ch40）
+  和 `192.168.1.177`（Redmi AX1800「MIFI-2F」）两台 AP 提供。
+  三台无线终端的 MAC **都学在 iStoreOS 的 eth2 后面**，它们之间的流量不过主路由：
+  `nf_call_iptables=0`、没有 ebtables、nft 无 bridge 表 —— **主路由不可能背锅，别在 .1 上翻防火墙**。
+- **认 AP 的方法**：电视 `iw dev wlan0 link` 拿到的 BSSID 与 AP 的 MAC 只差 +2
+  （`50:4f:3b:ec:50:86` ↔ `192.168.1.2` 的 `50:4f:3b:ec:50:84`），据此可以确认终端挂在哪台 AP。
+- **小米路由器管理接口**（两台密码不同，`192.168.1.2` = `MEnbjs1989`，`192.168.1.177` 未拿到）：
+  登录要 `nonce = 0_<mac>_<epoch>_<rand>` + `sha256(nonce + sha256(密码 + a2ffa5c9be07488bbb04a3a47d3c5f6a))`，
+  POST `/cgi-bin/luci/api/xqsystem/login` 拿 `token`，之后 `/cgi-bin/luci/;stok=<token>/api/...`。
+  有用端点：`misystem/status`（终端流量，`online` 是秒数）、`misystem/device_detail?mac=`、`xqnetwork/wifi_detail_all`（SSID/信道/`bsd`）。
+  注意 `misystem/status` 只列有流量的终端，**不是完整的关联表**。
+- **`nc -L` 裸 TCP 探针**（`toybox nc -s <ip> -p <port> -L sh -c 'cat >> /data/local/tmp/hit.txt'`）：
+  它**只收不回**，浏览器打开必然转圈 —— 那是预期行为；看 hit 文件里有没有那条 UA 才算数。
+- **别用 `/proc/net/tcp` 判断会话端口死活**：Android 把应用自己的 socket 从这张表里滤掉了，
+  活着时也查不到。要验就 `curl` 打一下。
 
 ### 八、监听器必须装在 `displayed.isEmpty()` 分支之前（0.9.89 的教训）
 

@@ -42,6 +42,24 @@ class PhoneSessionPolicyTest {
         assertTrue(policy.hasSession)
     }
 
+    @Test fun `a replaced session expiring does not tear down the current one`() {
+        // 2026-11-07 晚上那次的真凶：屏幕上换过一张码之后，上一张码的 30 分钟定时器到点，
+        // 无条件回调「换码」→ 关掉的是**当前**这张（刚生成的新码），再换第三张。
+        // 用户手里刚扫的那张因此变成死地址，Safari 报「无法访问此网站」，
+        // 而 PC 用同样地址 curl 得到 200 —— 看起来像手机网络问题，其实是码自己被换掉了。
+        val policy=PhoneSessionPolicy()
+        val first=FakeSession()
+        val second=FakeSession()
+        policy.attach(first,"http://a/1")
+        policy.attach(second,"http://b/2")
+        var replaced=false
+        policy.expire(first) { replaced=true }   // 旧码的定时器响了
+        assertFalse("旧码过期不许把当前这张新码关掉",replaced)
+        assertTrue("当前码还在手上",policy.isCurrent(second))
+        policy.expire(second) { replaced=true }  // 当前码真的过期了
+        assertTrue("当前码过期要换码",replaced)
+    }
+
     @Test fun `releasing the session closes it and clears the url`() {
         val policy=PhoneSessionPolicy()
         val session=FakeSession()

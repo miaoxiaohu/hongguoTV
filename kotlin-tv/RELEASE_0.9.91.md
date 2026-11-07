@@ -93,7 +93,7 @@ curl 不在乎（它自己会补），Android 的 `HttpURLConnection` 也不在�
 
 ## 已知限制
 
-- **iPhone 到无线设备的入站仍不通，这跟 App 无关**：
+- **iPhone 到无线设备的入站仍不通，这跟 App 无关**：<!-- 0.9.92 更正：这条判断是错的，见 RELEASE_0.9.92.md 第二节 -->
   2026-11-07 实测 —— iPhone 能访问 PC（有线网口）上的服务，
   但访问不了 Palm（192.168.1.30）和电视（192.168.1.25）上的服务；
   从 Palm ping iPhone 是 `Destination Host Unreachable`，从电视 ping iPhone 是 100% 丢包，
