@@ -128,9 +128,31 @@ class PhoneSearchServer(
         try { respond(socket,200,"<h1>已发送到电视</h1><p>请回到电视查看搜索结果。</p>") }
         finally { close(); onQuery(query) }
     }
+    /**
+     * HTTP/1.1 的原因短语。以前这里写死 "Response"，状态行成了 "HTTP/1.1 200 Response" ——
+     * 原因短语本该是 "OK"、"Not Found" 这类标准词。curl 和 Android 的 HttpURLConnection 都不在乎，
+     * 但 iOS 的 CFNetwork 比它们严格，非标准状态行有可能被直接判成非法响应。
+     */
+    private fun reasonPhrase(code: Int): String = when(code) {
+        200 -> "OK"
+        400 -> "Bad Request"
+        403 -> "Forbidden"
+        404 -> "Not Found"
+        405 -> "Method Not Allowed"
+        410 -> "Gone"
+        413 -> "Payload Too Large"
+        431 -> "Request Header Fields Too Large"
+        else -> "Error"
+    }
     private fun respond(socket: Socket, code: Int, message: String) {
         val body="""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>红果TV+ · 手机输入</title><style>body{font:18px sans-serif;background:#10131b;color:#f4f5f8;max-width:500px;margin:40px auto;padding:20px}input,button{box-sizing:border-box;width:100%;font:inherit;padding:16px;margin:10px 0;border-radius:8px}button{background:#ff634c;color:white;border:0}p{line-height:1.6}</style></head><body>$message</body></html>""".toByteArray(Charsets.UTF_8)
-        val header="HTTP/1.1 $code Response\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${body.size}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: same-origin\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'\r\n\r\n"
+        // RFC 7231 要求 origin server 必须发 Date —— 以前这个头一个都没有，
+        // 而 iPhone 的网络库就栽在这上面：缺 Date 的响应，iOS 直接判成非法、连页面都不显示。
+        // 对照实验（2026-11-07）：两个只差 Date 头的服务，iPhone 一个能开、一个打不开。
+        // 顺带把状态行也换成标准原因短语（以前是 "HTTP/1.1 200 Response"，不是标准写法）。
+        // 自己用 ofPattern 拼而不是 RFC_1123_DATE_TIME：后者不补零日（07 会变成 7）。
+        val date=java.time.format.DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss zzz",java.util.Locale.US).format(java.time.ZonedDateTime.now(java.time.ZoneId.of("GMT")))
+        val header="HTTP/1.1 $code ${reasonPhrase(code)}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${body.size}\r\nDate: $date\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: same-origin\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'\r\n\r\n"
         socket.getOutputStream().apply { write(header.toByteArray(Charsets.US_ASCII)); write(body); flush() }
     }
 }

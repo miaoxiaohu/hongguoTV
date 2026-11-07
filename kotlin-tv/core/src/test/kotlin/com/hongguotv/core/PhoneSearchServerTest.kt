@@ -109,4 +109,28 @@ class PhoneSearchServerTest {
         assertEquals(1_800_000L,PhoneSearchServer.DEFAULT_TTL_MILLIS)
         assertTrue(PhoneSearchServer.GRACE_MILLIS>0)
     }
+    @Test fun `the status line carries a standard reason phrase`() {
+        // 状态行以前是 "HTTP/1.1 200 Response" —— "Response" 不是标准原因短语。
+        // curl 和 HttpURLConnection 都不在乎，但 iOS 的 CFNetwork 可能直接拒收，
+        // 表现就是「手机上打不开这个网页」，而且没有任何提示。
+        PhoneSearchServer("127.0.0.1",{}).use { server ->
+            val page=request(server)
+            assertTrue(page,page.startsWith("HTTP/1.1 200 OK"))
+            assertFalse(page.contains("HTTP/1.1 200 Response"))
+            assertTrue(request(server,path="/wrong").startsWith("HTTP/1.1 404 Not Found"))
+        }
+    }
+    @Test fun `the response carries a Date header like every http origin server must`(){
+        // 这一条是 iPhone 打不开那个网页的真正原因（2026-11-07 实测）。
+        // 对照实验：在 PC 上起两个只差 Date 头的服务，响应头其余部分完全一样，
+        // iPhone 上一个能打开、一个打不开 —— 缺 Date 的那个直接判成非法响应。
+        // RFC 7231 也写了：origin server 必须发 Date。
+        PhoneSearchServer("127.0.0.1",{}).use { server ->
+            val page=request(server)
+            val date=page.lines().firstOrNull { it.startsWith("Date: ") }
+            assertNotNull("响应里没有 Date 头",date)
+            // IMF-fixdate：Sat, 07 Nov 2026 12:44:29 GMT（日子要补零）
+            assertTrue(date!!,Regex("^Date: [A-Z][a-z]{2}, \\d{2} [A-Z][a-z]{2} \\d{4} \\d{2}:\\d{2}:\\d{2} GMT$").matches(date))
+        }
+    }
 }

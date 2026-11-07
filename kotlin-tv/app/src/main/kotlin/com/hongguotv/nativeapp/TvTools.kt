@@ -28,7 +28,8 @@ class TvTools(private val activity: Activity) {
     private val worker=Executors.newSingleThreadExecutor()
     private var dialog: AlertDialog?=null
     val showing: Boolean get()=dialog?.isShowing==true
-    private var phone: java.io.Closeable?=null
+    // 手机输入会话归 PhoneSessionPolicy 管：会话的生命周期跟 App 走，不跟弹窗走。
+    private val sessions=PhoneSessionPolicy()
     // 手机输入会话要用到的几样东西。退到后台时弹窗要收起来，会话得留着 —— 手机那边的提交
     // 还要能送到电视；以前这里把会话一起关了，手机一点「发送到电视」就是「连接被拒绝」。
     private var phoneUrl: String?=null
@@ -36,32 +37,40 @@ class TvTools(private val activity: Activity) {
     private var phoneContent: LinearLayout?=null
     private var phoneAnchor: View?=null
     private var phoneSubmit: ((String)->Unit)?=null
-    // 这些弹窗被收起时，不许把会话一起关掉。
-    private val keepOnDismiss=mutableSetOf<AlertDialog>()
     private fun dp(value: Int)=(value*activity.resources.displayMetrics.density).toInt()
     private fun label(value: String,size: Float=17f)=TextView(activity).apply { text=value; textSize=size; setTextColor(Color.WHITE); setPadding(dp(8),dp(4),dp(8),dp(4)) }
     private fun column()=LinearLayout(activity).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(16),dp(4),dp(16),dp(8)) }
+    /**
+     * 弹窗被收起时**不许碰会话**。
+     * 以前这里 dismiss 会调 closeSession()：用户按「关闭」收二维码、或者开新弹窗把旧弹窗顶掉，
+     * 都会把手机输入的会话一起关掉 —— 手机上刚扫到的码当场作废。
+     * 更糟的是 onDismiss 是异步回调：开新码时，旧弹窗的 dismiss 可能在新会话挂上之后才回调，
+     * 把刚建好的会话又关掉（端口开着又马上没了）。
+     * 会话的关闭只有三处：提交过一次、会话过期换码、App 退出。
+     */
     private fun open(next: AlertDialog,anchor: View?) {
         dialog?.dismiss(); dialog=next
         next.setOnDismissListener {
-            val keep=keepOnDismiss.remove(next)
             if(dialog===next) dialog=null
-            if(!keep) closeSession()
             if(anchor?.isAttachedToWindow==true) anchor.requestFocus()
         }
         next.show()
     }
-    fun close() { keepOnDismiss.clear(); dialog?.dismiss(); closeSession() }
+    /**
+     * 关掉当前弹窗。**手机输入的会话要留着**。
+     * 以前这里连会话一起关掉：电视一开始播放（releasePlayer / 换集）就调 close()，
+     * 用户手机里那个二维码当场作废 —— 扫完码还没来得及输剧名，端口就没了，
+     * 手机浏览器只能对着一个没人监听的地址转圈到超时。
+     * 会话的生命周期应该跟 App 走（退出 App 才结束），不该跟界面上的弹窗走。
+     */
+    fun close() { dialog?.dismiss() }
     fun destroy() { close(); worker.shutdownNow() }
     private fun closeSession() {
-        phone?.close(); phone=null
+        sessions.release()
         phoneUrl=null; phoneDialog=null; phoneContent=null; phoneAnchor=null; phoneSubmit=null
     }
     /** 退到后台：把弹窗收起来，但手机输入的会话要留着。 */
-    fun background() {
-        if(phone!=null) dialog?.let { keepOnDismiss.add(it) }
-        dialog?.dismiss()
-    }
+    fun background() { dialog?.dismiss() }
     /** 回到前台：会话还在就把二维码重新摆出来，用户不用再扫一次。 */
     fun foreground() {
         val url=phoneUrl ?: return
@@ -96,8 +105,6 @@ class TvTools(private val activity: Activity) {
         if(content!=null) { content.removeAllViews(); content.addView(label("二维码已过期，正在生成新的…")) }
         if(anchor==null || submit==null || address==null) return
         if(current!=null && current.isShowing) {
-            // 旧弹窗被 dismiss 时不能再去 closeSession —— 那会把刚设好的 phoneSubmit/phoneAnchor 清掉。
-            dialog?.let { keepOnDismiss.add(it) }
             phoneInput(anchor,submit)
         } else {
             // 电视在后台：不弹新窗口（免得在后台弹一个看不见的对话框），只把服务重建好，
@@ -197,7 +204,7 @@ class TvTools(private val activity: Activity) {
                 val session=PhoneSearchServer(address,{ query -> main.post { deliverPhoneQuery(query) } },{ main.post { expirePhoneSession() } })
                 main.post {
                     if(owner!=null && owner!==this@TvTools.dialog) { session.close(); return@post }
-                    phone=session; phoneUrl=session.url
+                    sessions.attach(session,session.url); phoneUrl=session.url
                     if(content!=null) renderPhoneCode(content,session.url)
                 }
             } catch(_: Exception) {
@@ -239,7 +246,7 @@ class TvTools(private val activity: Activity) {
                 } },{ main.post { if(dialog===next) { content.removeAllViews(); content.addView(label("二维码已过期，请关闭后重新打开。")) } } })
                 main.post {
                     if(dialog!==next) { session.close(); return@post }
-                    phone=session; content.removeAllViews()
+                    sessions.attach(session); content.removeAllViews()
                     val row=LinearLayout(activity).apply { gravity=Gravity.CENTER_VERTICAL }
                     row.addView(qr(session.url),LinearLayout.LayoutParams(dp(185),dp(185)))
                     val instructions=column()
