@@ -87,13 +87,26 @@ class PhoneSearchServerTest {
             assertTrue(request(server).startsWith("HTTP/1.1 200"))
         }
     }
-    @Test fun `closing or expiry makes a session unreachable`() {
+    @Test fun `a closed session is unreachable`() {
         val closed=PhoneSearchServer("127.0.0.1",{}); closed.close()
         assertTrue(runCatching { request(closed) }.isFailure)
+    }
+    @Test fun `an expired session answers with a Chinese hint instead of a dead port`() {
+        // 端口一关，手机浏览器只能对着一个没人监听的地址转圈到超时，用户什么线索都拿不到。
+        // 会话过期之后端口还要留一段时间：回一句「二维码已失效」，用户才知道该回电视重开。
         val expired=CountDownLatch(1)
         PhoneSearchServer("127.0.0.1",{ fail("expired session submitted") },{ expired.countDown() },1).use { server ->
             assertTrue(expired.await(2,TimeUnit.SECONDS))
-            assertTrue(runCatching { request(server) }.isFailure)
+            val reply=request(server)
+            assertTrue(reply,reply.startsWith("HTTP/1.1 410"))
+            assertTrue(reply.contains("二维码已失效"))
+            val post=request(server,"POST",URI(server.url).path+"/submit","query=x")
+            assertTrue(post,post.startsWith("HTTP/1.1 410"))
         }
+    }
+    @Test fun `a session lasts half an hour by default`() {
+        // 5 分钟太短：扫完码、掏手机、开浏览器、输完剧名，常常正好踩在过期点上。
+        assertEquals(1_800_000L,PhoneSearchServer.DEFAULT_TTL_MILLIS)
+        assertTrue(PhoneSearchServer.GRACE_MILLIS>0)
     }
 }

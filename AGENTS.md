@@ -268,7 +268,7 @@
 - **修法**：把「关界面」和「关会话」拆开。
   - `TvTools.background()` —— 退后台**只收二维码弹窗、保留会话**（服务继续应答）；
   - `TvTools.foreground()` —— 回前台把二维码弹窗**重摆**（会话还在就重显，过期才作废）；
-  - `TvTools.expirePhoneSession()` —— 会话最长 **5 分钟**，超时才真正关；
+  - `TvTools.expirePhoneSession()` —— 会话最长 **30 分钟**（0.9.90 起），超时才真正关；
   - 后台收到的查询词先进 `pendingPhoneQuery`，回前台再搜（`MainActivity.submitPhoneQuery()`）。
 - **没有加前台服务，也没加开机自启** —— 用户明确排斥常驻进程，别自作主张。
 
@@ -302,7 +302,7 @@
 - Jelly/Gboard 的 UI 节点混在一起：网页 input 是 `class="android.widget.EditText"`，
   页面按钮是 `class="android.widget.Button"`；**Gboard 自己的按钮 package 是
   `com.google.android.inputmethod.latin`**，按 package 过滤时别误点。
-- 会话 TTL 5 分钟过期后页面显示「二维码已失效…」；`am start` VIEW 同一 intent **不会重新加载**
+- 会话 TTL 过期后页面显示「二维码已失效…」（0.9.90 起 TTL 30 分钟，过期后还有 10 分钟宽限期）；`am start` VIEW 同一 intent **不会重新加载**
   （提示 "intent has been delivered to currently running top-most instance"），
   要 `am force-stop org.lineageos.jelly` 后再打开。
 - App 回前台时二维码弹窗会自动重摆（新加的 `foreground()`），会挡住导航 —— 脚本里先按 23 关掉它。
@@ -320,6 +320,51 @@
   「手机输入」，而那恰恰是手机输入**唯一**的入口。
   现在：**只清 `downOverrides`，监听器留着**；「下」在没有结果时不抢焦点。
 - **实测差异**：电视上 `input tap` 会**直接触发 onClick**（Palm 上只是挪焦点），走查时别把两者搞混。
+
+### 六、会话过期不能「静默失效」（2026-11-07 定，别改回去）
+
+- **现象**：电视上开着二维码弹窗，手机扫码打开网页。等一会儿再提交，手机上**一直转圈到超时**，
+  电视屏幕上还是那张旧二维码，看不出任何异常 —— 用户既不知道码过期了，也判断不了是不是网络问题。
+- **根因**：会话 TTL 到期后 `serve()` 循环退出、Socket 直接关掉。**端口一关，手机浏览器就连到了一个
+  没人监听的地址**，只有等 TCP 超时才知道连不上，拿不到任何原因。
+- **修法（0.9.90）**：
+  - TTL **5 分钟 → 30 分钟**（core `PhoneSearchServer.DEFAULT_TTL_MILLIS`）：掏手机、开浏览器、输剧名
+    常常正好踩在 5 分钟边上。
+  - **过期之后端口再留 10 分钟宽限期**（`GRACE_MILLIS`）：这段时间访问旧码拿到的是
+    **HTTP 410 + 中文提示**（「二维码已失效，请在电视上重新打开「手机输入」。」/「这个二维码已经用过了…」），
+    而不是超时。
+  - **电视上自动换新二维码**（`TvTools.expirePhoneSession()`）：会话到期就在原位置生成新码，
+    用户不用自己回搜索页重新找按钮。电视在后台时不弹窗（免得弹一个看不见的对话框），只重建服务，
+    等回前台 `foreground()` 再摆出来。
+  - `expiredNotified` 保证过期回调只通知一次（`serve()` 的 finally 与循环里都可能触发）。
+- **判据**：过期后 `curl` 旧 URL 应拿到 **410 + 中文**，不是 000/exit 7。
+
+### 七、iPhone 上打不开这个网页（2026-11-07 结论：不是代码问题）
+
+- **现象**：iPhone 用 Chrome 访问电视给的 `http://192.168.1.25:<port>/<token>` 打不开。
+- **取证（关键）**：**同一台 iPhone 访问 PC 上的对照服务 `http://192.168.1.11:8899/` 同样超时**，
+  而该服务在本机 `curl` 是 200；同一网段的 PC 与另一台 Android 手机（Palm 192.168.1.30）
+  访问电视会话也都是 200。
+  → **被挡下的是 iPhone 这一侧的局域网 http 访问**，跟电视 App 的服务无关。
+- **未排除的候选**：① iOS 的「本地网络」权限（用户确认 Chrome 一直是开的）；
+  ② Chrome 的「始终使用安全连接 / HTTPS 优先」把 http 升级成 https 到 443（电视没有 HTTPS 且不回退）；
+  ③ 路由器对 iPhone 的隔离；④ 扫码器 URL 解析异常。
+- **判定方法**：让用户用 **Safari** 打开同一个地址。Safari 能开 = Chrome 的 HTTPS 优先；
+  Safari 也打不开 = iPhone 出站被拦 / Wi-Fi 隔离。
+- **代码侧无解**：自签 https 证书在 iOS 上要手动信任描述文件，不可行。
+  电视端能做的是把提示写清楚（「需连接同一局域网」「会话最长 30 分钟，过期会自动换一张新码」）。
+- **别误判成 App 坏了**：这类问题先跑 `curl` 对照（电视会话 + PC 对照服务），
+  分清是「电视侧没服务」还是「这台设备出不去」。
+
+### 八、监听器必须装在 `displayed.isEmpty()` 分支之前（0.9.89 的教训）
+
+- 0.9.89 把搜索框的 `setOnKeyListener` 从「有搜索结果」块里挪出来，但**安装语句本身还在
+  `displayed.isEmpty()` 的提前 `return` 之后** —— 搜索页刚打开、还没输词时那段代码根本走不到，
+  监听器压根没装上，右键仍然到不了「搜索 / 历史 / 手机输入」。
+- **现在**：监听器装在空结果分支**之前**，结果第一条用 `var firstSearchCard` 往下传；
+  右键落点走候选链（`nextFocusRightId` → `searchButton` → 工具条整体），挨个试 `requestFocus()`。
+- **通用教训**：解耦「监听器装不装」和「有没有搜索结果」时，**安装点要提到所有提前 return 之前**，
+  别只把代码挪出 if 块。
 
 ## 播放页触控（0.9.83 起）
 

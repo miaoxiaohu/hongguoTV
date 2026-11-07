@@ -18,13 +18,29 @@ class PhoneSearchServer(
     address: String,
     private val onQuery: (String)->Unit,
     private val onExpired: ()->Unit = {},
-    ttlMillis: Long = 300_000
+    ttlMillis: Long = DEFAULT_TTL_MILLIS
 ): Closeable {
+    companion object {
+        /**
+         * 会话时长 30 分钟。5 分钟太短：用户扫完码、掏手机、开浏览器、输完剧名，
+         * 常常正好踩在过期点上 —— 屏幕上只剩一个转圈的图标，什么线索都没有。
+         */
+        const val DEFAULT_TTL_MILLIS=1_800_000L
+        /**
+         * 会话过期（或已经提交过一次）之后，端口还留着这么久。
+         * 端口一关，手机浏览器只能对着一个没人监听的地址转圈到超时；
+         * 留着这段时间，它就能回一句中文提示（「二维码已失效，请在电视上重新打开」）。
+         */
+        const val GRACE_MILLIS=600_000L
+    }
     private val stopped=AtomicBoolean(false)
     private val consumed=AtomicBoolean(false)
+    private val expiredNotified=AtomicBoolean(false)
     private val localAddress=InetAddress.getByName(address).also { require(it.isLoopbackAddress || it.isSiteLocalAddress) }.hostAddress
     private val listener=ServerSocket(0,4).apply { soTimeout=500 }
-    private val deadline=System.nanoTime()+ttlMillis.coerceIn(1,300_000)*1_000_000
+    private val deadline=System.nanoTime()+ttlMillis.coerceIn(1,DEFAULT_TTL_MILLIS)*1_000_000
+    // 端口活得比会话久：会话过期之后还要再撑一段，好让手机收到一句提示而不是超时。
+    private val hardDeadline=deadline+GRACE_MILLIS*1_000_000
     private val token=ByteArray(16).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it.toInt() and 255) }
     private val host="$localAddress:${listener.localPort}"
     val url="http://$host/$token"
@@ -35,7 +51,9 @@ class PhoneSearchServer(
     override fun close() { stopped.set(true); runCatching { listener.close() } }
     private fun serve() {
         try {
-            while(!stopped.get() && System.nanoTime()<deadline) {
+            while(!stopped.get() && System.nanoTime()<hardDeadline) {
+                // 会话到期就通知一次（电视那边换一张新二维码），但端口继续留着回提示。
+                if(!consumed.get() && System.nanoTime()>=deadline) notifyExpired()
                 val client=try { listener.accept() } catch(_: SocketTimeoutException) { continue }
                 client.use { socket ->
                     socket.soTimeout=2000
@@ -46,9 +64,10 @@ class PhoneSearchServer(
         finally {
             val expired=!stopped.get() && !consumed.get()
             close()
-            if(expired) onExpired()
+            if(expired) notifyExpired()
         }
     }
+    private fun notifyExpired() { if(expiredNotified.compareAndSet(false,true)) onExpired() }
     private fun line(input: InputStream, max: Int): String {
         val out=ByteArrayOutputStream()
         while(out.size()<max) {
@@ -74,13 +93,17 @@ class PhoneSearchServer(
             val key=next.substring(0,at).lowercase(Locale.ROOT)
             if(headers.put(key,next.substring(at+1).trim())!=null) return respond(socket,400,"重复请求头")
         }
-        if(stopped.get() || consumed.get() || System.nanoTime()>=deadline) return respond(socket,410,"二维码已失效，请在电视上重新打开手机输入")
+        if(stopped.get()) return
+        // 会话过期了，或者这个二维码已经提交过一次：回一句中文提示。
+        // 端口在宽限期里还开着，所以手机看到的是这句话，而不是「一直转圈直到超时」。
+        if(consumed.get()) return respond(socket,410,"这个二维码已经用过了，请在电视上重新打开「手机输入」。")
+        if(System.nanoTime()>=deadline) return respond(socket,410,"二维码已失效，请在电视上重新打开「手机输入」。")
         if(headers["host"]!=host || request[1] !in listOf("/$token","/$token/submit")) return respond(socket,404,"页面不存在")
         if(request[0]=="GET" && request[1]=="/$token") {
             // 手机上打字的几处讲究：inputmode/enterkeyhint 让浏览器弹文字键盘、回车键显示「发送」；
             // 不写 required —— 原生校验的气泡会挡在提交前面，用户只看到「请填写此字段」，
             // 却不知道自己打的字跑哪儿去了；空提交交给服务器回一句中文提示更清楚。
-            return respond(socket,200,"""<h1>在电视上搜索</h1><p>点下面的输入框，用手机键盘输入剧名，再点「发送到电视」。</p><form method="post" action="/$token/submit"><input type="text" name="query" maxlength="80" autofocus inputmode="text" enterkeyhint="send" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="输入剧名或关键词" autocomplete="off"><button type="submit">发送到电视</button></form><p>电视会按当前选择的漫剧或短剧分类搜索。页面仅在电视的手机输入窗口打开期间有效，最长 5 分钟。</p>""")
+            return respond(socket,200,"""<h1>在电视上搜索</h1><p>点下面的输入框，用手机键盘输入剧名，再点「发送到电视」。</p><form method="post" action="/$token/submit"><input type="text" name="query" maxlength="80" autofocus inputmode="text" enterkeyhint="send" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="输入剧名或关键词" autocomplete="off"><button type="submit">发送到电视</button></form><p>电视会按当前选择的漫剧或短剧分类搜索。页面仅在电视的手机输入窗口打开期间有效，最长 30 分钟。</p>""")
         }
         if(request[0]!="POST" || request[1]!="/$token/submit") return respond(socket,405,"不支持的操作")
         // A browser that cannot name the origin says "null". Chromium does exactly that for a
