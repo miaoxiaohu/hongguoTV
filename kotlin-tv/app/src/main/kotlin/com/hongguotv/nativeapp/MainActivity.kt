@@ -870,9 +870,9 @@ class MainActivity: Activity() {
             else if(tab==TAB_RANKING) catalog
             else catalog.take(ContentRepository.SEARCH_PAGE_SIZE)
         if(displayed.isEmpty()) {
-            // 没有结果就没有「第一条」可落；输入框上的兜底也得撤掉，别让它指向一张已经不存在的卡。
+            // 没有结果就没有「第一条」可落；钉死的落点要撤掉，别让它指向一张已经不存在的卡。
+            // 输入框的按键监听**留着** —— 它还得管「右」（走到「搜索 / 历史 / 手机输入」按钮）。
             focusRouter.downOverrides=emptyMap()
-            searchInput?.setOnKeyListener(null)
             message(list,if(loading) "正在加载推荐…" else when(tab) { TAB_SEARCH -> when {
                 query.isBlank() -> "输入关键词，用遥控器确认搜索"
                 // 站方那一路取不到的时候不能说「没有找到」：我们没问到站方，只能说本机索引里也没有。
@@ -1023,23 +1023,33 @@ class MainActivity: Activity() {
             if(first!=null) {
                 val toolIds=listOfNotNull(searchInput?.id,searchButton?.id)+searchActions.map { it.id }
                 focusRouter.downOverrides=toolIds.filter { it!=View.NO_ID }.associate { it to first.id }
-                // 输入框在有输入法时会把方向键吃掉（EditText 自己处理 DPAD_DOWN / DPAD_UP，
-                // 实机上按下键焦点纹丝不动、按上键也出不了输入框），所以这里自己接管：
-                // 下 = 结果第一条，上 = 焦点图算出来的上方控件（导航行）。
-                val input=searchInput
-                if(input!=null) input.setOnKeyListener { _,key,event ->
-                    when {
-                        key==KeyEvent.KEYCODE_DPAD_DOWN && event.action==KeyEvent.ACTION_DOWN -> { first.requestFocus(); true }
-                        key==KeyEvent.KEYCODE_DPAD_UP && event.action==KeyEvent.ACTION_DOWN -> {
-                            // 输入框横跨大半屏，它的上方是整个导航行 —— 按几何会落到某个靠右的
-                            // 页签（比如「最近观看」）。用户的意思是「回到我所在的这一页」，
-                            // 所以直接指回「搜索」页签。
-                            val target=nav.getOrNull(TAB_SEARCH)
-                                ?: input.nextFocusUpId.takeIf { it!=View.NO_ID && it!=input.id }?.let { findViewById<View>(it) }
-                            if(target!=null) { target.requestFocus(); true } else false
-                        }
-                        else -> false
+            }
+            // 输入框的方向键自己接管（**有没有搜索结果都要接管**）。
+            // EditText 把 DPAD_DOWN / DPAD_UP / DPAD_RIGHT 都当成自己处理：下上用来挪光标，
+            // 右也用来挪光标。实机证据（2026-11-07，小米电视 192.168.1.25，0.9.88 包）：
+            // 焦点在搜索框时按右键，焦点纹丝不动 —— 于是「搜索 / 历史 / 手机输入」这三个
+            // 按钮在遥控器上**永远走不到**，手机输入这个功能等于废了一半。这里自己接管：
+            //   右 = 工具条第一个按钮（「搜索」），下 = 结果第一条，上 = 「搜索」页签。
+            val input=searchInput
+            if(input!=null) input.setOnKeyListener { _,key,event ->
+                when {
+                    key==KeyEvent.KEYCODE_DPAD_DOWN && event.action==KeyEvent.ACTION_DOWN ->
+                        if(first!=null) { first.requestFocus(); true } else false
+                    key==KeyEvent.KEYCODE_DPAD_UP && event.action==KeyEvent.ACTION_DOWN -> {
+                        // 输入框横跨大半屏，它的上方是整个导航行 —— 按几何会落到某个靠右的
+                        // 页签（比如「最近观看」）。用户的意思是「回到我所在的这一页」，
+                        // 所以直接指回「搜索」页签。
+                        val target=nav.getOrNull(TAB_SEARCH)
+                            ?: input.nextFocusUpId.takeIf { it!=View.NO_ID && it!=input.id }?.let { findViewById<View>(it) }
+                        if(target!=null) { target.requestFocus(); true } else false
                     }
+                    key==KeyEvent.KEYCODE_DPAD_RIGHT && event.action==KeyEvent.ACTION_DOWN -> {
+                        // 焦点图算出来的右邻居（工具条上第一个按钮）；算不出来就退回「搜索」按钮。
+                        val target=input.nextFocusRightId.takeIf { it!=View.NO_ID && it!=input.id }?.let { findViewById<View>(it) }
+                            ?: searchButton
+                        if(target!=null) { target.requestFocus(); true } else false
+                    }
+                    else -> false
                 }
             }
         }

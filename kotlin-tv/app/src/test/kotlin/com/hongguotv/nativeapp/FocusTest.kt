@@ -229,7 +229,20 @@ class FocusTest {
         assertEquals("card0-0",plan.target("input",FocusDir.DOWN))
         assertEquals("card0-0",plan.target("go",FocusDir.DOWN))
         assertEquals("card0-0",plan.target("history",FocusDir.DOWN))
+
+
+
         assertEquals("card0-0",plan.target("phone",FocusDir.DOWN))
+    }
+
+    @Test fun theSearchInputCanReachTheToolButtons() {
+        // 电视上输入框把方向键自己吃掉（EditText 当成挪光标），实机按右键焦点纹丝不动 ——
+        // 于是「搜索 / 历史 / 手机输入」这三个按钮在遥控器上永远走不到，手机输入等于废了一半。
+        // 焦点图里输入框的右邻居必须是工具条第一个按钮，MainActivity 靠 nextFocusRightId 接过去。
+        val plan=FocusPlan.build(searchScreen())
+        assertEquals("go",plan.target("input",FocusDir.RIGHT))
+        assertEquals("history",plan.target("go",FocusDir.RIGHT))
+        assertEquals("phone",plan.target("history",FocusDir.RIGHT))
     }
 
     @Test fun pinningOnlyChangesTheDownTarget() {
