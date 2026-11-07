@@ -58,6 +58,17 @@ class PhoneSearchServerTest {
             assertFalse(submitted)
         }
     }
+    @Test fun `the page asks the phone for a text keyboard and leaves the empty check to the server`() {
+        // 手机上「打字有问题」的一半在这一页：浏览器要弹的是文字键盘（inputmode），
+        // 焦点要自己落在输入框上（autofocus）；空提交不能被浏览器原生气泡拦下来，
+        // 那种气泡不告诉用户「字没进去」，只会让人以为页面坏了。
+        PhoneSearchServer("127.0.0.1",{}).use { server ->
+            val page=request(server)
+            assertTrue(page.contains("inputmode=\"text\""))
+            assertTrue(page.contains("autofocus"))
+            assertFalse(page.contains("required"))
+        }
+    }
     @Test fun `the page does not ask the browser to hide the origin`() {
         // "no-referrer" is what makes Chromium answer a form POST with Origin: null.
         PhoneSearchServer("127.0.0.1",{}).use { server ->

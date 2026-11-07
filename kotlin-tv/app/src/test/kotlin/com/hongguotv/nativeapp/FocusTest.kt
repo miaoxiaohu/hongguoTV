@@ -209,9 +209,40 @@ class FocusTest {
         assertEquals("phone",plan.target("card0-5",FocusDir.UP))
     }
 
+    @Test fun upFromTheFirstResultLandsOnTheSearchInput() {
+        val plan=FocusPlan.build(searchScreen())
+        // 第一张卡按上要回搜索框 —— 焦点图这么算，但系统在 ScrollView 里跨不出去，
+        // 所以卡片上另有兜底（见 MainActivity 的卡片按键处理）。
+        assertEquals("input",plan.target("card0-0",FocusDir.UP))
+    }
+
     @Test fun theSearchRowIsReachableFromTheNav() {
         val plan=FocusPlan.build(searchScreen())
         assertEquals("input",plan.target("nav0",FocusDir.DOWN))
+    }
+
+    @Test fun theToolRowCanBePinnedToTheFirstResult() {
+        // 搜索结果是一份列表，工具条往下就该落在第一条 —— 几何对齐会落到中间那一列
+        // （实测：从「搜索」按钮往下落到第五张卡，从输入框往下落到第二张）。
+        val plan=FocusPlan.build(searchScreen(),mapOf("input" to "card0-0","go" to "card0-0",
+            "history" to "card0-0","phone" to "card0-0"))
+        assertEquals("card0-0",plan.target("input",FocusDir.DOWN))
+        assertEquals("card0-0",plan.target("go",FocusDir.DOWN))
+        assertEquals("card0-0",plan.target("history",FocusDir.DOWN))
+        assertEquals("card0-0",plan.target("phone",FocusDir.DOWN))
+    }
+
+    @Test fun pinningOnlyChangesTheDownTarget() {
+        val plan=FocusPlan.build(searchScreen(),mapOf("go" to "card0-0"))
+        // 钉死只动「下」，左右和上还是几何算的。
+        assertEquals("history",plan.target("go",FocusDir.RIGHT))
+        assertEquals("type0",plan.target("go",FocusDir.UP))
+    }
+
+    @Test fun aPinToSomethingThatIsNotOnScreenIsIgnored() {
+        // 目标不在这一屏里（换屏了、旧卡被回收了）就不能钉 —— 宁可留几何落点，也不留悬空指针。
+        val plan=FocusPlan.build(searchScreen(),mapOf("go" to "card9-9"))
+        assertEquals("card0-4",plan.target("go",FocusDir.DOWN))
     }
 
     // ---------------------------------------------------------------- 首页

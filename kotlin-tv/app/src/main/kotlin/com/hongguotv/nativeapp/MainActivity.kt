@@ -99,6 +99,8 @@ class MainActivity: Activity() {
     private lateinit var artwork: ArtworkLoader
     private data class DeferredUi(val apply: ()->Unit,val discard: ()->Unit={})
     private var deferredWork: DeferredUi?=null
+    // 手机在电视退到后台时发来的搜索词：先记着，回到前台再搜。
+    private var pendingPhoneQuery: String?=null
     private var initialCatalogPending=true
     private var restoreStoppedPage=false
     private var pendingDetail: Series?=null
@@ -352,6 +354,12 @@ class MainActivity: Activity() {
     private fun text(value: String,size: Float=16f,color: Int=white)=TextView(this).apply { text=value; textSize=size; setTextColor(color); includeFontPadding=false }
     private fun column()=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
     private fun row()=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL }
+    /** 这个 view 是不是在 [ancestor] 容器里面。 */
+    private fun isInside(view: View,ancestor: View): Boolean {
+        var parent=view.parent
+        while(parent!=null) { if(parent===ancestor) return true; parent=parent.parent }
+        return false
+    }
     private fun focusStyle(view: View,selected: Boolean=false) {
         view.id=View.generateViewId(); view.isFocusable=true; view.isFocusableInTouchMode=true
         fun paint(focused: Boolean) { view.background=rounded(if(focused) TvStyle.raised else if(selected) Color.rgb(61,39,34) else surface,if(focused) accent else Color.TRANSPARENT) }
@@ -603,6 +611,9 @@ class MainActivity: Activity() {
     }
     private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false,focusInput: Boolean=false) {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
+        // 手机在后台发来的搜索词：回到目录页就补上（还在播放页就先记着，等回到目录再搜）。
+        val pending=pendingPhoneQuery
+        if(pending!=null && screen!="player") { pendingPhoneQuery=null; runSearch(pending); return }
         // 从详情页回到目录页：用户没按播放，那一兆不该接着拉。翻页、换标签、刷新热门不走这
         // 条路（那时 screen 已经是 catalog），首页备着的「接着看」那一集因此不会白备。
         if(screen=="detail") cancelPagePrefetch()
@@ -675,7 +686,7 @@ class MainActivity: Activity() {
             lateinit var recent: TextView
             recent=addButton(searchRow,"历史") { showSearchHistory(recent) }
             lateinit var phone: TextView
-            phone=addButton(searchRow,"手机输入") { (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(input.windowToken,0); tvTools.phoneInput(phone) { runSearch(it) } }
+            phone=addButton(searchRow,"手机输入") { (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(input.windowToken,0); tvTools.phoneInput(phone) { submitPhoneQuery(it) } }
             searchActions.addAll(listOf(recent,phone))
             // The walk is normally invisible and automatic, so this only appears once it has fallen
             // behind. Without a lever here the only thing a user can do is restart the app, which is
@@ -838,6 +849,8 @@ class MainActivity: Activity() {
     }
     private fun catalogGrid(body: LinearLayout,focusNav: Boolean,focusType: Boolean=false,loading: Boolean=false,focusInput: Boolean=false,focusAnchor: String?=null) {        if(tab==TAB_HOME && page==1 && collection==null) { renderHome(body,focusNav,focusType,loading); return }
         catalogCards.clear(); cardImages.clear(); collectionBack=null
+        // 上一屏钉死的落点（搜索页工具条 → 第一条）指的是上一屏的 view，换屏就得作废。
+        focusRouter.downOverrides=emptyMap()
         if(collection!=null) {
             val heading=row()
             collectionBack=addButton(heading,"‹ 返回首页") { leaveCollection(); showCatalog() }
@@ -857,6 +870,9 @@ class MainActivity: Activity() {
             else if(tab==TAB_RANKING) catalog
             else catalog.take(ContentRepository.SEARCH_PAGE_SIZE)
         if(displayed.isEmpty()) {
+            // 没有结果就没有「第一条」可落；输入框上的兜底也得撤掉，别让它指向一张已经不存在的卡。
+            focusRouter.downOverrides=emptyMap()
+            searchInput?.setOnKeyListener(null)
             message(list,if(loading) "正在加载推荐…" else when(tab) { TAB_SEARCH -> when {
                 query.isBlank() -> "输入关键词，用遥控器确认搜索"
                 // 站方那一路取不到的时候不能说「没有找到」：我们没问到站方，只能说本机索引里也没有。
@@ -951,7 +967,18 @@ class MainActivity: Activity() {
                 card.addView(badge,lp(-1,-2)); if(tab==TAB_FAVORITES) favoriteBadges[item.id]=badge
                 card.setOnClickListener { catalogFocus=item.id; openDetail(item,tab==TAB_HISTORY || collection=="resume" || collection=="updates") }
                 card.setOnLongClickListener { catalogFocus=item.id; quickActions(item,card); true }
-                card.setOnKeyListener { _,key,event -> if(key==KeyEvent.KEYCODE_MENU) { if(event.action==KeyEvent.ACTION_UP) { catalogFocus=item.id; quickActions(item,card) }; true } else false }
+                card.setOnKeyListener { _,key,event -> when {
+                    key==KeyEvent.KEYCODE_MENU -> { if(event.action==KeyEvent.ACTION_UP) { catalogFocus=item.id; quickActions(item,card) }; true }
+                    // 卡片按「上」要能回到上面的工具行（搜索框 / 导航）。焦点图算出来的目标
+                    // 在 ScrollView 之外，系统自己的焦点搜索跨不过去 —— ScrollView 把方向键
+                    // 当成滚动吃掉了，焦点就钉在网格里出不来（实机：按上只滚动，焦点不动）。
+                    // 目标还在网格里的时候交给系统（它会连滚动一起做对）。
+                    key==KeyEvent.KEYCODE_DPAD_UP && event.action==KeyEvent.ACTION_DOWN -> {
+                        val target=card.nextFocusUpId.takeIf { it!=View.NO_ID && it!=card.id }?.let { findViewById<View>(it) }
+                        if(target!=null && !isInside(target,scroll)) { target.requestFocus(); true } else false
+                    }
+                    else -> false
+                } }
                 card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) { catalogFocus=item.id; focusColumn=pageIndex; loadCover(image,item.cover); preview?.show(item,selectionStatus(item)); if(!restoringScroll) scroll.post { scroll.smoothScrollTo(0,when { line.top<scroll.scrollY -> line.top; line.bottom>scroll.scrollY+scroll.height -> (line.bottom-scroll.height).coerceAtLeast(0); else -> scroll.scrollY }) } } }
                 // The row measures its tallest card, then stretches siblings to keep badges aligned.
                 line.addView(card,lp(cardWidth,-1).apply { if(columnIndex<columns-1) rightMargin=gap }); cards+=card
@@ -983,6 +1010,39 @@ class MainActivity: Activity() {
         // 这一段原来手写下一整套：行内左右、上下对齐、导航和片库按钮的连线、翻页那一行的
         // 连线。落点是按下标算出来的，于是「首页」按下键会跳到屏幕另一头的片库按钮，
         // 第一列按左会把自己锁死。现在这些都由 [FocusRouter] 接手。
+        // 搜索页的工具条 → 结果网格：往下落在**第一条**。
+        //
+        // 焦点图默认按屏幕几何对齐：从「搜索」按钮往下会落到与它同一列的第五张卡，
+        // 从输入框往下会落到中间那一列。可搜索结果对用户来说是一份**列表**，入口就该
+        // 是第一条 —— 按几何落点会让人以为前几部被跳过了。
+        // 实机证据（2026-11-05，Palm 上 0.9.86 包，搜到 6 条结果）：焦点在「搜索」按钮
+        // （x≈804~878）时按下键，焦点落在第 5 张「遇棠方知涉：被偏执大佬黏上了」（x≈844~1021）。
+        focusRouter.downOverrides=emptyMap()
+        if(tab==TAB_SEARCH) {
+            val first=cards.firstOrNull()
+            if(first!=null) {
+                val toolIds=listOfNotNull(searchInput?.id,searchButton?.id)+searchActions.map { it.id }
+                focusRouter.downOverrides=toolIds.filter { it!=View.NO_ID }.associate { it to first.id }
+                // 输入框在有输入法时会把方向键吃掉（EditText 自己处理 DPAD_DOWN / DPAD_UP，
+                // 实机上按下键焦点纹丝不动、按上键也出不了输入框），所以这里自己接管：
+                // 下 = 结果第一条，上 = 焦点图算出来的上方控件（导航行）。
+                val input=searchInput
+                if(input!=null) input.setOnKeyListener { _,key,event ->
+                    when {
+                        key==KeyEvent.KEYCODE_DPAD_DOWN && event.action==KeyEvent.ACTION_DOWN -> { first.requestFocus(); true }
+                        key==KeyEvent.KEYCODE_DPAD_UP && event.action==KeyEvent.ACTION_DOWN -> {
+                            // 输入框横跨大半屏，它的上方是整个导航行 —— 按几何会落到某个靠右的
+                            // 页签（比如「最近观看」）。用户的意思是「回到我所在的这一页」，
+                            // 所以直接指回「搜索」页签。
+                            val target=nav.getOrNull(TAB_SEARCH)
+                                ?: input.nextFocusUpId.takeIf { it!=View.NO_ID && it!=input.id }?.let { findViewById<View>(it) }
+                            if(target!=null) { target.requestFocus(); true } else false
+                        }
+                        else -> false
+                    }
+                }
+            }
+        }
         val anchorView=focusAnchorView(focusAnchor)
         if(anchorView!=null) anchorView.requestFocus()
         else if(focusInput) searchInput?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else if(focusNav) nav[tab].requestFocus()
@@ -1280,6 +1340,12 @@ class MainActivity: Activity() {
         val total=pageCount()
         if(total<=1) { tvTools.info("翻页","只有一页，没有可跳的。",anchor); return }
         tvTools.choose("跳到第几页",(1..total).map { "第 $it 页" },anchor,{ index -> turnPage(index+1) })
+    }
+    /** 手机上提交的剧名。电视在前台就直接搜；电视在后台（用户正在手机上打字）就先记着，
+     *  回到前台再搜 —— 退到后台时页面已经被重建过，直接搜会把结果刷到一个没人看的页面上。 */
+    private fun submitPhoneQuery(value: String) {
+        if(foreground) runSearch(value)
+        else pendingPhoneQuery=value
     }
     private fun runSearch(value: String,type: ContentType=library.contentType) {
         val clean=value.trim(); if(clean.isEmpty() || clean.length>80) return
@@ -2081,17 +2147,24 @@ class MainActivity: Activity() {
     override fun onResume() {
         super.onResume(); foreground=true; main.removeCallbacks(tick); main.post(tick)
         updater.resume()
+        tvTools.foreground()
+        // 手机在电视退到后台时提交的搜索词：优先把它搜掉。
+        val pending=pendingPhoneQuery
+        var applyPending=false
+        if(pending!=null && screen!="player" && library.isLoaded) { applyPending=true; pendingPhoneQuery=null; runSearch(pending) }
         if(library.isLoaded) {
-            if(initialCatalogPending) showCatalog(load=true)
-            else if(restoreStoppedPage) {
-                restoreStoppedPage=false
-                when(screen) {
-                    "player" -> playEpisode(episodeIndex,startPosition,autoplay=false)
-                    "detail" -> if(detail!=null) showDetail(false) else pendingDetail?.let { openDetail(it,directPlayback,autoplay=false) } ?: showCatalog()
-                    else -> showCatalog(load=!localCatalog() && catalog.isEmpty() && fetchesRemote(tab) && (tab!=TAB_SEARCH || query.isNotBlank()))
+            if(!applyPending) {
+                if(initialCatalogPending) showCatalog(load=true)
+                else if(restoreStoppedPage) {
+                    restoreStoppedPage=false
+                    when(screen) {
+                        "player" -> playEpisode(episodeIndex,startPosition,autoplay=false)
+                        "detail" -> if(detail!=null) showDetail(false) else pendingDetail?.let { openDetail(it,directPlayback,autoplay=false) } ?: showCatalog()
+                        else -> showCatalog(load=!localCatalog() && catalog.isEmpty() && fetchesRemote(tab) && (tab!=TAB_SEARCH || query.isNotBlank()))
+                    }
+                } else {
+                    val waiting=deferredWork; deferredWork=null; waiting?.apply?.invoke()
                 }
-            } else {
-                val waiting=deferredWork; deferredWork=null; waiting?.apply?.invoke()
             }
             if(screen=="catalog") favoriteMonitor.check()
             if(screen=="player") syncMediaSession()
@@ -2104,7 +2177,9 @@ class MainActivity: Activity() {
         player?.pause(); saveProgress(); library.flush(); super.onPause()
     }
     override fun onStop() {
-        restoreStoppedPage=true; generation++; cancelWork(); tvTools.close()
+        // 只收弹窗，别关手机输入的会话：用户正拿着手机在浏览器里打字，
+        // 会话一关，手机一点「发送到电视」就是「连接被拒绝」。
+        restoreStoppedPage=true; generation++; cancelWork(); tvTools.background()
         if(screen=="player") { startPosition=currentPosition(); saveProgress(); releasePlayer() }
         artwork.cancelPage(clearMemory=true); library.flush(); super.onStop()
     }

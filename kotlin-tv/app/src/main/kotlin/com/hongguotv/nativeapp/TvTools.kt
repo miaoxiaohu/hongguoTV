@@ -29,16 +29,62 @@ class TvTools(private val activity: Activity) {
     private var dialog: AlertDialog?=null
     val showing: Boolean get()=dialog?.isShowing==true
     private var phone: java.io.Closeable?=null
+    // 手机输入会话要用到的几样东西。退到后台时弹窗要收起来，会话得留着 —— 手机那边的提交
+    // 还要能送到电视；以前这里把会话一起关了，手机一点「发送到电视」就是「连接被拒绝」。
+    private var phoneUrl: String?=null
+    private var phoneDialog: AlertDialog?=null
+    private var phoneContent: LinearLayout?=null
+    private var phoneAnchor: View?=null
+    private var phoneSubmit: ((String)->Unit)?=null
+    // 这些弹窗被收起时，不许把会话一起关掉。
+    private val keepOnDismiss=mutableSetOf<AlertDialog>()
     private fun dp(value: Int)=(value*activity.resources.displayMetrics.density).toInt()
     private fun label(value: String,size: Float=17f)=TextView(activity).apply { text=value; textSize=size; setTextColor(Color.WHITE); setPadding(dp(8),dp(4),dp(8),dp(4)) }
     private fun column()=LinearLayout(activity).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(16),dp(4),dp(16),dp(8)) }
     private fun open(next: AlertDialog,anchor: View?) {
         dialog?.dismiss(); dialog=next
-        next.setOnDismissListener { if(dialog===next) { phone?.close(); phone=null; dialog=null }; if(anchor?.isAttachedToWindow==true) anchor.requestFocus() }
+        next.setOnDismissListener {
+            val keep=keepOnDismiss.remove(next)
+            if(dialog===next) dialog=null
+            if(!keep) closeSession()
+            if(anchor?.isAttachedToWindow==true) anchor.requestFocus()
+        }
         next.show()
     }
-    fun close() { dialog?.dismiss(); phone?.close(); phone=null }
+    fun close() { keepOnDismiss.clear(); dialog?.dismiss(); closeSession() }
     fun destroy() { close(); worker.shutdownNow() }
+    private fun closeSession() {
+        phone?.close(); phone=null
+        phoneUrl=null; phoneDialog=null; phoneContent=null; phoneAnchor=null; phoneSubmit=null
+    }
+    /** 退到后台：把弹窗收起来，但手机输入的会话要留着。 */
+    fun background() {
+        if(phone!=null) dialog?.let { keepOnDismiss.add(it) }
+        dialog?.dismiss()
+    }
+    /** 回到前台：会话还在就把二维码重新摆出来，用户不用再扫一次。 */
+    fun foreground() {
+        val url=phoneUrl ?: return
+        if(dialog!=null && dialog!!.isShowing) return
+        if(phoneSubmit==null) return
+        val content=column()
+        val next=AlertDialog.Builder(activity).setTitle("手机输入剧名").setView(content).setNegativeButton("关闭",null).create()
+        phoneDialog=next; phoneContent=content
+        open(next,anchor=phoneAnchor)
+        renderPhoneCode(content,url)
+    }
+    private fun deliverPhoneQuery(query: String) {
+        val submit=phoneSubmit
+        val current=phoneDialog
+        closeSession()
+        current?.dismiss()
+        submit?.invoke(query)
+    }
+    private fun expirePhoneSession() {
+        val content=phoneContent
+        closeSession()
+        if(content!=null) { content.removeAllViews(); content.addView(label("二维码已过期，请关闭后重新打开。")) }
+    }
     fun info(title: String,message: String,anchor: View?) = open(AlertDialog.Builder(activity).setTitle(title).setMessage(message).setPositiveButton("知道了",null).create(),anchor)
     fun confirm(title: String,message: String,anchor: View?,action: ()->Unit) {
         val next=AlertDialog.Builder(activity).setTitle(title).setMessage(message).setNegativeButton("取消",null).setPositiveButton("确认") { _,_-> action() }.create()
@@ -108,24 +154,30 @@ class TvTools(private val activity: Activity) {
         if(address==null || capabilities==null || !(capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))) {
             info("手机输入","请让电视和手机连接同一局域网（Wi-Fi 或有线网络）后重试。",anchor); return
         }
+        phoneAnchor=anchor; phoneSubmit=submit
         val content=column(); val status=label("正在生成二维码…"); content.addView(status)
         val next=AlertDialog.Builder(activity).setTitle("手机输入剧名").setView(content).setNegativeButton("关闭",null).create()
+        phoneDialog=next; phoneContent=content
         open(next,anchor)
         worker.execute {
             try {
-                val session=PhoneSearchServer(address,{ query -> main.post { if(dialog===next) { next.dismiss(); submit(query) } } },{ main.post { if(dialog===next) { content.removeAllViews(); content.addView(label("二维码已过期，请关闭后重新打开。")) } } })
+                val session=PhoneSearchServer(address,{ query -> main.post { deliverPhoneQuery(query) } },{ main.post { expirePhoneSession() } })
                 main.post {
-                    if(dialog!==next) { session.close(); return@post }
-                    phone=session; content.removeAllViews()
-                    val row=LinearLayout(activity).apply { gravity=Gravity.CENTER_VERTICAL }
-                    row.addView(qr(session.url),LinearLayout.LayoutParams(dp(185),dp(185)))
-                    val instructions=column()
-                    instructions.addView(label("手机扫码后用浏览器打开，输入剧名发送到电视。\n需连接同一局域网；关闭窗口即失效，最长 5 分钟。",16f))
-                    instructions.addView(label(session.url,12f))
-                    row.addView(instructions,LinearLayout.LayoutParams(0,-2,1f)); content.addView(row)
+                    if(dialog!==next) { session.close(); phoneSubmit=null; phoneAnchor=null; return@post }
+                    phone=session; phoneUrl=session.url
+                    renderPhoneCode(content,session.url)
                 }
             } catch(_: Exception) { main.post { if(dialog===next) status.text="无法开启手机输入，请检查网络后重试。" } }
         }
+    }
+    private fun renderPhoneCode(content: LinearLayout,url: String) {
+        content.removeAllViews()
+        val row=LinearLayout(activity).apply { gravity=Gravity.CENTER_VERTICAL }
+        row.addView(qr(url),LinearLayout.LayoutParams(dp(185),dp(185)))
+        val instructions=column()
+        instructions.addView(label("手机扫码后用浏览器打开，输入剧名发送到电视。\n需连接同一局域网；会话最长 5 分钟。",16f))
+        instructions.addView(label(url,12f))
+        row.addView(instructions,LinearLayout.LayoutParams(0,-2,1f)); content.addView(row)
     }
     fun libraryTransfer(backup: String,anchor: View?,restore: (BackupData,Boolean)->Unit) {
         val connectivity=activity.getSystemService(ConnectivityManager::class.java)

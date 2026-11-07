@@ -113,8 +113,18 @@ class FocusPlan internal constructor(
             return out
         }
 
-        /** 算一屏的焦点图。 */
-        fun build(rects: List<FocusRect>): FocusPlan {
+        /**
+         * 算一屏的焦点图。
+         *
+         * [downOverrides] 是「往下的落点钉死表」：键是起点，值是终点。
+         *
+         * 几何对齐在大多数地方是对的，但有一处不对：**工具条 → 列表**。
+         * 搜索页的输入框横跨大半屏，按「重叠最多、中心最近」挑，落点会落在中间那一列
+         * （实测是第二张卡）；「搜索」按钮在右边，落点更是直接落到第五张卡。
+         * 可搜索结果对用户来说是一份**列表**，列表的入口就该是第一条 —— 按几何落点
+         * 会让人以为前几部剧被跳过了。这一跳由调用方钉死，不改通用规则。
+         */
+        fun build(rects: List<FocusRect>, downOverrides: Map<String,String> = emptyMap()): FocusPlan {
             val rows=bands(rects)
             val links=linkedMapOf<String,Targets>()
             rows.forEachIndexed { index,row ->
@@ -126,6 +136,12 @@ class FocusPlan internal constructor(
                     val right=horizontalTarget(row,rect,FocusDir.RIGHT)
                     links[rect.key]=Targets(up,down,left,right)
                 }
+            }
+            // 钉死的落点：起点和终点都得在这一屏里存在，否则不生效（不留悬空的指针）。
+            for((from,to) in downOverrides) {
+                val current=links[from] ?: continue
+                if(to !in links) continue
+                links[from]=current.copy(down=to)
             }
             return FocusPlan(rows,links)
         }

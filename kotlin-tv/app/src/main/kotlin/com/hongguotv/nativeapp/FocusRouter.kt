@@ -21,8 +21,18 @@ import android.widget.EditText
 class FocusRouter {
     private var signature: Map<String,String> = emptyMap()
 
+    /**
+     * 「往下」的落点钉死表：键是起点 view 的 id，值是目标 view 的 id。
+     *
+     * 焦点图默认按屏幕几何算，可有些地方几何算不对 —— 搜索页的工具条按几何会落到
+     * 结果中间的某一列，可结果对用户是一份列表，入口就该是第一条。
+     *
+     * 表里指的都是**当屏的 view**：换屏时要跟着换（[reset] 会清掉）。
+     */
+    var downOverrides: Map<Int,Int> = emptyMap()
+
     /** 这一屏重画了：把上一屏的落点忘掉，日志里也好重新记一笔。 */
-    fun reset() { signature=emptyMap() }
+    fun reset() { signature=emptyMap(); downOverrides=emptyMap() }
 
     /**
      * 量位置、算图、写回。
@@ -45,7 +55,7 @@ class FocusRouter {
             views[view.id]=view
         }
         if(rects.isEmpty()) return
-        val plan=FocusPlan.build(rects)
+        val plan=FocusPlan.build(rects,downOverrides.mapKeys { it.key.toString() }.mapValues { it.value.toString() })
         val next=plan.all.mapValues { (_,targets) -> "${targets.up}|${targets.down}|${targets.left}|${targets.right}" }
         if(next!=signature) {
             signature=next

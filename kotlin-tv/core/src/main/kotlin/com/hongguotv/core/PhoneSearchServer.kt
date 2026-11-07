@@ -77,7 +77,10 @@ class PhoneSearchServer(
         if(stopped.get() || consumed.get() || System.nanoTime()>=deadline) return respond(socket,410,"二维码已失效，请在电视上重新打开手机输入")
         if(headers["host"]!=host || request[1] !in listOf("/$token","/$token/submit")) return respond(socket,404,"页面不存在")
         if(request[0]=="GET" && request[1]=="/$token") {
-            return respond(socket,200,"""<h1>在电视上搜索</h1><p>输入剧名，电视会按当前选择的漫剧或短剧分类搜索。</p><form method="post" action="/$token/submit"><input name="query" maxlength="80" required autofocus placeholder="输入剧名或关键词" autocomplete="off"><button>发送到电视</button></form><p>页面仅在电视的手机输入窗口打开期间有效，最长 5 分钟。</p>""")
+            // 手机上打字的几处讲究：inputmode/enterkeyhint 让浏览器弹文字键盘、回车键显示「发送」；
+            // 不写 required —— 原生校验的气泡会挡在提交前面，用户只看到「请填写此字段」，
+            // 却不知道自己打的字跑哪儿去了；空提交交给服务器回一句中文提示更清楚。
+            return respond(socket,200,"""<h1>在电视上搜索</h1><p>点下面的输入框，用手机键盘输入剧名，再点「发送到电视」。</p><form method="post" action="/$token/submit"><input type="text" name="query" maxlength="80" autofocus inputmode="text" enterkeyhint="send" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="输入剧名或关键词" autocomplete="off"><button type="submit">发送到电视</button></form><p>电视会按当前选择的漫剧或短剧分类搜索。页面仅在电视的手机输入窗口打开期间有效，最长 5 分钟。</p>""")
         }
         if(request[0]!="POST" || request[1]!="/$token/submit") return respond(socket,405,"不支持的操作")
         // A browser that cannot name the origin says "null". Chromium does exactly that for a

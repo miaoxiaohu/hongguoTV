@@ -84,6 +84,9 @@
 - **验收完必须还原**：`ime set com.google.android.inputmethod.latin/.LatinIME`
   + `ime disable com.android.adbkeyboard/.AdbIME` + `adb uninstall com.android.adbkeyboard`；
   顺手把 `package_verifier_enable` / `verifier_verify_adb_installs` 改回 1。
+- 🔴 **2026-11-05 实测更正**：这台 Palm（Android 17）上 ADBKeyboard **收不到广播，文本注不进去**
+  （连纯 ASCII 的 `ADB_INPUT` 也不行）—— 详见上面「ADBKeyboard 在这台 Android 17 上注入不进去」。
+  走查改用英文关键词（本机索引的模糊匹配能命中英文剧名）。
 
 ### 怎么读自绘 UI、怎么操作（2026-11-04 实机补）
 
@@ -214,6 +217,95 @@
   所以核对「能不能覆盖」要看证书，不要比 sha256：
   `apksigner verify --print-certs <apk>`（本机在 `D:\Programs\android-sdk\build-tools\36.0.0\apksigner.bat`）。
 
+## 搜索结果的焦点落点（2026-11-05 定，别改回去）
+
+搜索页的**工具条**（输入框 + 搜索/历史/手机输入/续建索引）往下，焦点一律落在
+**结果列表的第一条**，不是按屏幕几何对齐的那一列。
+
+- **根因**：焦点图（app 的 `FocusPlan`）默认按几何对齐落点 —— 从「搜索」按钮往下会落到
+  与它同一列的**第五张**卡，从输入框往下会落到**第二张**（输入框横跨大半屏，按"重叠最多、
+  中心最近"挑中了中间那列）。可搜索结果对用户是一份**列表**，入口就该是第一条。
+- **实测证据（2026-11-05，Palm 192.168.1.30，0.9.86 包，搜到 6 条结果）**：焦点在「搜索」按钮
+  （x≈804~878）时按下键，焦点落在第 5 张「遇棠方知涉：被偏执大佬黏上了」（x≈844~1021）。
+- **修法**：不改通用几何规则。`FocusPlan.build` 增加可选的 `downOverrides`（钉死「往下」的落点），
+  `FocusRouter` 增加同名的 `downOverrides`（view id → view id），搜索页在 `catalogGrid` 里把
+  整条工具条钉到当前页第一张卡。**换屏必须清空**（`catalogGrid` 开头清 + `releaseCatalogViews`
+  里的 `focusRouter.reset()`），指向已销毁 view 的钉子会被 `FocusPlan` 忽略。
+- **附带**：输入框在**有输入法**的机器上会把方向键吃掉（EditText 自己处理 DPAD_DOWN，
+  实测按下键焦点纹丝不动），所以输入框上另有 `setOnKeyListener` 兜底，直接把焦点交给第一张卡。
+- **附带修掉的两个既有缺陷（2026-11-05 实机发现，不是本次改动引入的）**：
+  - **网格里的卡片按「上」出不了结果区**：焦点图给的上方目标在 ScrollView 之外，系统自己的
+    焦点搜索跨不过去（ScrollView 把方向键当滚动吃掉了），焦点就钉在网格里。修法：卡片上另有
+    `setOnKeyListener`，目标在 ScrollView 之外时手动 `requestFocus`（在网格里就交回系统，
+    它会连滚动一起做对）。
+  - **输入框按「上」「下」都不动**：EditText 自己处理方向键。修法：输入框的 `setOnKeyListener`
+    接管 —— 下 = 结果第一条，上 = **「搜索」页签**（不是几何算出来的导航行某页签：输入框横跨
+    大半屏，按几何会落到靠右的「最近观看」）。
+- **判据**：实机 `uiautomator dump` 看 `focused="true"` 的节点 —— 应当是第一张卡
+  （`content-desc` = 第一部剧名，`bounds` 的 x 等于第一列的位置）。单测在 `FocusTest.kt`：
+  `theToolRowCanBePinnedToTheFirstResult` / `pinningOnlyChangesTheDownTarget` /
+  `aPinToSomethingThatIsNotOnScreenIsIgnored` / `upFromTheFirstResultLandsOnTheSearchInput`。
+
+### ADBKeyboard 在这台 Android 17 上注入不进去（2026-11-05 更正上面那条）
+
+`adb install -r -g` 成功、`ime enable` / `ime set` 成功、进程在跑、`mBoundToMethod=true`，
+但 `am broadcast -a ADB_INPUT_B64 --es msg <base64>` **注不进任何文本**（连纯 ASCII 的
+`ADB_INPUT` 也不行），显式加 `-p com.android.adbkeyboard` 也不行；进程日志里没有异常。
+→ **别再指望这条路输中文**。走查用英文关键词即可：本机索引的模糊匹配会命中英文剧名
+（搜 `love` 能搜到《苦果 The Price of Love》《诱情染指之黎野入怀》这类真实结果，
+站方还会回十条同类推荐），焦点落点照样验得了。
+
+## 手机输入页（2026-11-07 定，别改回去）
+
+电视端有个「手机输入」功能：App 起一个小 HTTP 服务，手机扫二维码/打开 URL 在网页上打字，
+提交后电视上直接出搜索结果。两个坑已经踩过并修好，**别改回去**：
+
+### 一、会话不能跟着 App 退后台一起关
+
+- **根因（实测取证，不是猜的）**：`MainActivity.onStop()` → `tvTools.close()` → 关掉 PhoneSearchServer 的
+  ServerSocket。同一段会话实测：App 在前台 `curl GET` = **200**；按 HOME 退后台后 `curl GET` = **000 / exit 7**
+  （连接被拒）。浏览器表现 = **页面能开（GET 早到）、提交失败（POST 晚到，会话已死）** = ERR_CONNECTION_REFUSED。
+- **修法**：把「关界面」和「关会话」拆开。
+  - `TvTools.background()` —— 退后台**只收二维码弹窗、保留会话**（服务继续应答）；
+  - `TvTools.foreground()` —— 回前台把二维码弹窗**重摆**（会话还在就重显，过期才作废）；
+  - `TvTools.expirePhoneSession()` —— 会话最长 **5 分钟**，超时才真正关；
+  - 后台收到的查询词先进 `pendingPhoneQuery`，回前台再搜（`MainActivity.submitPhoneQuery()`）。
+- **没有加前台服务，也没加开机自启** —— 用户明确排斥常驻进程，别自作主张。
+
+### 二、网页 input 必须声明文字键盘
+
+- 手机浏览器不一定给未声明 `inputmode` 的框弹文字键盘；回车键也不显示「发送」。
+- **`required` 必须去掉**：浏览器原生气泡是英文（「请填写此字段」），会挡在提交前面，
+  用户只看到气泡。空提交交给服务器回中文提示（「请输入 1—80 个字符的剧名」）。
+- 现在用的声明：`type="text" maxlength="80" autofocus inputmode="text" enterkeyhint="send"
+  autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off"`。
+- 页面 CSP 是 `default-src 'none'`，**加内联 JS 需削弱 CSP** —— 这次没用 JS，只改声明。
+
+### 三、这台 Palm 上验证网页表单的两道坎
+
+- **LineageOS Jelly 抢键盘**：网页 input 即使 `focused="true"`，`input text love` 的字符仍进
+  **地址栏**（dump 里出现「他love一样」），网页 input 为空 → 服务端 POST 后回
+  「请输入 1—80 个字符的剧名」。这是 Jelly 自身的按键分发行为，**网页侧改不了**，别去迁就 Jelly。
+  端到端验证用 **Chromium 内核浏览器**（PC 端内置 Browser）做：navigate → inspect 拿 input/button 的 ref →
+  `fill(ref, "love")` → `click(buttonRef)` → 页面变「已发送到电视」。
+- **中文拼音上屏无法自动验证**：这台机只有 AOSP LatinIME 与 Gboard，`input text` 不支持中文，
+  ADBKeyboard 在这台 Android 17 上收不到广播（见上面那条）。**这是设备 IME/自动化环境的限制，
+  不是代码问题** —— 如实报告，让用户在真机键盘上敲一次中文确认。
+
+### 四、抓包与取证手法（这次定位靠它）
+
+- 会话存活判据：对电视给的 URL `curl GET`，前台 200 / 后台 000 —— 一条命令分清「服务关了」还是「签名坏了」。
+- 提交到达判据：`adb -s 192.168.1.30:5555 root`（Palm userdebug 直接 root，**没有 su**）→
+  `adb shell 'nohup tcpdump -i any -n -s 0 -w /sdcard/cap.pcap tcp port <PORT> >/sdcard/tcp.log 2>&1 &'` →
+  `adb shell 'tcpdump -r /sdcard/cap.pcap -n -A'`。能看到 `POST /<token>/submit` 才算真的到服务端。
+- **测完必须收尾**：`pkill tcpdump`；`adb shell rm` 会被权限门拦（delete-like），用新 pcap 文件名代替。
+- Jelly/Gboard 的 UI 节点混在一起：网页 input 是 `class="android.widget.EditText"`，
+  页面按钮是 `class="android.widget.Button"`；**Gboard 自己的按钮 package 是
+  `com.google.android.inputmethod.latin`**，按 package 过滤时别误点。
+- 会话 TTL 5 分钟过期后页面显示「二维码已失效…」；`am start` VIEW 同一 intent **不会重新加载**
+  （提示 "intent has been delivered to currently running top-most instance"），
+  要 `am force-stop org.lineageos.jelly` 后再打开。
+- App 回前台时二维码弹窗会自动重摆（新加的 `foreground()`），会挡住导航 —— 脚本里先按 23 关掉它。
 ## 播放页触控（0.9.83 起）
 
 - 四类手势：**单击画面**切 HUD 显隐、**双击画面**播放/暂停、**左右拖**跟手拖进度（实时预览目标时间，**松手才跳转**）、
