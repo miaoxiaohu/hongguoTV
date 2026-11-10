@@ -85,6 +85,17 @@ GET /reading/bookapi/video_tab/multi_video_model/v1/
 - `--play=real-drama`：成功 8 / 失败 0，全部 1080P、实读 1 MB 媒体字节；
 - `--play=comic-drama`：成功 8 / 失败 0，全部 1080P、实读 1 MB 媒体字节。
 
+**实机（投影 192.168.1.26，XGIMI TV / Android 8.0 / 1920x1080，CI 出的 0.9.93 正式包）**：
+
+- 覆盖安装 0.9.91 → 0.9.93 成功（versionCode 9091 → 9093，同签名，本机记录保留）。
+- **《小江神豪》**（原先「播放失败、已自动重试 3 次」的那部）：从第 63 集起播，
+  播完自动连播到**第 67 集 00:11** —— 每换一集都要重新注册一次身份，连续四集全部取址成功。
+- **《觉醒伪神：神明弃我我自为神8》第 1 集**（全新一集，必然走新取址路）：正常播放，
+  回到首页时进度已到**第 2 集 01:01**。
+- 判据：`dumpsys media_session` 里 `state=3`（PLAYING）；播放页 `uiautomator dump` 无「失败/重试」节点；
+  两帧截图平均通道绝对差 70（画面在动，不是静态错误页）。
+- 验证完已 `am force-stop com.hongguotv.nativeapp`，App 不留在前台拉流。
+
 **单测**：`:core:test` 全绿（396 项，其中 ContentRepositoryTest 98 项）。
 **lint**：`:app:lint` BUILD SUCCESSFUL。
 
