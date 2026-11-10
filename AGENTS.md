@@ -578,3 +578,64 @@ iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
   `device_level:3` 是**探针对照组**（裸签名请求），不在生产路径上。
 
 
+
+
+## 播放取址接口变更（2026-11-10 定，别改回去）
+
+站方把播放地址的 **POST 取址族关掉了**，改走官方 App 现在用的那条 GET 路。核心
+`ContentRepository` 里现在是**新门第一、老三门回退**。
+
+### 一、POST 族已死（不要再试）
+
+- `POST /novel/player/multi_video_model/v1/`、`POST /novel/player/video_model/v1/`
+  （body 顶层 `video_id`）：**带签名一律 HTTP 200 + content-length 0**，空答里没有错误码，
+  响应头 `server: volc-dcdn` —— 是站方的**软拦截**（不是超时、不是拒绝）。
+- **国内直连下也这样**，所以跟网络、跟 Passwall 节点都无关；上游 sunnysky123/hongguo-web 的
+  JS 实现跑下来也是同一个空答。
+- 身份参数矩阵（app_name / version_code / device_level / cookie / cdid / UA 变体）全试过，
+  全是 0 字节。**别再花时间重试这条族。**
+
+### 二、现行可用的新门
+
+    GET /reading/bookapi/video_tab/multi_video_model/v1/
+        ?video_id=<集 id>&video_id_type=0&device_level=1
+        &need_all_video_definition=1&need_mp4_align=0&use_os_player=0
+        &video_platform=1024&source=0&from_video_id=
+
+- **参数全在 query 上，body 是空的**。少一个参数站方回 `100103 PARAM_INVALID`。
+- **六个签名头照旧**；body 为空时 body 的 md5 记 **16 个零字节**（与站方 App 一致）。
+- **UA 用 `VendorConstants.VIDEO_UA`** —— 站方靠它把视频请求和其它请求区分开，换 UA 就 0 字节。
+- 回答形状：`code=0`，约 23 KB，模型在 `data.video_model_data[<集 id>].video_model`，
+  **五档清晰度内联在回答里**，不用再取第二个地址。
+
+### 三、身份是一次性的（最容易踩）
+
+- **同一个注册身份第二次取流就回 0 字节**。实测同一身份连取十次，只有第一次有回答。
+- 所以**每一集都要新注册一次身份** —— 代码沿用既有的 `takePlaybackIdentity()`「用掉即弃」语义。
+- core 里 `tabVideoModel` 循环 attempt 0..1，每次都调 `takePlaybackIdentity()`，
+  两次空则抛 `EmptySignedAnswerException`（IOException 子类，消息「播放接口返回空内容」）。
+
+### 四、全档 ByteVC2 的集：换 codec_type=3 再要一次备用地址
+
+有一类集的**内联模型和它的备用地址都只给 ByteVC2**（电视解不了的编码）。
+实测（漫剧《重生后我给emo修士当狗》第一集 7703473857562151961）：
+
+| codec_type | 给回来的编码 |
+|---|---|
+| 不带 / 0 / 1 / 2 / 4 / 5 | 只有 bytevc2（电视放不了） |
+| **3** | **bytevc1（HEVC，电视能放）** |
+
+`episodeStream` 里内联档位全不可播时，用 `codec_type=3` 的备用地址再取一次。
+
+### 五、门的顺序（别改回去）
+
+- 新门 `tabStream` 第一；答得出来 → 直接播，**一个老门都不问**。
+- 新门空答 → 老三门（注册身份门 → 签名 POST 门 → 公开页）整体搬进 `streamDoorsLegacy` 回退。
+- `fallbackCannotHelp = isNetworkFailure || isCancellation || isRegistrationUnavailable` 时**不回头**。
+- 公开页（hongguoduanju.com）只有 10 秒试看，只当故障证据与最后退路。
+
+### 六、取证教训
+
+- **别拿「同一台机器别的功能都正常」当结论**：目录/详情/搜索全好，说明网络没问题，
+  但不代表取址那条路还开着。取址接口是**单独**被关的。
+- **空答 + 200 + `server: volc-dcdn` = 站方软拦截**，看到这个组合就去找新门，别调网络层。

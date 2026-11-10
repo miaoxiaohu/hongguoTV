@@ -34,6 +34,14 @@ class ContentRepositoryTest {
 
     /** The endpoint that answers today: a registered identity and no signature. */
     private val PLAYBACK_PATH = "/novel/player/multi_video_model/v1/"
+    /**
+     * The endpoint the official app itself uses, and the first door since 2026-11-10.
+     *
+     * The POST family above is gone - the site answers a signed request on it with HTTP 200 and
+     * a zero-byte body - so the address now comes from this GET path: every parameter sits in
+     * the query, the body is empty, and the model comes back inline.
+     */
+    private val TAB_PATH = "/reading/bookapi/video_tab/multi_video_model/v1/"
     /** The registration the playback identity comes from. */
     private val REGISTER_PATH = "/service/2/device_register/"
     /** The public player page, the last of the three doors. */
@@ -75,6 +83,15 @@ class ContentRepositoryTest {
             .put("data",JSONObject().put("123",JSONObject().put("video_model",
                 JSONObject().put("video_list",JSONArray().apply { renditions.forEach { put(it) } }).toString())))
 
+    /**
+     * 新门（官方 App 现在用的那条 GET 路）的回答。
+     *
+     * 模型挂在 video_model_data 下面这一集的位置上，档位内联在里面。
+     */
+    private fun tabAnswer(vararg renditions: JSONObject) =
+        JSONObject().put("code",0).put("data",JSONObject().put("video_model_data",
+            JSONObject().put("123",JSONObject().put("video_model",
+                JSONObject().put("video_list",JSONArray().apply { renditions.forEach { put(it) } })))))
     private fun hex(s: String) = ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
 
     private fun rendition(definition: String, codec: String, mainUrl: String = MAIN_URL, spade: String = SPADE_A) =
@@ -84,6 +101,8 @@ class ContentRepositoryTest {
     private fun signedPlayerRepository(videoList: String, seen: MutableList<String> = mutableListOf()) = repository { request ->
         seen += request.url.encodedPath
         when (request.url.encodedPath) {
+            // 新门（App 自己用的那条 GET 路）此刻不答，空答之后才轮到老门。
+            TAB_PATH -> ""
             MODEL_PATH -> """{"code":0,"data":{"video_model":"{\"fallback_api\":\"$FALLBACK\"}"}}"""
             "/video/fplay/1/x" -> """{"video_info":{"data":{"key_seed":"$KEY_SEED","video_list":$videoList}}}"""
             else -> throw AssertionError("unexpected request ${request.url}")
@@ -92,6 +111,7 @@ class ContentRepositoryTest {
 
     private fun playerRepository(page: String) = repository { request ->
         when (request.url.encodedPath) {
+            TAB_PATH -> ""
             MODEL_PATH -> REFUSED
             PUBLIC_PATH -> page
             else -> throw AssertionError("unexpected request ${request.url}")
@@ -136,6 +156,7 @@ class ContentRepositoryTest {
             val payload=when {
                 path==REGISTER_PATH -> REGISTERED
                 path==PLAYBACK_PATH -> REFUSED
+                path==TAB_PATH -> ""
                 path==MODEL_PATH -> model
                 path=="/video/fplay/1/x" -> info
                 else -> ""
@@ -150,37 +171,33 @@ class ContentRepositoryTest {
     }
 
     /**
-     * The endpoint that answers today is the one that carries a registered identity and no
-     * signature, so it is asked first.
+     * 官方 App 现在用的那条 GET 路先问。
      *
-     * The signed endpoint is the one that answered until 2026-10-27 and it may answer again, so
-     * it stays as the second door - but it is not the door that is asked first, because asking it
-     * first would spend a whole wave of attempts on an endpoint that answers with an empty body.
+     * 2026-11-10：站方把 POST /novel/player/multi_video_model/v1/ 这一族关掉了 —— 带签名的
+     * 请求一律回 HTTP 200 + 0 字节。取址改走 App 自己在用的
+     * GET /reading/bookapi/video_tab/multi_video_model/v1/：参数全在 query 上，模型内联在
+     * 回答里。老的三道门（注册身份门、签名 POST 门、公开页）退成回退。
+     *
+     * 所以这里断言的是：新门答得出来的时候，老门一个都不问。
      */
-    @Test fun streamAsksTheRegisteredPlaybackEndpointFirst() {
+    @Test fun streamAsksTheEndpointTheAppItselfUsesFirst() {
         val paths=mutableListOf<String>()
-        val repo=repository(playback=inlinePlaybackAnswer(
-            inlineRendition("1080p","bytevc1")).toString()) { request ->
+        val repo=repository(tab=tabAnswer(inlineRendition("1080p","bytevc1")).toString()) { request ->
             paths+=request.url.encodedPath
-            throw AssertionError("the signed endpoint must not be asked while the registered one answers")
+            throw AssertionError("the retired doors must not be asked while the new door answers")
         }
         val result=repo.stream("456","123")
         assertEquals("1080P",result.quality)
         assertTrue(result.url,result.url.startsWith(PLAIN_HOST))
-        // The signed endpoint was never touched, and neither was the public page.
-        assertTrue(paths.toString(),paths.none { it==MODEL_PATH || it==PUBLIC_PATH })
+        // 老的三道门一个都没走。
+        assertTrue(paths.toString(),paths.none { it==MODEL_PATH || it==PUBLIC_PATH || it==PLAYBACK_PATH })
     }
 
     /**
-     * The playback request carries the registered identity and the signature.
+     * 取址请求带着注册身份和签名。
      *
-     * A made-up identity is refused with an empty body - that is the whole reason the
-     * registration exists - so the request has to carry the two numbers the registration
-     * answered with.
-     *
-     * 2026-11-02: it also has to carry the signature again. A request with the registered
-     * identity but no signature headers is answered with HTTP 200 and a zero-byte body, so
-     * the six signature headers are part of what makes the request answer.
+     * 2026-11-10：请求发往官方 App 现在用的那条 GET 路。身份是一次性凭证，所以身份得写在
+     * query 上；六个签名头照旧要带 —— 少了签名头，站方回的同样是 HTTP 200 + 0 字节。
      */
     @Test fun thePlaybackRequestCarriesTheRegisteredIdentityAndTheSignature() {
         val queries=mutableListOf<String>()
@@ -188,13 +205,13 @@ class ContentRepositoryTest {
         // The interceptor records the query and the headers of the playback request.
         val recording=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             val request=chain.request()
-            if(request.url.encodedPath==PLAYBACK_PATH) {
+            if(request.url.encodedPath==TAB_PATH) {
                 queries+=request.url.query.orEmpty()
                 headers+=request.headers.names().joinToString(",")
             }
             val body=when(request.url.encodedPath) {
                 REGISTER_PATH -> REGISTERED
-                PLAYBACK_PATH -> inlinePlaybackAnswer(inlineRendition("1080p","bytevc1")).toString()
+                TAB_PATH -> tabAnswer(inlineRendition("1080p","bytevc1")).toString()
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -204,6 +221,8 @@ class ContentRepositoryTest {
         assertEquals(1,queries.size)
         assertTrue(queries.first(),queries.first().contains("device_id=3313301318833834"))
         assertTrue(queries.first(),queries.first().contains("iid=3313301318833834"))
+        // 这条 GET 把参数全写在 query 上，body 是空的。
+        assertTrue(queries.first(),queries.first().contains("video_id=123"))
         // The six signature headers the endpoint asks for.
         for(header in listOf("X-Argus","X-Gorgon","X-Medusa","X-Khronos","X-Ladon","X-Helios"))
             assertTrue(header,headers.first().contains(header,ignoreCase=true))
@@ -219,11 +238,10 @@ class ContentRepositoryTest {
     }
 
     /**
-     * The playback endpoint answers with the renditions inline, so no second address is fetched.
+     * 播放模型里内联的档位直接播，不再去取第二个地址。
      *
-     * The older shape pointed at a second address that had to be asked for; the answer that comes
-     * today carries the addresses itself, and asking for a second one would be a request that
-     * answers nothing.
+     * 老形状是指向第二个地址、要再去问一次的；今天回来的回答自己就带着地址，
+     * 再去问第二个地址就是白问一次。
      */
     @Test fun theInlineRenditionsArePlayedWithoutASecondAddress() {
         val paths=mutableListOf<String>()
@@ -232,7 +250,7 @@ class ContentRepositoryTest {
             paths+=path
             val body=when(path) {
                 REGISTER_PATH -> REGISTERED
-                PLAYBACK_PATH -> inlinePlaybackAnswer(
+                TAB_PATH -> tabAnswer(
                     inlineRendition("360p","bytevc1"),
                     inlineRendition("1080p","bytevc1")).toString()
                 else -> throw AssertionError("unexpected request ${request.url}")
@@ -242,19 +260,16 @@ class ContentRepositoryTest {
         }.build())
         val result=repo.stream("456","123")
         assertEquals("1080P",result.quality)
-        // Only the registration and the playback request went out.
-        assertEquals(listOf(REGISTER_PATH,PLAYBACK_PATH),paths)
+        // 只有注册和取址这两个请求走了出去。
+        assertEquals(listOf(REGISTER_PATH,TAB_PATH),paths)
     }
 
     /**
-     * The address is fetched once and then kept.
+     * 地址取一次就留着。
      *
-     * A registered identity is good for exactly one address lookup: the second lookup with
-     * the same identity comes back with an empty body, and it keeps saying so. Measured
-     * 2026-11-05: ten lookups with one identity answered once and were empty nine times.
-     *
-     * So the address that came back is kept and the second episode is answered from it - the
-     * registration the site limits is not spent twice for the same episode.
+     * 注册身份是一次性凭证，所以同一个身份第二次取址就回 0 字节（2026-11-05 实测：同一个
+     * 身份十次取址只有第一次有回答）。取回来的地址留在缓存里，第二集直接用它，
+     * 不再花一次注册。
      */
     @Test fun theAddressIsFetchedOnceAndThenKept() {
         val registrations=java.util.concurrent.atomic.AtomicInteger()
@@ -262,7 +277,7 @@ class ContentRepositoryTest {
             val request=chain.request(); val path=request.url.encodedPath
             val body=when(path) {
                 REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
-                PLAYBACK_PATH -> inlinePlaybackAnswer(inlineRendition("1080p","bytevc1")).toString()
+                TAB_PATH -> tabAnswer(inlineRendition("1080p","bytevc1")).toString()
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -270,7 +285,7 @@ class ContentRepositoryTest {
         }.build())
         repo.stream("456","123")
         repo.stream("456","123")
-        // The address is kept, so the second episode costs nothing: no second registration.
+        // 地址留下来了，所以第二集不花钱：不再注册一次。
         assertEquals("the address is kept, so the second episode does not register again",1,registrations.get())
     }
 
@@ -339,22 +354,19 @@ class ContentRepositoryTest {
     }
 
     /**
-     * The registration answer carries no status field, and that is a success.
+     * 注册回答里没有状态字段，而那就是成功。
      *
-     * The live answer is the identity itself - `server_time`, the two numbers, a device token -
-     * and no `code`. Reading the absent field as a refusal threw away every registration that
-     * had succeeded: the playback request never went out with a registered identity, the signed
-     * endpoint answered with an empty body and the app fell back to the public page, which holds
-     * three episodes at 360p. An answer without a status field is therefore an identity.
+     * 真实的回答本身就是身份 —— server_time、两个号码、一个设备令牌 —— 没有 code。
+     * 把没出现的字段读成拒绝，会把每一次成功的注册都扔掉：取址请求从来没带着身份出去过。
      */
     @Test fun aRegistrationAnswerWithoutAStatusFieldIsStillAnIdentity() {
         val queries=mutableListOf<String>()
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             val request=chain.request(); val path=request.url.encodedPath
-            if(path==PLAYBACK_PATH) queries+=request.url.query.orEmpty()
+            if(path==TAB_PATH) queries+=request.url.query.orEmpty()
             val body=when(path) {
                 REGISTER_PATH -> REGISTERED
-                PLAYBACK_PATH -> inlinePlaybackAnswer(inlineRendition("1080p","bytevc1")).toString()
+                TAB_PATH -> tabAnswer(inlineRendition("1080p","bytevc1")).toString()
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -391,6 +403,12 @@ class ContentRepositoryTest {
         assertTrue(paths.toString(),paths.none { it==PLAYBACK_PATH })
     }
 
+    /**
+     * 老的三道门依次退到公开页。
+     *
+     * 2026-11-10 起新门（App 自己用的那条 GET 路）在最前面；它空答的时候才是老的签名门，
+     * 签名门也什么都没带回来才轮到公开页 —— 公开页只有 10 秒试看，是最后一条路。
+     */
     @Test fun streamTriesTheSignedEndpointBeforeFallingBackToThePublicPage() {
         val paths=mutableListOf<String>()
         val repo=repository { request -> paths+=request.url.encodedPath; if(request.url.encodedPath==MODEL_PATH) REFUSED else """{"contentUrl":"https://hongguoduanju.com/video/public/123/360p.mp4"}""" }
@@ -398,7 +416,9 @@ class ContentRepositoryTest {
         // The whole wave goes to the signed endpoint; the public page is the second door, and it
         // is only opened once the wave has come back with nothing usable.
         assertEquals(SignedRetryPolicy.WAVE_SIZE,paths.count { it==MODEL_PATH })
-        assertEquals(listOf("/player/456/123"),paths.filter { it!=MODEL_PATH })
+        // 新门在最前面：它空答之后才是签名门和公开页。
+        assertTrue(paths.toString(),paths.indexOf(TAB_PATH)<paths.indexOf(MODEL_PATH))
+        assertEquals(listOf("/player/456/123"),paths.filter { it!=MODEL_PATH && it!=TAB_PATH })
     }
 
     @Test fun streamFallsBackToThePublicPlayerPage() {
@@ -582,6 +602,7 @@ class ContentRepositoryTest {
             val body=when {
                 path==REGISTER_PATH -> REGISTERED
                 path==PLAYBACK_PATH -> REFUSED
+                path==TAB_PATH -> ""
                 path==MODEL_PATH -> { if(attempts.getAndIncrement()%2==0) "" else """{"code":0,"data":{"video_model":"{\"fallback_api\":\"$FALLBACK\"}"}}""" }
                 path=="/video/fplay/1/x" -> """{"video_info":{"data":{"key_seed":"$KEY_SEED","video_list":{"video_5":${rendition("1080p","bytevc1")}}}}}"""
                 else -> throw AssertionError("unexpected request ${chain.request().url}")
@@ -639,6 +660,7 @@ class ContentRepositoryTest {
     private fun repository(
         clock: () -> Long = System::currentTimeMillis,
         playback: String = REFUSED,
+        tab: String = "",
         register: (Request) -> String = { REGISTERED },
         respond: (Request) -> String
     ) = ContentRepository(
@@ -647,6 +669,7 @@ class ContentRepositoryTest {
             val body = when (request.url.encodedPath) {
                 REGISTER_PATH -> register(request)
                 PLAYBACK_PATH -> playback
+                TAB_PATH -> tab
                 else -> respond(request)
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)

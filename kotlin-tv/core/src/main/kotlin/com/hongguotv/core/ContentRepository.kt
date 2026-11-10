@@ -834,11 +834,27 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         }
     }
     /**
-     * Asks the three doors in the order that answers today.
+     * Asks the doors in the order that answers today.
      *
      * The doors themselves are described on [stream]; this is where the order is decided.
      */
     private fun streamDoors(seriesId: String, id: String, maxQuality: Int, window: List<String>): StreamInfo {
+        // App 自己用的那条 GET 路先问：2026-11-10 它是唯一还在答的取址接口。
+        try { return tabStream(id,maxQuality) }
+        catch(tab: Exception) {
+            // 它空答时站方没说原因，往后退回老门；老门也空答才轮到公开页（只有 10 秒试看）。
+            if(fallbackCannotHelp(tab)) throw tab
+            try { return streamDoorsLegacy(seriesId,id,maxQuality,window) }
+            catch(legacy: Exception) { legacy.addSuppressed(tab); throw legacy }
+        }
+    }
+    /**
+     * 老的三道门：注册身份 → 签名 POST → 公开页。
+     *
+     * 2026-11-10 起站方把 POST /novel/player/multi_video_model/v1/ 这一族关掉了（带签名的
+     * 请求一律 HTTP 200 + 0 字节），所以这一串只剩公开页还有用 —— 但公开页只有 10 秒试看。
+     */
+    private fun streamDoorsLegacy(seriesId: String, id: String, maxQuality: Int, window: List<String>): StreamInfo {
         try { return registeredStream(id,maxQuality,window) }
         catch(registered: Exception) {
             // The signed door sits on the same host as the registered one, so when the first
@@ -866,6 +882,109 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
                 }
             }
         }
+    }
+    /**
+     * 一集播放地址，走官方 App 现在用的那条 GET 路。
+     *
+     * 2026-11-10 实测：站方把 POST /novel/player/multi_video_model/v1/ 这一族关掉了 —— 带签名的
+     * 请求一律回 HTTP 200 + 0 字节（软拦截，看不到任何错误码）。换成 App 现在这条
+     * GET /reading/bookapi/video_tab/multi_video_model/v1/ 之后，同一集一次就取回完整模型
+     * （约 23 KB，code=0，video_list 内联五档）。
+     *
+     * 这条路有三个要点，缺一个就又是 0 字节：
+     *
+     * 1. 参数全在 query 上，body 是空的：video_id / video_id_type / device_level /
+     *    need_all_video_definition / need_mp4_align / use_os_player / video_platform /
+     *    source / from_video_id。少一个，服务端回 100103 PARAM_INVALID。
+     * 2. 身份是一次性的：同一个注册身份第二次取流就回 0 字节，所以每取一集都要新注册一次。
+     * 3. 签名照旧六个头，签名把 query 和 body 一起算；这里没有 body，body 的 md5 记作
+     *    16 个零字节（与站方 App 一致）。
+     *
+     * 这条路本来就是 App 自己用的那条（官方 APK 里 GetVideoModelRequest 的参数名就是
+     * snake_case），所以它比网页版那条 POST 稳。
+     */
+    private fun tabStream(id: String, maxQuality: Int): StreamInfo {
+        cachedAddress(id)?.let { return it }
+        val model=tabVideoModel(id) ?: throw EmptySignedAnswerException()
+        val stream=episodeStream(model,maxQuality)
+        rememberAddress(id,stream)
+        return stream
+    }
+    /**
+     * 播放模型：一次全新身份、一次请求；空答就换一个新身份再来一次。
+     *
+     * 身份是站方发的一次性凭证（见上面第 2 点），所以每次取址都要重新注册；注册本身
+     * 有配额，被拒时 [RegistrationUnavailableException] 直接往外抛，不该被当成空答。
+     */
+    private fun tabVideoModel(id: String): JSONObject? {
+        var failure: Exception?=null
+        var empty=false
+        for(attempt in 0..1) {
+            val identity=try { takePlaybackIdentity() }
+            catch(e: Exception) { failure=e; continue }
+            val model=try { tabVideoModelOnce(id,identity) }
+            catch(e: Exception) { failure=e; continue }
+            if(model!=null) return model
+            empty=true
+        }
+        // 空答是站方的软拦截（HTTP 200 + 0 字节），不是这一集没有片源。
+        if(!empty && failure!=null) throw failure
+        throw EmptySignedAnswerException().also { e -> failure?.let { e.addSuppressed(it) } }
+    }
+    /**
+     * 一次 GET 请求的播放模型；空答、结构不对、业务码非 0 都算没有。
+     */
+    private fun tabVideoModelOnce(id: String, identity: PlaybackIdentity): JSONObject? {
+        val device=LinkedHashMap<String,String>(PLAYBACK_DEVICE_PARAMS)
+        device["device_id"]=identity.deviceId
+        device["iid"]=identity.iid
+        // App 这条 GET 把参数写在 query 上，body 是空的。
+        device["video_id"]=id
+        device["video_id_type"]="0"
+        device["device_level"]=PLAYBACK_DEVICE_LEVEL.toString()
+        device["need_all_video_definition"]="1"
+        device["need_mp4_align"]="0"
+        device["use_os_player"]="0"
+        device["video_platform"]="1024"
+        device["source"]="0"
+        device["from_video_id"]=""
+        for(host in PLAYBACK_HOSTS) {
+            val text=try { tabVideoModelText(host,device) } catch(e: Exception) { "" }
+            if(text.isBlank()) continue
+            val root=runCatching { JSONObject(text) }.getOrNull() ?: continue
+            val code=if(root.has("code")) root.optInt("code",-1) else root.optInt("Code",-1)
+            if(code!=0) continue
+            val data=root.optJSONObject("data") ?: continue
+            // 模型挂在 video_model_data 下面这一集的位置上；老形状直接挂在 data 下面。
+            val rows=data.optJSONObject("video_model_data") ?: data
+            val row=rows.optJSONObject(id)
+                ?: rows.keys().asSequence().mapNotNull { rows.optJSONObject(it) }.firstOrNull()
+                ?: continue
+            val raw=row.opt("video_model") ?: continue
+            val model=when(raw) {
+                is JSONObject -> raw
+                is String -> runCatching { JSONObject(raw) }.getOrNull()
+                else -> null
+            } ?: continue
+            // 没有片源、也没有第二个地址，就是这一集没有可播的东西。
+            if((model.optJSONArray("video_list")?.length() ?: 0)==0 && !model.has("fallback_api")) continue
+            return model
+        }
+        return null
+    }
+    /**
+     * 一次签名的 GET：query 与六个签名头一起发给站方。
+     */
+    private fun tabVideoModelText(host: String, device: Map<String,String>): String {
+        val signed=signer.sign("https://$host" + PLAYBACK_TAB_PATH,device)
+        val request=Request.Builder().url(signed.url)
+        for((k,v) in signed.headers) request.header(k,v)
+        request.header("User-Agent",VendorConstants.VIDEO_UA)
+        request.get()
+        return addressLookup { client -> RequestScope.execute(client.newCall(request.build())) { response ->
+            if(!response.isSuccessful) throw HttpStatusException(response.code)
+            response.body?.string() ?: ""
+        } }
     }
     /**
      * The playback endpoint as it answers today.
@@ -944,9 +1063,32 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         if(playableRenditions(model).isNotEmpty()) return pickStream(model,maxQuality)
         val fallback=fallbackApi(model)
         if(!fallback.startsWith("https://")) throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
+        val info=fallbackInfo(fallback)
+        if(playableRenditions(info).isNotEmpty()) return pickStream(info,maxQuality)
+        // 全档都是 ByteVC2：这一集的内联模型和它的备用地址都只给了电视解不了的编码。
+        // 官方播放器这时会带着 codec_type 再要一次备用地址。2026-11-10 实测（漫剧
+        // 《重生后我给emo修士当狗》第一集 7703473857562151961）：codec_type=3 才给 ByteVC1
+        // （HEVC，电视能放），codec_type=0/1/2/4/5 以及不带这个参数都只给 ByteVC2。
+        val compatible=fallbackInfo(fallbackWithCodec(fallback,"3"))
+        return pickStream(compatible,maxQuality)
+    }
+    /**
+     * 备用地址（fallback_api）回来的播放信息。
+     */
+    private fun fallbackInfo(fallback: String): JSONObject {
         val outer=JSONObject(text(fallback,client=addressHttp))
-        val info=outer.optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
-        return pickStream(info,maxQuality)
+        return outer.optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
+    }
+    /**
+     * 给备用地址换一个 codec_type。
+     *
+     * 备用地址自己是带签名的（auth_policy 在 query 里），所以只能改 query，不能重签；
+     * 这里只动 codec_type 这一个参数，其余原样保留。
+     */
+    private fun fallbackWithCodec(fallback: String, codec: String): String {
+        val re=Regex("([?&])codec_type=[^&]*")
+        if(re.containsMatchIn(fallback)) return fallback.replace(re,"\$1codec_type=" + codec)
+        return fallback + (if(fallback.contains('&')) "&" else "?") + "codec_type=" + codec
     }
     /**
      * The episodes one request carries, with the wanted one among them.
@@ -1255,6 +1397,13 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
          * works when the endpoint stops singling this client out.
          */
         val PLAYBACK_HOSTS = listOf("api5-normal-sinfonlineb.fqnovel.com","api5-normal-hl.fqnovel.com")
+        /**
+         * 官方 App 现在用的取址路径（GET，参数全在 query 上）。
+         *
+         * 2026-11-10 实测：POST /novel/player/multi_video_model/v1/ 这一族已被站方关掉
+         * （带签名的请求一律 HTTP 200 + 0 字节），换成这条 GET 就一次取回完整模型。
+         */
+        const val PLAYBACK_TAB_PATH = "/reading/bookapi/video_tab/multi_video_model/v1/"
         /**
          * The user agent the playback request wears.
          *
