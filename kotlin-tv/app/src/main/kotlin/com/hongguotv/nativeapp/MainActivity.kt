@@ -1588,7 +1588,9 @@ class MainActivity: Activity() {
             root.removeAllViews(); root.setBackgroundColor(Color.BLACK)
             val view=PlayerView(this).apply {
                 useController=false; resizeMode=frameResizeMode(); isFocusable=false
-                setKeepContentOnPlayerReset(true); setShutterBackgroundColor(Color.TRANSPARENT); setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
+                // 不显示 Media3 自带的那个居中缓冲圈：切集时它正好画在上一集最后一帧的正中间，
+                // 看着像卡住了。缓冲的反馈改到底部 HUD 的文字上（见 showPlaybackStatus）。
+                setKeepContentOnPlayerReset(true); setShutterBackgroundColor(Color.TRANSPARENT); setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
             }
             playerView=view; root.addView(view,FrameLayout.LayoutParams(-1,-1))
             // 弹幕画在画面上：加在播放器之上、HUD 之下。位置取自播放进度，所以暂停、跳转、
@@ -1615,7 +1617,7 @@ class MainActivity: Activity() {
         touchController?.attach(root,{ player?.duration?.coerceAtLeast(0L) ?: 0L },{ currentPosition() })
         playbackTitle.text="${data.series.title}  ·  第 ${episodeIndex+1} 集"
         // 重试中的这一集，原因得留着：倒计时和「正在获取播放地址…」都不能把它顶掉。
-        playbackText.text=withFailureReason("正在获取播放地址…"); progressBar.progress=0; progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
+        playbackText.text=withFailureReason("正在获取播放地址…"); progressBar.progress=0; progressBar.visibility=View.VISIBLE; showPlaybackStatus()
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
         syncMediaSession()
         val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
@@ -1639,6 +1641,9 @@ class MainActivity: Activity() {
                 private fun active()=player===p && generation==ticket && p.currentMediaItem?.mediaId==requestedId
                 override fun onPlaybackStateChanged(state: Int) {
                     if(!active()) return
+                    // 缓冲时把 HUD 亮起来：播放器自带的居中转圈已经关掉了，得有地方告诉用户「在等」。
+                    // 恢复播放后 onIsPlayingChanged 会再走一次 showHud，几秒后自动收起。
+                    if(state==Player.STATE_BUFFERING) showHud()
                     if(state==Player.STATE_READY) {
                         if(!p.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)) {
                             playerFailure(PlaybackException("资源没有可解码的视频轨道",null,PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED))
@@ -1826,6 +1831,18 @@ class MainActivity: Activity() {
             autoRecovery=true; scheduleRecovery()
         }
         android.util.Log.w("HongguoTV","Playback failure: ${problem.javaClass.simpleName}"+(if(problem is PlaybackException) " code=${problem.errorCodeName}" else ""))
+    }
+    /**
+     * 起播/切集期间的提示：底部 HUD 留在屏幕上，替掉播放器自带的那个居中缓冲圈。
+     *
+     * 切集时播放器要重新建解码器、重新拉流，中间必然有一段缓冲。原来这段缓冲是画面正中
+     * 一个转圈，而遮罩已经是透明的、上一集的最后一帧还留在画面上，那个圈就叠在旧画面
+     * 中间，很像卡死。改成 HUD 上的「正在获取播放地址…」「缓冲中」，既不挡画面中间，
+     * 也还能让人知道这一集在加载。
+     */
+    private fun showPlaybackStatus() {
+        panel=false; controls.visibility=View.GONE; controls.clearFocus()
+        hud.visibility=View.VISIBLE; updatePlaybackText()
     }
     private fun hidePlaybackOverlay() {
         main.removeCallbacks(hideHud)

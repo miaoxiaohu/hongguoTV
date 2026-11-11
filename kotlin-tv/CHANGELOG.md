@@ -4,6 +4,19 @@
 
 电视「检查更新」弹窗里那句短说明，取自每份 `RELEASE_<版本>.md` 中 `<!-- notes -->` 与 `<!-- /notes -->` 之间的块，改文件别动标记。
 
+## 0.9.95 · 切集时画面正中那个转圈没有了
+
+切到下一集时屏幕正中会冒出一个转圈的等待图标，叠在上一集的最后一帧上，看着像卡住了。
+那是 Media3 自带的缓冲圈，画在画面正中；切集要重建解码器、重新拉流，必然经过缓冲状态，
+它就转在那儿。这一版把它关掉，缓冲的提示改到底部 HUD 的文字上。→ [完整说明](RELEASE_0.9.95.md)
+
+- **关掉系统那个圈**：`PlayerView.setShowBuffering(SHOW_BUFFERING_NEVER)` —— 画面正中不再有任何图标。
+  不用 `SHOW_BUFFERING_WHEN_PLAYING`：切集时 `playWhenReady` 就是 true，它照样显示。
+- **提示挪到底部 HUD**（`showPlaybackStatus()`）：切集/起播时 HUD 留在屏幕上，
+  文字是「正在获取播放地址…」/「正在缓冲…」；播放中遇到抖动进入 `STATE_BUFFERING` 也会亮一下。
+- **没有正中图标也不丢反馈**：恢复播放后 HUD 自动收起。
+- 单测：`:app:testDebugUnitTest` 全绿；lint：`:app:lintDebug` BUILD SUCCESSFUL（0 error）。
+
 ## 0.9.94 · 站方又收紧了签名校验，换上真的 551 Argus / Ladon
 
 上一版改走的那条 GET 路本身是通的，但签名头一直是**占位的** —— `x-ladon`/`x-argus`

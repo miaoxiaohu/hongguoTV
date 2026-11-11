@@ -689,6 +689,16 @@ iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
 - **tab 取址用独立版本资料**：`VIDEO_TAB_DEVICE_PARAMS`（73932 / 7.3.9.32）+ `PLAYBACK_TAB_UA`；
   老 POST 门的 `PLAYBACK_DEVICE_PARAMS`（71332 / 7.1.3.32）保留，两条路**不混用**。
 
+## 播放页的缓冲提示（2026-11-11 定，别改回去）
+
+- **画面正中不许有等待图标**：Media3 `PlayerView` 自带的 `exo_buffering` 缓冲圈是
+  `SHOW_BUFFERING_ALWAYS` 开着的，**已改成 `SHOW_BUFFERING_NEVER`**。
+  切集时它正好画在上一集最后一帧的正中间（遮罩 0.9.58 起已透明、旧帧还留着），看着像卡住。
+  ⚠️ 别用 `SHOW_BUFFERING_WHEN_PLAYING` 顶替 —— 切集时 `playWhenReady` 就是 true，一样显示。
+- **反馈改走底部 HUD**：切集/起播时 `showPlaybackStatus()` 点亮 HUD（文字「正在获取播放地址…」/「正在缓冲…」）；
+  播放中进入 `STATE_BUFFERING` 时 `onPlaybackStateChanged` 调 `showHud()`；恢复播放后自动收起。
+- **切集那一下的黑屏还在**：那是解码器重建期间画面本身是空的，跟缓冲圈是两回事（见 `RELEASE_0.9.58.md`）。
+
 ### 四、取证与验证
 
 - 判定「是不是签名问题」的最快办法：**同一份请求换真签名** —— 站方正常回内容即坐实。
