@@ -13,6 +13,15 @@
 - https://github.com/tsukiyo-zero/hongguoTV
 - 本版改动：改为无状态 `register(http, now)`（不持有进程级单例），由调用方持有身份；注册响应没有状态字段时按成功处理；播放取址的降级顺序为 注册身份 → 旧签名接口 → 公开网页。
 
+`core` 中播放取址的真签名（`core/src/main/kotlin/com/hongguotv/core/Argus.kt`：551 Argus 的 protobuf / Simon / AES-CBC，Ladon 的 34 轮 ARX，签名头 `x-ss-req-ticket`、`x-khronos`、`x-ladon`、`x-argus`）是以下 GPL-3.0 源码的 Kotlin 移植：
+
+- N3urda/hongguoTV, `kotlin-tv/core/src/main/kotlin/com/hongguotv/core/Argus.kt`
+- https://github.com/N3urda/hongguoTV
+- 它本身又是 ch6vip/fqapp 的 rust `src/sign/{argus,simon,ladon,gorgon,protobuf}.rs` 的移植：https://github.com/ch6vip/fqapp
+- 算法与协议常量对照 sunnysky123/hongguo-web 的 `server/src/core/playback-sign.js`（同为 GPL-3.0）。
+- 本版改动：移植到电视端 core，取址这条 GET 改用真签名；query 的百分号编码照抄站方 App（`*` 不转义）；身份补上 `cdid`；tab 取址用独立的版本资料（73932 / 7.3.9.32）。
+
+
 `kotlin-tv/` 原生应用源码和派生实现以 GPL-3.0-only 发布，许可证全文见 `LICENSE`。发布 APK 时同时提供本分支对应源码、Gradle 包装器和构建说明。APK 不包含 Node、React Native、JavaScript 引擎或该 JavaScript 源文件。`tools/signing-oracle.cjs` 仅为开发期生成对照测试数据的工具，不参与应用构建或运行。
 
 其他依赖：

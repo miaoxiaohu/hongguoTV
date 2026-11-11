@@ -194,10 +194,11 @@ class ContentRepositoryTest {
     }
 
     /**
-     * 取址请求带着注册身份和签名。
+     * 取址请求带着注册身份和真签名。
      *
-     * 2026-11-10：请求发往官方 App 现在用的那条 GET 路。身份是一次性凭证，所以身份得写在
-     * query 上；六个签名头照旧要带 —— 少了签名头，站方回的同样是 HTTP 200 + 0 字节。
+     * 2026-11-11：请求发往官方 App 现在用的那条 GET 路。身份是一次性凭证，所以身份得写在
+     * query 上；签名头也换成了真的 551 Argus / Ladon —— 占位签名（时间戳的 base64）会被
+     * 站方软拦截成 HTTP 200 + 0 字节。
      */
     @Test fun thePlaybackRequestCarriesTheRegisteredIdentityAndTheSignature() {
         val queries=mutableListOf<String>()
@@ -221,18 +222,31 @@ class ContentRepositoryTest {
         assertEquals(1,queries.size)
         assertTrue(queries.first(),queries.first().contains("device_id=3313301318833834"))
         assertTrue(queries.first(),queries.first().contains("iid=3313301318833834"))
+        // cdid 是注册 body 里那个身份的一部分，取址 query 也得带上它。
+        assertTrue(queries.first(),queries.first().contains("cdid="))
         // 这条 GET 把参数全写在 query 上，body 是空的。
         assertTrue(queries.first(),queries.first().contains("video_id=123"))
-        // The six signature headers the endpoint asks for.
-        for(header in listOf("X-Argus","X-Gorgon","X-Medusa","X-Khronos","X-Ladon","X-Helios"))
+        // 取址这一档的客户端版本是 73932 / 7.3.9.32，跟注册 body 一致。
+        assertTrue(queries.first(),queries.first().contains("version_name=7.3.9.32"))
+        // 真签名的四个头：请求票据、时钟、Ladon、Argus。
+        for(header in listOf("X-Ss-Req-Ticket","X-Khronos","X-Ladon","X-Argus"))
             assertTrue(header,headers.first().contains(header,ignoreCase=true))
+        // 无正文，所以没有 x-ss-stub；占位签名那套头也不该再出现。
+        assertFalse(headers.first().contains("X-Ss-Stub",ignoreCase=true))
     }
 
 
 
-    /** The screen resolution is part of the query, so it has to be encoded the way the app does. */
+    /**
+     * The screen resolution is part of the query, so it has to be encoded the way the app does.
+     *
+     * 站方 App 的编码器（`encodeURIComponent` + 显式转 `!'()`）**不转义** `*`，
+     * 所以 `resolution=1280*2772` 的星号原样留在 query 上。
+     * 2026-11-11 之前这里转成了 %2A —— 那时用的是占位签名，服务端不校验 query 字节；
+     * 换成真签名后query 的每一个字节都要跟上游一致，所以只能照抄上游。
+     */
     @Test fun thePlaybackQueryEncodesTheScreenResolutionLikeTheAppDoes() {
-        assertEquals("1280%2A2772",ContentRepository.playbackEncode("1280*2772"))
+        assertEquals("1280*2772",ContentRepository.playbackEncode("1280*2772"))
         assertEquals("wifi",ContentRepository.playbackEncode("wifi"))
         assertEquals("%E4%B8%AD%E6%96%87",ContentRepository.playbackEncode("中文"))
     }

@@ -4,6 +4,23 @@
 
 电视「检查更新」弹窗里那句短说明，取自每份 `RELEASE_<版本>.md` 中 `<!-- notes -->` 与 `<!-- /notes -->` 之间的块，改文件别动标记。
 
+## 0.9.94 · 站方又收紧了签名校验，换上真的 551 Argus / Ladon
+
+上一版改走的那条 GET 路本身是通的，但签名头一直是**占位的** —— `x-ladon`/`x-argus`
+只是把时间戳做了 base64，没有跟设备、跟 query 绑定。站方 2026-11-11 收紧校验之后，
+这种签名一律被软拦截成 HTTP 200 + 0 字节，电视上表现为「播放失败，已自动重试 3 次」。
+这一版把真的 551 Argus / Ladon 签名移植进电视端（纯 Kotlin，不加任何新依赖），取址一次成功。→ [完整说明](RELEASE_0.9.94.md)
+
+- **真签名**：protobuf → Simon（128 位密钥、64 位分组、72 轮）→ AES-CBC；Ladon 34 轮 ARX。
+- **签名头只有四个**：`x-ss-req-ticket` / `x-khronos` / `x-ladon` / `x-argus`；无正文所以不带 `Content-Type`/gzip/`x-ss-stub`。
+- **query 照抄 App 的编码规则**：`encodeURIComponent` 语义 + 显式转 `!'()`，**`*` 不转义**。
+  签名按 query 字节算，多编一个字符就是 HTTP 200 + 0 字节。
+- **身份带上 `cdid`**：取址 query 有 `device_id`/`iid`/`cdid` 三个字段，`cdid` 必须与注册 body 里那个相同。
+- **tab 取址用独立版本资料**（73932 / 7.3.9.32 + 对应 UA）；老 POST 门那份（71332）原样保留，两条路不混用。
+- 探针：`--play=real-drama` 与 `--play=comic-drama` 各 8 集全通过，全部 1080P、实读 1 MB 媒体字节。
+- 媒体编码：三个真实 streamUrl 扫 moov，全部 `moov/hvc1/mp4a` 为真（HEVC + AAC，电视能解）。
+- 单测：`:core:test` 全绿（396 项）；lint：`:app:lint` BUILD SUCCESSFUL。
+
 ## 0.9.93 · 站方把播放地址的接口关了，改走 App 现在用的那条路
 
 投影上放不了，界面上是「播放失败，已自动重试 3 次」。查下来目录、详情、搜索都正常，

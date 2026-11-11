@@ -935,21 +935,12 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * 一次 GET 请求的播放模型；空答、结构不对、业务码非 0 都算没有。
      */
     private fun tabVideoModelOnce(id: String, identity: PlaybackIdentity): JSONObject? {
-        val device=LinkedHashMap<String,String>(PLAYBACK_DEVICE_PARAMS)
-        device["device_id"]=identity.deviceId
-        device["iid"]=identity.iid
-        // App 这条 GET 把参数写在 query 上，body 是空的。
-        device["video_id"]=id
-        device["video_id_type"]="0"
-        device["device_level"]=PLAYBACK_DEVICE_LEVEL.toString()
-        device["need_all_video_definition"]="1"
-        device["need_mp4_align"]="0"
-        device["use_os_player"]="0"
-        device["video_platform"]="1024"
-        device["source"]="0"
-        device["from_video_id"]=""
+        // 签名绑的是「最终 query 原文 + 实际发送的 body」，所以 query 只拼一次，
+        // 两个域名用的是同一份 query 与同一份签名。
+        val ts=clock()/1000
+        val query=tabQuery(id,identity,ts,clock())
         for(host in PLAYBACK_HOSTS) {
-            val text=try { tabVideoModelText(host,device) } catch(e: Exception) { "" }
+            val text=try { tabVideoModelText(host,query,ts) } catch(e: Exception) { "" }
             if(text.isBlank()) continue
             val root=runCatching { JSONObject(text) }.getOrNull() ?: continue
             val code=if(root.has("code")) root.optInt("code",-1) else root.optInt("Code",-1)
@@ -973,13 +964,59 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         return null
     }
     /**
-     * 一次签名的 GET：query 与六个签名头一起发给站方。
+     * 取址这条 GET 的 query，参数顺序照抄站方 App。
+     *
+     * 顺序不是排版问题：签名把 query 的字节原样算进去，顺序变了就是另一份签名。
+     * App 的写法是「设备字段 → 注册身份（device_id / iid / cdid）→ 业务参数 → ts / _rticket」。
+     *
+     * - 设备字段用 [VIDEO_TAB_DEVICE_PARAMS]（73932 / 7.3.9.32），跟注册 body 对得上；
+     * - 身份是站方发的一次性凭证，三个字段都得带上（cdid 就是注册 body 里那个）；
+     * - 业务参数全在 query 上，body 是空的；少一个服务端回 100103 PARAM_INVALID；
+     * - ts 是秒，_rticket 是毫秒。
      */
-    private fun tabVideoModelText(host: String, device: Map<String,String>): String {
-        val signed=signer.sign("https://$host" + PLAYBACK_TAB_PATH,device)
-        val request=Request.Builder().url(signed.url)
-        for((k,v) in signed.headers) request.header(k,v)
-        request.header("User-Agent",VendorConstants.VIDEO_UA)
+    private fun tabQuery(id: String, identity: PlaybackIdentity, ts: Long, ticket: Long): String {
+        val values=LinkedHashMap<String,String>(VIDEO_TAB_DEVICE_PARAMS)
+        values["device_id"]=identity.deviceId
+        values["iid"]=identity.iid
+        values["cdid"]=identity.cdid
+        // App 这条 GET 把参数写在 query 上，body 是空的。
+        values["video_id"]=id
+        values["video_id_type"]="0"
+        values["device_level"]=PLAYBACK_DEVICE_LEVEL.toString()
+        values["need_all_video_definition"]="1"
+        values["need_mp4_align"]="0"
+        values["use_os_player"]="0"
+        values["video_platform"]="1024"
+        values["source"]="0"
+        values["from_video_id"]=""
+        values["ts"]=ts.toString()
+        values["_rticket"]=ticket.toString()
+        return values.entries.joinToString("&") { (k,v) -> playbackEncode(k)+"="+playbackEncode(v) }
+    }
+    /**
+     * 一次签名的 GET：query 与真签名头一起发给站方。
+     *
+     * 2026-11-11 起这里换掉了占位签名（x-argus / x-ladon 只是时间戳的 base64）：
+     * 站方收下占位签名，一律回 HTTP 200 + 0 字节，既不报错也不说是限流。
+     * 现在用的是真的 551 Argus / Ladon，见 [PlayerSigner]。
+     *
+     * 头只带这条 GET 该带的：无正文，所以没有 Content-Type、没有 gzip、没有 x-ss-stub；
+     * 带 x-tt-request-tag，passport-sdk-version 用 tab 这一档的 50561。
+     */
+    private fun tabVideoModelText(host: String, query: String, ts: Long): String {
+        val signature=PlayerSigner.headers(query,null,ts)
+        val request=Request.Builder().url("https://$host"+PLAYBACK_TAB_PATH+"?"+query)
+        request.header("User-Agent",PLAYBACK_TAB_UA)
+        request.header("Accept","application/json; charset=utf-8,application/x-protobuf")
+        request.header("sdk-version","2")
+        request.header("x-xs-from-web","0")
+        request.header("passport-sdk-version","50561")
+        request.header("x-ss-dp","8662")
+        for((k,v) in signature) request.header(k,v)
+        request.header("x-tt-dt","")
+        request.header("x-tt-store-region","cn")
+        request.header("x-tt-store-region-src","did")
+        request.header("x-tt-request-tag","t=0;n=0")
         request.get()
         return addressLookup { client -> RequestScope.execute(client.newCall(request.build())) { response ->
             if(!response.isSuccessful) throw HttpStatusException(response.code)
@@ -1496,17 +1533,41 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             "is_android_pad_screen" to "0"
         )
         /**
+         * 取址这条 GET 用的客户端版本（73932 / 7.3.9.32）。
+         *
+         * 与注册 body 里的版本资料一致：站方 App 自己这条取址路就是这么发的，
+         * UA、query 里的版本字段、注册 body 三处必须说同一个版本。
+         * 下面那份 [PLAYBACK_DEVICE_PARAMS]（71332 / 7.1.3.32）是老 POST 门用的，两条路不能混用。
+         */
+        val VIDEO_TAB_DEVICE_PARAMS: Map<String, String> = linkedMapOf(
+            "ac" to "wifi", "channel" to "update_64", "aid" to "8662", "app_name" to "novelread",
+            "version_code" to "73932", "version_name" to "7.3.9.32", "device_platform" to "android",
+            "os" to "android", "ssmix" to "a", "device_type" to "25053RT47C", "device_brand" to "Redmi",
+            "language" to "zh", "os_api" to "36", "os_version" to "16", "manifest_version_code" to "73932",
+            "resolution" to "1280*2772", "dpi" to "520", "update_version_code" to "73932",
+            "host_abi" to "arm64-v8a", "dragon_device_type" to "phone", "pv_player" to "73932",
+            "compliance_status" to "0", "need_personal_recommend" to "1", "player_so_load" to "1",
+            "is_android_pad_screen" to "0"
+        )
+        /**
+         * 取址这条 GET 戴的 UA：视频 UA，把客户端版本换成 73932。
+         */
+        const val PLAYBACK_TAB_UA = "com.phoenix.read/73932 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
+        /**
          * Percent-encoding for the playback query.
          *
-         * Everything but the unreserved characters is encoded, including the `*` in the screen
-         * resolution - the app's own encoder does the same, and a query that encodes one
-         * character differently is a different query.
+         * 站方 App 自己的编码规则：`encodeURIComponent` 的语义，再把 `!'()` 显式转成 %XX。
+         * 与 `encodeURIComponent` 只差一处：`*` **不转义** ——
+         * `resolution=1280*2772` 里的星号原样留在 query 上。
+         *
+         * 签名是按 query 的字节算的，多编一个字符，服务端算出来的摘要就对不上，
+         * 表现是 HTTP 200 + 0 字节，连错误码都没有。所以这里只能照抄，不能「顺手更严」。
          */
         fun playbackEncode(value: String): String {
             val out=StringBuilder()
             for(byte in value.toByteArray(Charsets.UTF_8)) {
                 val v=byte.toInt() and 255
-                if(v in 65..90 || v in 97..122 || v in 48..57 || v==45 || v==95 || v==46 || v==126) out.append(v.toChar())
+                if(v in 65..90 || v in 97..122 || v in 48..57 || v==45 || v==95 || v==46 || v==126 || v==42) out.append(v.toChar())
                 else out.append('%').append("%02X".format(v))
             }
             return out.toString()

@@ -647,3 +647,48 @@ iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
 - **别拿「同一台机器别的功能都正常」当结论**：目录/详情/搜索全好，说明网络没问题，
   但不代表取址那条路还开着。取址接口是**单独**被关的。
 - **空答 + 200 + `server: volc-dcdn` = 站方软拦截**，看到这个组合就去找新门，别调网络层。
+
+## 播放取址的签名（2026-11-11 站方收紧校验，定，别改回去）
+
+上面「播放取址接口变更」里「六个签名头照旧」那条**从 2026-11-11 起作废** ——
+接口没关，是**签名**被收紧了。
+
+### 一、软拦截长什么样
+
+- 老 `Signer` 的 `x-ladon = base64(be32(ts))`、`x-argus = base64(le32(ts))` 是**占位签名**，
+  根本没有跟设备、跟 query 绑定的内容。
+- 站方 2026-11-11 起对占位签名**一律回 HTTP 200 + 0 字节**，响应头 `server: volc-dcdn`，
+  跟「POST 族已死」那个软拦截长得一模一样 —— 所以**看到这个组合，先怀疑签名，再怀疑接口**。
+- 跟网络、跟 Passwall 节点**无关**（国内直连同样被拦）。别再去动网络层。
+
+### 二、现在用的是真签名
+
+- core `Argus.kt`：551 Argus（protobuf → Simon 128 位密钥/64 位分组/72 轮 → AES-CBC）+ Ladon（34 轮 ARX）。
+  移植自 N3urda/hongguoTV 的同名文件（它本身是 ch6vip/fqapp 的 rust 实现的移植），GPL-3.0-only，
+  署名已记入 `kotlin-tv/NOTICE.md`。
+- **取址这条 GET 的签名头只有四个**：`x-ss-req-ticket`、`x-khronos`、`x-ladon`、`x-argus`。
+  无正文 → 不带 `Content-Type`、不带 gzip、不带 `x-ss-stub`。另有 tab 头（`sdk-version=2`、
+  `passport-sdk-version=50561`、`x-ss-dp=8662`、`x-tt-store-region=cn`、`x-tt-request-tag=t=0;n=0` 等）。
+- 老 POST 门的 `Signer.sign`（六个头）原样保留作回退，**别删** —— 站方哪天放回来还能用。
+
+### 三、query 的字节必须和 App 一字不差（最容易踩）
+
+签名是按 **query 原文 + 实际发送的 body** 算的，所以：
+
+- **参数顺序**：设备字段 → `device_id`/`iid`/`cdid` → 业务参数 → `ts`（秒）→ `_rticket`（毫秒）。
+- **百分号编码**：App 用 `encodeURIComponent` 语义 + 显式转 `!'()`，**唯一差别是 `*` 不转义**。
+  老代码「非 unreserved 一律转义」把 `resolution=1280*2772` 编成 `%2A`，**多编一个字符就 0 字节**。
+  → `playbackEncode` 里 `v==42` 必须留在「不转义」那一档。
+- **身份要带 `cdid`**：`PlaybackIdentity` 现在是三字段（`deviceId`, `iid`, `cdid`），
+  `cdid` **必须与注册 body 里那个相同** —— 注册时生成一次、随身份带出去，不要每请求新生成。
+- **tab 取址用独立版本资料**：`VIDEO_TAB_DEVICE_PARAMS`（73932 / 7.3.9.32）+ `PLAYBACK_TAB_UA`；
+  老 POST 门的 `PLAYBACK_DEVICE_PARAMS`（71332 / 7.1.3.32）保留，两条路**不混用**。
+
+### 四、取证与验证
+
+- 判定「是不是签名问题」的最快办法：**同一份请求换真签名** —— 站方正常回内容即坐实。
+  反过来，**把 query 里一个字符的编码改掉**（多编一个 `*`）站方又回 0 字节，
+  两个对照一起说明站方在按 query 原文算签名。
+- 探针两个分类各 8 集全过（2026-11-11：real-drama 8/8、comic-drama 8/8，全部 1080P、实读 1 MB）。
+- 媒体编码核对：对真实 `streamUrl` Range 抓前 512 KB 扫 moov，
+  期望 `moov/hvc1/mp4a` 全为真、`bvc2/avc1` 为假（脚本见 `tmp/fourcc.ps1`，本地产物不提交）。

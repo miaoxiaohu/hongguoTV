@@ -19,10 +19,14 @@ import javax.crypto.spec.SecretKeySpec
 /**
  * The identity the playback endpoint accepts.
  *
- * Only the two numbers the endpoint checks are kept: they are what the playback request carries
- * in its query, and nothing else about the registered device is used or stored.
+ * Three fields, and the third one matters as much as the first two: the playback request's
+ * query carries `device_id`, `iid` and `cdid`, and the signature is computed over that very
+ * query. `cdid` is the id the registration body was built with, so it has to come back out of
+ * the registration unchanged - it is not a fresh random value per request.
+ *
+ * Nothing else about the registered device is used or stored.
  */
-internal data class PlaybackIdentity(val deviceId: String, val iid: String)
+internal data class PlaybackIdentity(val deviceId: String, val iid: String, val cdid: String)
 
 /**
  * The anonymous playback device.
@@ -75,7 +79,10 @@ internal object PlaybackDevice {
      *   numbers the playback request needs.
      */
     fun register(http: OkHttpClient, now: Long): PlaybackIdentity {
-        val body = registerBody(now, UUID.randomUUID().toString())
+        // The registration body carries a cdid, and the playback query has to carry the very
+        // same one - so it is minted here and handed back with the identity.
+        val cdid = UUID.randomUUID().toString()
+        val body = registerBody(now, cdid)
         val request = Request.Builder().url(REGISTER_URL)
             .header("User-Agent", REGISTER_UA)
             .header("Accept", "application/json")
@@ -110,7 +117,7 @@ internal object PlaybackDevice {
         if (code != 0) throw PlaybackRegistrationRefusedException("播放设备注册被拒绝 code=$code")
         if (deviceId.isEmpty() || iid.isEmpty())
             throw PlaybackRegistrationRefusedException("播放设备注册没有发回可用身份（站方这次没放号，稍后再试）")
-        return PlaybackIdentity(deviceId, iid)
+        return PlaybackIdentity(deviceId, iid, cdid)
     }
 
     /**
