@@ -48,6 +48,19 @@ class ContentRepositoryTest {
     private val PUBLIC_PATH = "/player/456/123"
 
     /**
+     * 一波签名请求是同时发出去的，所以记录请求路径的集合必须是线程安全的。
+     *
+     * 2026-11-11：CI 上这条断言随机红（expected:<12> but was:<11>）。实测的根因不在产品代码
+     * —— 探针跑了 200 轮，用线程安全的集合记录时每一轮都是 12 个签名请求，一次不缺；换成
+     * 普通 ArrayList 记录时有 8 轮少记 1~2 条。ArrayList.add 不是线程安全的，12 个线程同时
+     * 往里加就可能丢掉元素，于是「这一波问了 12 次」数出来是 11 次。
+     *
+     * 所以这里用 CopyOnWriteArrayList：并发写安全，元素顺序照旧（同一元素之间的先后无所谓），
+     * 断言的强度一点没变。
+     */
+    private fun requestPaths() = java.util.concurrent.CopyOnWriteArrayList<String>()
+
+    /**
      * What the registration answers.
      *
      * The live answer carries no status field at all - it is the identity itself, with a server
@@ -98,7 +111,7 @@ class ContentRepositoryTest {
         """{"definition":"$definition","codec_type":"$codec","main_url":"$mainUrl","spade_a":"$spade"}"""
 
     /** Serves the signed endpoint end to end; anything else is a routing bug. */
-    private fun signedPlayerRepository(videoList: String, seen: MutableList<String> = mutableListOf()) = repository { request ->
+    private fun signedPlayerRepository(videoList: String, seen: MutableList<String> = requestPaths()) = repository { request ->
         seen += request.url.encodedPath
         when (request.url.encodedPath) {
             // 新门（App 自己用的那条 GET 路）此刻不答，空答之后才轮到老门。
@@ -181,7 +194,7 @@ class ContentRepositoryTest {
      * 所以这里断言的是：新门答得出来的时候，老门一个都不问。
      */
     @Test fun streamAsksTheEndpointTheAppItselfUsesFirst() {
-        val paths=mutableListOf<String>()
+        val paths=requestPaths()
         val repo=repository(tab=tabAnswer(inlineRendition("1080p","bytevc1")).toString()) { request ->
             paths+=request.url.encodedPath
             throw AssertionError("the retired doors must not be asked while the new door answers")
@@ -258,7 +271,7 @@ class ContentRepositoryTest {
      * 再去问第二个地址就是白问一次。
      */
     @Test fun theInlineRenditionsArePlayedWithoutASecondAddress() {
-        val paths=mutableListOf<String>()
+        val paths=requestPaths()
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             val request=chain.request(); val path=request.url.encodedPath
             paths+=path
@@ -400,7 +413,7 @@ class ContentRepositoryTest {
      * refusal, and the playback request must not go out with an identity that was never granted.
      */
     @Test fun aRegistrationThatIsRefusedIsNotUsedAsAnIdentity() {
-        val paths=mutableListOf<String>()
+        val paths=requestPaths()
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             val request=chain.request(); val path=request.url.encodedPath
             paths+=path
@@ -424,7 +437,7 @@ class ContentRepositoryTest {
      * 签名门也什么都没带回来才轮到公开页 —— 公开页只有 10 秒试看，是最后一条路。
      */
     @Test fun streamTriesTheSignedEndpointBeforeFallingBackToThePublicPage() {
-        val paths=mutableListOf<String>()
+        val paths=requestPaths()
         val repo=repository { request -> paths+=request.url.encodedPath; if(request.url.encodedPath==MODEL_PATH) REFUSED else """{"contentUrl":"https://hongguoduanju.com/video/public/123/360p.mp4"}""" }
         repo.stream("456","123")
         // The whole wave goes to the signed endpoint; the public page is the second door, and it
@@ -454,7 +467,7 @@ class ContentRepositoryTest {
      * request is made again, and only a run of empty answers gives up on the signed path.
      */
     @Test fun emptySignedBodyStillReachesThePublicPageFallback() {
-        val paths=mutableListOf<String>()
+        val paths=requestPaths()
         val repo=repository { request ->
             paths+=request.url.encodedPath
             when(request.url.encodedPath) {
@@ -491,7 +504,7 @@ class ContentRepositoryTest {
      * the attempt returns.
      */
     @Test fun aDeadNetworkDoesNotAskThePublicPageAsWell() {
-        val paths=mutableListOf<String>()
+        val paths=requestPaths()
         // The registration answers; the network dies on the playback request itself.
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             val request=chain.request(); val path=request.url.encodedPath
@@ -509,7 +522,7 @@ class ContentRepositoryTest {
 
     /** A dropped handshake is the case that used to sit there for the whole connect timeout. */
     @Test fun aDroppedHandshakeDoesNotAskThePublicPageAsWell() {
-        val paths=mutableListOf<String>()
+        val paths=requestPaths()
         val repo=repository(register={ throw java.net.SocketTimeoutException("timeout") }) { request ->
             paths+=request.url.encodedPath; throw java.net.SocketTimeoutException("timeout")
         }
@@ -520,7 +533,7 @@ class ContentRepositoryTest {
 
     /** A lookup the person called off must not turn into another request for nobody. */
     @Test fun aCancelledLookupDoesNotAskThePublicPageAsWell() {
-        val paths=mutableListOf<String>()
+        val paths=requestPaths()
         val repo=repository(register={ throw CancelledException() }) { request ->
             paths+=request.url.encodedPath; throw CancelledException()
         }
@@ -1147,7 +1160,7 @@ class ContentRepositoryTest {
     }
 
     @Test fun searchNeverAdvertisesANextPageBecauseTheSiteRendersOnlyPageOne() {
-        val paths=mutableListOf<String>()
+        val paths=requestPaths()
         val repo=repository { request ->
             paths+=request.url.encodedPath
             searchPage(searchRow("456","测试短剧"))
@@ -1405,7 +1418,7 @@ class ContentRepositoryTest {
     }
 
     @Test fun everyRouteBrowsesItsOwnNamedRoute() {
-        val seen=mutableListOf<String>()
+        val seen=requestPaths()
         val repo=repository { request ->
             seen += request.url.encodedPath
             assertNull(request.url.queryParameter("tab"))
