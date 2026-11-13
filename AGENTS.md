@@ -210,6 +210,13 @@
   否则正式版推过去电视也不提示更新。实验版占掉 9080，正式版就得是 9081（→ versionName 0.9.81）。
 - 推 tag 前查一遍已发布的版本：`gh release list --repo miaoxiaohu/hongguoTV`，
   CI 守卫要求新 tag 的 versionCode **新于所有已发布的 kotlin-v 版本**。
+- **已发布记录**（每条 4 个资产：apk / source.zip / SHA256SUMS / update.json）：
+  0.9.90 → 0.9.91 → 0.9.92 → 0.9.93 → 0.9.94 → 0.9.95 → **0.9.96（9096）**。
+  0.9.96 一次性带了两件事：取址随机软拦截的重试修复 + 自动连播 HUD 显隐（见下面两节）。
+- 🔴 **这台机器上 `gh` CLI 的 API 调用不可用**（PowerShell 参数传递 + api.github.com 会被带去网页版，
+  返回 HTML）。改用 `curl.exe` + `gh auth token`：
+  `curl.exe -sS -H "Authorization: Bearer <token>" -H "Accept: application/vnd.github+json" https://api.github.com/repos/miaoxiaohu/hongguoTV/releases?per_page=6`
+  电视端读的那个地址（`releases/latest/download/update.json`）匿名可取，可用来确认 latest 指针。
 
 ### 发布实测（2026-11-05，kotlin-v0.9.84）
 
@@ -689,6 +696,33 @@ iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
 - **tab 取址用独立版本资料**：`VIDEO_TAB_DEVICE_PARAMS`（73932 / 7.3.9.32）+ `PLAYBACK_TAB_UA`；
   老 POST 门的 `PLAYBACK_DEVICE_PARAMS`（71332 / 7.1.3.32）保留，两条路**不混用**。
 
+## 播放取址的随机软拦截（2026-11-14 实测，别改回去）
+
+站方对取址这条 GET 是**按请求随机**回空答的（HTTP 200 + 0 字节），跟片源、跟设备、跟出口都无关。
+
+2026-11-14 探针实测（real-drama 8 集、22 个请求）：
+
+| 门 | 结果 |
+|---|---|
+| 主域 `api5-normal-sinfonlineb.fqnovel.com` | **10/10 全空**（对本站客户端一直不给） |
+| 备用域 `api5-normal-hl.fqnovel.com` | 12 次里 7 次有内容 → **42% 空答** |
+
+- 一个「尝试」= 1 个**全新身份** + 两个域各问一次 → **单次成功率只有 58%**。
+- 老代码只试 2 次 → 每集 0.42² ≈ **17.6%** 的概率两连败 → 16 集里每轮掉 2~3 集到
+  公开页（只有 10 秒试看）被判 `SampleClipException` → 探针 exit 10。
+- 🔴 **判据是「失败的是哪几集每轮都换」**：11-14 两轮实测，同一集上一轮 OK、下一轮就挂
+  （例：`7704590737282714649`、`7703473850738035737`）。所以这是站方按请求在拦，
+  **不是**某几集没片源，**也不是**本机网络/节点问题 —— 别再去调网络层。
+- **修法**：`ContentRepository.PLAYBACK_TAB_ATTEMPTS = 8` —— 空答就换一个全新身份再问，
+  问到答出来为止。命中即停 → **期望注册数几乎不变**（≈1.7 次/集，跟只试两次时同量级），
+  涨的只是尾巴：8 次全空的概率 0.42⁸ ≈ **0.09%**。
+- **注册被拒不再被空答盖住**：`takePlaybackIdentity()` 抛 `RegistrationUnavailableException`
+  时**立刻上抛**（走长退避），不再当成一次普通失败继续重试、最后以「空内容」掉到公开页 ——
+  那会让电视放 10 秒试看再报「播放失败」，完全看不出是注册的事。
+- 单测：`ContentRepositoryTest.anEmptyAnswerIsFollowedByAFreshIdentityAndAnotherAsk`、
+  `aRefusedRegistrationIsNotHiddenBehindAnEmptyAnswer`。
+
+
 ## 播放页的缓冲提示（2026-11-11 定，别改回去）
 
 - **画面正中不许有等待图标**：Media3 `PlayerView` 自带的 `exo_buffering` 缓冲圈是
@@ -726,3 +760,56 @@ iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
   是记录器数错了。要改的是记录器，不是断言。
 - ⚠️ **别再往生产代码里加「补发」**：一度以为是「12 个里有 1 个在发出前就失败」，
   探针证伪了 —— 生产代码每次都真的发出了 12 个请求。改生产代码属于没病治病。
+
+## 播放页 HUD 的显隐（2026-11-12 定，别改回去）
+
+用户在电视上看到「自动播放下一集时底部会冒出一条进度条」，查下来是 HUD 的显隐规则
+（2026-11-12 改成下面这套，别改回去）：
+
+- **进度条只在真的有进度的时候才露脸**：判定写在 core `PlaybackHudPolicy.showProgress(playbackReady)`。
+  以前切集那一行硬写 `progressBar.visibility=View.VISIBLE`，进度条在「正在获取播放地址…」阶段
+  就出来了，而那时 progress=0 —— 一条什么都不说明的 0% 进度条。
+- **自动连播切集不弹 HUD**：用户没按任何键，屏幕不该自己多出东西。`playEpisode(..., chained=true)`
+  → `PlaybackHudPolicy.showStatusOnSwitch(chained)` 为 false → HUD 保持隐藏；
+  连 `STATE_BUFFERING` 的 `showHud()` 也跳过（`chainedEpisode` 标志）。
+  **出错时照旧弹**（`playerFailure` 会把 HUD 连同失败原因一起亮出来），别把这条也一起去掉。
+- **HUD 现在收得掉了（老隐患）**：以前 `hideHud` 要求 `player?.isPlaying==true` 才收，
+  于是**缓冲中的播放器永远满足不了 → HUD 一直挂在画面上收不掉**。
+  现在按 `PlaybackHudPolicy.shouldAutoHide(isPlaying, buffering)` 判定：
+  播放中 4.5 秒收，缓冲中 12 秒收，**用户自己按的暂停不收**（暂停时 HUD 是给人看的状态）。
+- **手动切集仍弹 HUD**（用户按了、用户在等一个答复），只是进度条同样等到就绪才出现。
+- 决策全在 core `PlaybackHudPolicy`（纯函数、可单测），app 只负责执行；
+  单测见 `core/src/test/kotlin/com/hongguotv/core/PlaybackHudPolicyTest.kt`。
+
+- ⚠️ **采样陷阱：HUD 只亮 4.5 秒，慢采样会整体错过窗口**（2026-11-12 实测踩过）。
+  `uiautomator dump` 单次 2.65 秒、`screencap` 0.6~1.0 秒，脚本再一循环就 5 秒以上，
+  于是「连拍 6~8 次全都没有 HUD」看起来像「手动切集 HUD 从不出现」，其实全落在 4.5 秒窗口**之外**。
+  **判据**：切完立刻采（t0，2 秒内）才命中窗口；或者改采「暂停态」
+  （暂停时 HUD 常驻、进度条保留，是最稳定的取证状态）。
+  两条实测互相印证：「更多面板→下一集」t0 dump = `HUD=1 PB=1`，「选集面板切集」连拍全 0。
+- **手动切集后 HUD 会自己收掉**：`playEpisode` → `showPlaybackStatus()` 置 HUD 可见但**不排收起定时器**；
+  随后播放器 `onIsPlayingChanged` → `showHud()` → 排 4.5 秒后的 `hideHud` → HUD 收起。
+  **这不是回归，是既有行为**，别再花一轮去查「谁把 HUD 藏了」。
+
+### 自动连播切集的实机验收（2026-11-12，0.9.96 已通过）
+
+- **在 Palm（USB adb，序列号 `6b580668`）上用 0.9.96 正式包连拍 223 帧跑完一整段自动连播**：
+  真人剧《全球死考：刚下刑场你让我去考试二季》从第 1 集一路自动连播到第 10 集，
+  日志里每次切集都是 `Playback ready episode=N preloaded=true reused=true`（**预加载复用 ⇒ 就是自动连播**）。
+- **结论**：所有自动连播切集帧（ep2→3、3→4、…、9→10）**HUD 文字与进度条全部不在场**；
+  同一段连拍里，**首次起播**（手动进第 1 集）HUD 照常出现并在 4.5 秒后收起、
+  **取地址失败重试**时错误 HUD 照常弹出。两条对照都符合设计 → 改动生效且没有误伤。
+- 🔴 **像素判据要看「几何」，不能只看「某行亮像素数」**（2026-11-12 踩过）：
+  视频画面自己会有大字标题/亮字幕落在同一行带里，按「行亮像素 > 50」会误判成 HUD。
+  可用的判据（`tmp/an5.py`）：
+  - **HUD 文字**：在 y∈[505,575] 里找**连续 ≥8 行**，每行亮像素 ≥200 且**最右亮像素 x ≤ 900**
+    （HUD 是左对齐的小字号两行文字，右侧到 x≈850 就没了；画面内容的大字会一路亮到 x=1257）。
+  - **进度条**：y∈[600,660] 里**连续 ≥2 行**亮像素 ≥700（实测 HUD 在场时 6 行，播放中 0 行）。
+  - 基线自检：**暂停态截图**必须判成「HUD 在 + 进度条在」，**播放中截图**必须判成「都不在」。
+- **本机有 PIL 11.3 + numpy 2.4**：直接 `Image.open(...).convert('RGB')` + `arr.max(axis=2)>=230`
+  做行统计，比手写 PNG 解码快几十倍（223 帧 ≈ 40 秒）。手写解码器见 `tmp/pngrows.py`（能跑但太慢）。
+- **设备端连拍脚本**（`/sdcard/auto3.sh`）：`T=$(date +%s)` → `screencap` → `/sdcard/auto3/t$T.png`，
+  帧文件名自带设备时间戳，可与 `logcat -v time` 的事件直接对齐。
+  ⚠️ 设备时钟可能不准（Palm 那台当时差 8 天），**对齐只认相对差值**，别拿它跟宿主机时间比。
+- **测完必须收尾**：`pkill -f auto3.sh`、`rm -rf /sdcard/auto3`、`am force-stop com.hongguotv.nativeapp`。
+  `adb shell rm` 在这些设备上是通的（别套 `su -c`）。

@@ -304,6 +304,8 @@ class MainActivity: Activity() {
     private lateinit var progressBar: ProgressBar
     private lateinit var controls: LinearLayout
     private var panel=false
+    /** 这一集是不是自动连播切进来的：自动切集时不许自己弹 HUD。 */
+    private var chainedEpisode=false
     /** 播放页的触控通道：只管手指，遥控器照旧走 dispatchKeyEvent。 */
     private var touchController: PlayerTouchController?=null
     private var transportPlay: TextView?=null
@@ -345,7 +347,12 @@ class MainActivity: Activity() {
             main.postDelayed(this,1000)
         }
     }
-    private val hideHud=Runnable { if(screen=="player" && !panel && player?.isPlaying==true && !playError) hidePlaybackOverlay() }
+    private val hideHud=Runnable {
+        // 收起条件不再要求「正在播」：以前缓冲中的播放器永远满足不了这一条，HUD 就一直挂在
+        // 画面上收不掉。缓冲够久了也收 —— 真失败时错误路径会带着原因重新弹出来，不会丢信息。
+        val p=player
+        if(screen=="player" && !panel && !playError && p!=null && PlaybackHudPolicy.shouldAutoHide(p.isPlaying,p.playbackState==Player.STATE_BUFFERING)) hidePlaybackOverlay()
+    }
     private val seekRunnable=Runnable { pendingSeek?.let { player?.seekTo(it) }; pendingSeek=null }
     private fun dp(value: Number)=(value.toFloat()*resources.displayMetrics.density).toInt()
     private fun widthDp()=resources.displayMetrics.widthPixels/resources.displayMetrics.density
@@ -1539,7 +1546,7 @@ class MainActivity: Activity() {
         // 纵向列表：季度卡自己排成上下一条，焦点图再把这一串和上面的剧集网格接起来 ——
         // 网格最后一行往下落到第一张季度卡、第一张季度卡往上回到网格最后一行。
     }
-    private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
+    private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false,chained: Boolean=false) {
         updater.interrupt()
         // 上一集的弹幕先撤下来 —— 换集到新地址取到之前，画面上不该还飘着旧集的弹幕。
         danmakuSession.stop(); danmakuOverlay?.setItems(emptyList())
@@ -1580,7 +1587,7 @@ class MainActivity: Activity() {
         if(selectedIndex!=playbackFailureEpisode) { playbackFailureReason=""; playbackFailureEpisode=-1 }
         if(autoplay) sleepStopped=false
         screen="player"; episodeIndex=selectedIndex; group=episodeIndex/20
-        panel=false; playError=false; playbackReady=false; quality=""; pausedForLifecycle=!autoplay
+        panel=false; playError=false; playbackReady=false; quality=""; pausedForLifecycle=!autoplay; chainedEpisode=chained
         player?.playWhenReady=requestedAutoplay
         prefetchAttempts=0; prefetchAttemptAt=0
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -1617,7 +1624,11 @@ class MainActivity: Activity() {
         touchController?.attach(root,{ player?.duration?.coerceAtLeast(0L) ?: 0L },{ currentPosition() })
         playbackTitle.text="${data.series.title}  ·  第 ${episodeIndex+1} 集"
         // 重试中的这一集，原因得留着：倒计时和「正在获取播放地址…」都不能把它顶掉。
-        playbackText.text=withFailureReason("正在获取播放地址…"); progressBar.progress=0; progressBar.visibility=View.VISIBLE; showPlaybackStatus()
+        playbackText.text=withFailureReason("正在获取播放地址…"); progressBar.progress=0
+        // 自动连播切进来的这一集：不弹 HUD，也不出进度条 —— 用户没按任何键，屏幕不该自己多出东西。
+        // 出错时 playerFailure 会把 HUD 连同原因一起弹出来，那才是该说话的时候。
+        if(PlaybackHudPolicy.showStatusOnSwitch(chained)) showPlaybackStatus()
+        else { hud.visibility=View.GONE; progressBar.visibility=View.GONE }
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
         syncMediaSession()
         val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
@@ -1643,7 +1654,8 @@ class MainActivity: Activity() {
                     if(!active()) return
                     // 缓冲时把 HUD 亮起来：播放器自带的居中转圈已经关掉了，得有地方告诉用户「在等」。
                     // 恢复播放后 onIsPlayingChanged 会再走一次 showHud，几秒后自动收起。
-                    if(state==Player.STATE_BUFFERING) showHud()
+                    // 自动连播切进来的那一集例外：用户没要求，不弹；真失败时错误路径会自己弹。
+                    if(state==Player.STATE_BUFFERING && !chainedEpisode) showHud()
                     if(state==Player.STATE_READY) {
                         if(!p.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)) {
                             playerFailure(PlaybackException("资源没有可解码的视频轨道",null,PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED))
@@ -1659,7 +1671,7 @@ class MainActivity: Activity() {
                     if(state==Player.STATE_ENDED) {
                         saveProgress(true)
                         if(sleepTimer.episodeEnded()) stopForSleep()
-                        else if(foreground && requestedAutoplay && !pausedForLifecycle && library.autoNext && episodeIndex<data.episodes.lastIndex) playEpisode(episodeIndex+1)
+                        else if(foreground && requestedAutoplay && !pausedForLifecycle && library.autoNext && episodeIndex<data.episodes.lastIndex) playEpisode(episodeIndex+1,chained=true)
                         else { requestedAutoplay=false; p.pause(); playbackText.text="本集已结束"; showPanel() }
                     }
                 }
@@ -1844,6 +1856,8 @@ class MainActivity: Activity() {
         panel=false; controls.visibility=View.GONE; controls.clearFocus()
         hud.visibility=View.VISIBLE; updatePlaybackText()
     }
+    /** 进度条该不该露脸：只有真的已经有进度了才露。 */
+    private fun progressVisibility(): Int = if(PlaybackHudPolicy.showProgress(playbackReady)) View.VISIBLE else View.GONE
     private fun hidePlaybackOverlay() {
         main.removeCallbacks(hideHud)
         panel=false; controls.visibility=View.GONE; controls.clearFocus(); hud.visibility=View.GONE
@@ -1851,19 +1865,24 @@ class MainActivity: Activity() {
     private fun showHud() {
         if(screen!="player") return
         hud.visibility=View.VISIBLE; updatePlaybackText(); main.removeCallbacks(hideHud)
-        if(!panel && player?.isPlaying==true) main.postDelayed(hideHud,4500)
+        // 收起定时器：正在播和缓冲中都排；用户自己按的暂停不排 —— 暂停时 HUD 是给人看的状态。
+        val p=player
+        if(!panel && !playError && p!=null && PlaybackHudPolicy.shouldAutoHide(p.isPlaying,p.playbackState==Player.STATE_BUFFERING))
+            main.postDelayed(hideHud,PlaybackHudPolicy.autoHideDelayMs(p.playbackState==Player.STATE_BUFFERING))
     }
     private fun updatePlaybackText() {
         transportPlay?.text=if(player?.playWhenReady==true) "暂停" else "播放"
         sleepButton?.text="定时 ${sleepTimer.label()}"
         if(screen!="player" || playError) return
-        if(sleepStopped) { playbackText.text="定时停止已生效 · 观看位置已保存 · 按播放可继续"; return }
-        if(!playbackReady) { playbackText.text=withFailureReason((if(!requestedAutoplay) "准备后保持暂停 · " else "")+if(video==null) "正在获取播放地址…" else "正在缓冲…"); return }
+        // 进度条只在真的有进度的时候出现：没就绪时那条 0% 的条不说明任何事。
+        if(sleepStopped) { playbackText.text="定时停止已生效 · 观看位置已保存 · 按播放可继续"; progressBar.visibility=progressVisibility(); return }
+        if(!playbackReady) { playbackText.text=withFailureReason((if(!requestedAutoplay) "准备后保持暂停 · " else "")+if(video==null) "正在获取播放地址…" else "正在缓冲…"); progressBar.visibility=View.GONE; return }
         val p=player ?: return
         val duration=p.duration.coerceAtLeast(0); val position=pendingSeek ?: p.currentPosition
         val state=when { p.playbackState==Player.STATE_BUFFERING -> "缓冲中"; p.playbackState==Player.STATE_ENDED -> "本集已结束"; !p.playWhenReady -> "已暂停"; else -> "正在播放" }
         playbackText.text="$state  ·  ${formatTime(position)} / ${formatTime(duration)}  ·  $quality  ·  ${PlaybackSpeed.label(p.playbackParameters.speed)}"+(if(sleepTimer.active) "  ·  定时 ${sleepTimer.label()}" else "")
         progressBar.progress=if(duration>0) (position*1000/duration).toInt().coerceIn(0,1000) else 0
+        progressBar.visibility=progressVisibility()
     }
     private fun requestPlayback(play: Boolean) {
         requestedAutoplay=play; pausedForLifecycle=!play

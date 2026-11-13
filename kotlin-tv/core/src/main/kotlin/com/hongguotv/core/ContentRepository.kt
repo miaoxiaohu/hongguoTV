@@ -915,13 +915,27 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      *
      * 身份是站方发的一次性凭证（见上面第 2 点），所以每次取址都要重新注册；注册本身
      * 有配额，被拒时 [RegistrationUnavailableException] 直接往外抛，不该被当成空答。
+     *
+     * **为什么是 [PLAYBACK_TAB_ATTEMPTS] 次而不是两次**（2026-11-14 实测）：
+     * 站方对这条 GET 是**按请求随机软拦截** —— 主域（sinfonlineb）对这个客户端 100% 空答，
+     * 备用域（hl）实测 12 次里 5 次空答，即单次尝试成功率只有 **58%**。
+     * 两个身份都撞上空答的概率是 0.42² ≈ **17.6%** —— 16 集里每轮就有 2~3 集掉到
+     * 公开页（只有 10 秒试看）被判失败。
+     * 证据：这批失败的集**每轮换一批**（同一集上一轮 OK、下一轮就挂），跟片源无关。
+     * 命中即停，所以期望注册数几乎不变（1/(1-0.42)≈1.7 次/集），
+     * 涨的只是尾巴：8 次全空的概率 0.42⁸ ≈ 0.09%。
      */
     private fun tabVideoModel(id: String): JSONObject? {
         var failure: Exception?=null
         var empty=false
-        for(attempt in 0..1) {
+        for(attempt in 0 until PLAYBACK_TAB_ATTEMPTS) {
             val identity=try { takePlaybackIdentity() }
-            catch(e: Exception) { failure=e; continue }
+            catch(e: Exception) {
+                // 注册被拒是站点「现在不发设备给你」，再问只会把限流拉长 —— 长退避直接上抛，
+                // 不要让它被后面的空答盖成「空内容」。
+                if(e is RegistrationUnavailableException) throw e
+                failure=e; continue
+            }
             val model=try { tabVideoModelOnce(id,identity) }
             catch(e: Exception) { failure=e; continue }
             if(model!=null) return model
@@ -1441,6 +1455,17 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
          * （带签名的请求一律 HTTP 200 + 0 字节），换成这条 GET 就一次取回完整模型。
          */
         const val PLAYBACK_TAB_PATH = "/reading/bookapi/video_tab/multi_video_model/v1/"
+        /**
+         * 这一集最多换几个身份去问取址接口。
+         *
+         * 站方对这条 GET 是**按请求随机软拦截**（2026-11-14 实测）：主域对这个客户端 100%
+         * 空答，备用域 12 次里 5 次空答，单次尝试成功率 58%。只试两次的话每集有 17.6% 的
+         * 概率两连败，16 集里每轮就会掉 2~3 集到公开页（10 秒试看）被判失败。
+         *
+         * 命中即停，所以期望注册数几乎不变（≈1.7 次/集），涨的只是尾巴：
+         * 八次全空的概率 0.42⁸ ≈ 0.09%。
+         */
+        const val PLAYBACK_TAB_ATTEMPTS = 8
         /**
          * The user agent the playback request wears.
          *

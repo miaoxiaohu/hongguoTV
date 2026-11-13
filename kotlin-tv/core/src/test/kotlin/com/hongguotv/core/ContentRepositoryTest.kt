@@ -317,6 +317,68 @@ class ContentRepositoryTest {
     }
 
     /**
+     * 站方随机空答时，要换一个身份再问，而不是两下就放弃。
+     *
+     * 2026-11-14 实测：站方对取址这条 GET 是**按请求随机软拦截**（HTTP 200 + 0 字节）——
+     * 主域（sinfonlineb）对这个客户端 100% 空答，备用域（hl）12 次里 5 次空答，
+     * 单次尝试成功率只有 58%。只试两次的话，每集有 0.42² ≈ **17.6%** 的概率两连败，
+     * 16 集里每轮就会掉 2~3 集到公开页（只有 10 秒试看）被判失败。
+     *
+     * 关键证据：**失败的是哪几集每轮都换**（同一集上一轮 OK、下一轮就挂）——
+     * 跟片源无关，是站方在按请求拦。所以修法是「换新身份再问」，问到答出来为止。
+     */
+    @Test fun anEmptyAnswerIsFollowedByAFreshIdentityAndAnotherAsk() {
+        val registrations=java.util.concurrent.atomic.AtomicInteger()
+        val asks=java.util.concurrent.atomic.AtomicInteger()
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            val body=when(path) {
+                REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
+                TAB_PATH -> {
+                    // 前四个请求都空答（站方的随机软拦截），第五个才给答案。
+                    if(asks.incrementAndGet()<=4) "" else tabAnswer(inlineRendition("1080p","bytevc1")).toString()
+                }
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        val result=repo.stream("456","123")
+        assertEquals("1080P",result.quality)
+        // 前两次尝试（两个域各一次）都是空答，第三次换了个新身份就答了。
+        assertEquals("每次空答都要换一个身份重新注册",3,registrations.get())
+        // 两次失败各问两个域，第三次主域就答了。
+        assertEquals("两次失败各问两个域，第三次主域答了",5,asks.get())
+        // 尝试次数是有上限的，不能变成一直问下去。
+        assertTrue(ContentRepository.PLAYBACK_TAB_ATTEMPTS>=4)
+    }
+
+    /**
+     * 注册被拒要说「注册没成功」，不能被空答盖成「空内容」。
+     *
+     * 注册被拒是站点现在不发设备给这个客户端（长退避），不是这一集没有片源。
+     * 之前它被当成一次普通失败继续重试，最后以「空内容」的形式掉到公开页 ——
+     * 电视上放 10 秒试看然后报「播放失败」，用户完全看不出是注册的事。
+     */
+    @Test fun aRefusedRegistrationIsNotHiddenBehindAnEmptyAnswer() {
+        val registrations=java.util.concurrent.atomic.AtomicInteger()
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            val body=when(path) {
+                REGISTER_PATH -> { registrations.incrementAndGet(); REGISTER_REFUSED }
+                TAB_PATH -> ""
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        val e=assertThrows(IOException::class.java) { repo.stream("456","123") }
+        assertTrue(e.javaClass.simpleName,e is RegistrationUnavailableException)
+        // 注册被拒就不要再接着问：再问只会把限流拉长。
+        assertEquals("注册被拒就不该再问",1,registrations.get())
+    }
+
+    /**
      * A registration that failed is not retried on every attempt.
      *
      * The person turning the set on must not pay for a registration attempt on every episode,
