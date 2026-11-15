@@ -184,6 +184,43 @@ class ContentRepositoryTest {
     }
 
     /**
+     * 备用地址带着站方的「vcube 改良」标记时，站方只给 ByteVC2（电视解不了）；
+     * 把这两个参数去掉再问同一集，站方才改给 ByteVC1。
+     *
+     * 2026-11-15 实测（短剧《修仙满级回现代，我让全家横着走！》第 40 集
+     * 7703417207283272728）：内联模型五个档位全是 ByteVC2，备用地址的 query 里带着
+     * encode_user_tag=only_roi_vcube_improve_1 与 force_fids；去掉这两个参数后站方改回
+     * 四个 ByteVC1 档位（360p~1080p），那一集就能播了。
+     *
+     * 只去掉其中一个不行，codec_type 换成什么也不行 —— 起作用的是「两个一起去掉」。
+     */
+    @Test fun theFallbackIsAskedAgainWithoutTheVcubeTagsWhenOnlyByteVC2ComesBack() {
+        val tagged=FALLBACK+"?encode_user_tag=only_roi_vcube_improve_1&force_fids=abc123"
+        val model=JSONObject().put("code",0).put("data",JSONObject().put("video_model_data",
+            JSONObject().put("123",JSONObject().put("video_model",
+                JSONObject()
+                    .put("video_list",JSONArray().apply { put(inlineRendition("1080p","bytevc2")) })
+                    .put("fallback_api",JSONObject().put("fallback_api",tagged))))))
+        val seen=mutableListOf<String>()
+        val repo=repository(tab=model.toString()) { request ->
+            seen+=request.url.query.orEmpty()
+            if(request.url.encodedPath=="/video/fplay/1/x") {
+                val plain=request.url.queryParameter("encode_user_tag")==null &&
+                    request.url.queryParameter("force_fids")==null
+                val list=if(plain) """{"video_5":${rendition("1080p","bytevc1")}}"""
+                         else """{"video_5":${rendition("1080p","bytevc2")}}"""
+                """{"video_info":{"data":{"key_seed":"$KEY_SEED","video_list":$list}}}"""
+            } else throw AssertionError("unexpected request ${request.url}")
+        }
+        val result=repo.stream("456","123")
+        assertEquals("1080P",result.quality)
+        assertTrue(result.url,result.url.startsWith(PLAIN_HOST))
+        // 带标记的那次问过了，去掉标记的那次也问过了。
+        assertTrue(seen.toString(),seen.any { it.contains("encode_user_tag") })
+        assertTrue(seen.toString(),seen.any { !it.contains("encode_user_tag") && !it.contains("force_fids") })
+    }
+
+    /**
      * 官方 App 现在用的那条 GET 路先问。
      *
      * 2026-11-10：站方把 POST /novel/player/multi_video_model/v1/ 这一族关掉了 —— 带签名的
@@ -317,17 +354,16 @@ class ContentRepositoryTest {
     }
 
     /**
-     * 站方随机空答时，要换一个身份再问，而不是两下就放弃。
+     * 空答之后要接着问同一个身份，不能一次空答就换号。
      *
-     * 2026-11-14 实测：站方对取址这条 GET 是**按请求随机软拦截**（HTTP 200 + 0 字节）——
-     * 主域（sinfonlineb）对这个客户端 100% 空答，备用域（hl）12 次里 5 次空答，
-     * 单次尝试成功率只有 58%。只试两次的话，每集有 0.42² ≈ **17.6%** 的概率两连败，
-     * 16 集里每轮就会掉 2~3 集到公开页（只有 10 秒试看）被判失败。
+     * 2026-11-15 实测：站方发的号**有一半是坏的**（坏号对任何一集都只回
+     * HTTP 200 + 0 字节，而且不会自己变好），但**好号是可以跨集长期复用的**
+     * （同一个号连取 60 集全部成功）。
      *
-     * 关键证据：**失败的是哪几集每轮都换**（同一集上一轮 OK、下一轮就挂）——
-     * 跟片源无关，是站方在按请求拦。所以修法是「换新身份再问」，问到答出来为止。
+     * 所以一次空答不足以判定这个号坏了 —— 先用同一个号再问一次；
+     * 只有整轮都空才换号。换了号也别把旧号弄丢 —— 万一新号也坏呢。
      */
-    @Test fun anEmptyAnswerIsFollowedByAFreshIdentityAndAnotherAsk() {
+    @Test fun anEmptyAnswerIsFollowedByAnotherAskWithTheSameIdentity() {
         val registrations=java.util.concurrent.atomic.AtomicInteger()
         val asks=java.util.concurrent.atomic.AtomicInteger()
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
@@ -335,7 +371,37 @@ class ContentRepositoryTest {
             val body=when(path) {
                 REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
                 TAB_PATH -> {
-                    // 前四个请求都空答（站方的随机软拦截），第五个才给答案。
+                    // 第一轮两个域都空答，第二轮主域就答了。
+                    if(asks.incrementAndGet()<=2) "" else tabAnswer(inlineRendition("1080p","bytevc1")).toString()
+                }
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        val result=repo.stream("456","123")
+        assertEquals("1080P",result.quality)
+        // 一次空答不换身份：整个过程只注册过一次。
+        assertEquals("空答不该立刻换身份 —— 好号要留着跨集复用",1,registrations.get())
+        // 第一轮两个域各问一次（两次空答），第二轮主域就答了。
+        assertEquals("一轮空答两问，第二轮答出",3,asks.get())
+    }
+
+    /**
+     * 一个身份整轮都空答，就换一个新身份。
+     *
+     * 站方发的号大约一半是坏的，坏号是永久的（实测隔 30 秒再问还是全空），
+     * 所以这个号不会再好了 —— 丢掉它、重新注册一个，换到好号就接着放。
+     */
+    @Test fun anIdentityThatKeepsAnsweringEmptyIsReplaced() {
+        val registrations=java.util.concurrent.atomic.AtomicInteger()
+        val asks=java.util.concurrent.atomic.AtomicInteger()
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            val body=when(path) {
+                REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
+                TAB_PATH -> {
+                    // 第一个号整轮两问（两轮 × 两个域 = 四次）都空答；换号之后第五问就答了。
                     if(asks.incrementAndGet()<=4) "" else tabAnswer(inlineRendition("1080p","bytevc1")).toString()
                 }
                 else -> throw AssertionError("unexpected request ${request.url}")
@@ -345,12 +411,63 @@ class ContentRepositoryTest {
         }.build())
         val result=repo.stream("456","123")
         assertEquals("1080P",result.quality)
-        // 前两次尝试（两个域各一次）都是空答，第三次换了个新身份就答了。
-        assertEquals("每次空答都要换一个身份重新注册",3,registrations.get())
-        // 两次失败各问两个域，第三次主域就答了。
-        assertEquals("两次失败各问两个域，第三次主域答了",5,asks.get())
-        // 尝试次数是有上限的，不能变成一直问下去。
-        assertTrue(ContentRepository.PLAYBACK_TAB_ATTEMPTS>=4)
+        // 坏号要换掉：换了一个新身份之后第一轮就答了。
+        assertEquals("整轮空答就该换身份",2,registrations.get())
+    }
+
+    /**
+     * 全是坏号时，最多换 [ContentRepository.PLAYBACK_TAB_MAX_IDENTITIES] 个身份就收手。
+     *
+     * 换号要花站方的发号配额，不能没完没了地换下去；换够了还是答不出来，
+     * 就如实报「播放接口返回空内容」。
+     */
+    @Test fun everyIdentityIsBadAndTheAttemptIsBounded() {
+        val registrations=java.util.concurrent.atomic.AtomicInteger()
+        val asks=java.util.concurrent.atomic.AtomicInteger()
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            val body=when(path) {
+                REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
+                TAB_PATH -> { asks.incrementAndGet(); "" }
+                // 老门和公开页也都答不出东西：这里要验的是「别没完没了地换号」。
+                PLAYBACK_PATH,MODEL_PATH,PUBLIC_PATH -> ""
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        assertThrows(IOException::class.java) { repo.stream("456","123") }
+        // 新门每个身份问两轮、每轮两个域。
+        assertEquals("每个身份问两轮",ContentRepository.PLAYBACK_TAB_MAX_IDENTITIES*ContentRepository.PLAYBACK_TAB_ATTEMPTS_PER_IDENTITY*2,asks.get())
+        // 换号有上限：新门最多换 [PLAYBACK_TAB_MAX_IDENTITIES] 个，老门再补几个 —— 不能无限换下去。
+        assertTrue("换号次数要有上限，实际 ${registrations.get()}",registrations.get()<=ContentRepository.PLAYBACK_TAB_MAX_IDENTITIES+8)
+    }
+
+    /**
+     * 同一个身份连着取很多集，只注册一次。
+     *
+     * 这是「放不了下一集」的根因：站方给同一台设备发号是有配额的，
+     * 2026-11-15 实测每集换一个身份连打 60 集时，第 30 集起注册就被拒
+     * （RegistrationUnavailableException + 10 分钟退避），
+     * 于是从那一集起所有集都放不了。
+     *
+     * 同一个身份连取 60 集实测全部成功 —— 所以身份要跨集复用。
+     */
+    @Test fun oneIdentityServesManyEpisodes() {
+        val registrations=java.util.concurrent.atomic.AtomicInteger()
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            val body=when(path) {
+                REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
+                TAB_PATH -> tabAnswer(inlineRendition("1080p","bytevc1")).toString()
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        // 三十集 —— 正好是旧实现里注册配额被打爆的那个位置。
+        for(episode in 9001..9030) repo.stream("456",episode.toString())
+        assertEquals("身份要跨集复用，不能每集重新注册",1,registrations.get())
     }
 
     /**

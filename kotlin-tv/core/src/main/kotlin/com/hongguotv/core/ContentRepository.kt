@@ -307,6 +307,8 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * minute is long enough for every attempt inside it to be answered with the sample.
      */
     @Volatile private var registeredIdentity: PlaybackIdentity?=null
+    /** 这个身份是什么时候注册出来的（用来给它定个寿命）。 */
+    @Volatile private var registeredIdentityAt=0L
     @Volatile private var registrationFailedAt=0L
     /**
      * The moment until which the site is left alone.
@@ -325,6 +327,14 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * watches three episodes in a row then pays for one registration, not three.
      */
     private val addressCache=LinkedHashMap<String,CachedAddress>()
+    /**
+     * 地址缓存的锁。
+     *
+     * 播放和预取是两条线程（App 侧 io 线程池 + prefetchWorker），两边同时读写这个
+     * 缓存。LinkedHashMap 不是线程安全的，并发写会损坏内部结构 —— 表现是随机的
+     * 「刚存进去的地址又找不到了」。所以读写都走这把锁。
+     */
+    private val addressLock=Any()
 
     /**
      * Registers one anonymous device, or hands back the one this repository already has.
@@ -333,7 +343,13 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      *   numbers the playback request needs.
      */
     @Synchronized private fun playbackIdentity(): PlaybackIdentity {
-        registeredIdentity?.let { return it }
+        registeredIdentity?.let {
+            // 身份可以跨集复用（2026-11-15 实测：同一个身份连取 60 集全部成功），
+            // 但也不该用一个身份用到天荒地老 —— 站方可能慢慢地不看它了。
+            // 所以给它定个寿命：过了就换一个，省得哪天它开始一直空答。
+            if(clock()-registeredIdentityAt<PLAYBACK_IDENTITY_MAX_AGE_MS) return it
+            registeredIdentity=null
+        }
         val now=clock()
         // The site refused to hand out a device: that window is minutes long, not seconds.
         if(registrationRefusedUntil>now) throw RegistrationUnavailableException(registrationRefusedUntil-now,REGISTRATION_REFUSED_REASON)
@@ -357,6 +373,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             throw e
         }
         registeredIdentity=identity
+        registeredIdentityAt=clock()
         registrationFailedAt=0
         return identity
     }
@@ -896,7 +913,10 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * 1. 参数全在 query 上，body 是空的：video_id / video_id_type / device_level /
      *    need_all_video_definition / need_mp4_align / use_os_player / video_platform /
      *    source / from_video_id。少一个，服务端回 100103 PARAM_INVALID。
-     * 2. 身份是一次性的：同一个注册身份第二次取流就回 0 字节，所以每取一集都要新注册一次。
+     * 2. 身份**可以跨集复用**（2026-11-15 更正）：同一个注册身份连续取 60 集全部成功。
+     *    早先「身份是一次性的」是在旧 POST 那条路上测的，对这条 GET 不成立 ——
+     *    而每集换一次身份会把站方的发号配额打爆（第 30 集起注册被拒，10 分钟退避，
+     *    表现就是「放不了下一集」），所以这里改成复用同一个身份。
      * 3. 签名照旧六个头，签名把 query 和 body 一起算；这里没有 body，body 的 md5 记作
      *    16 个零字节（与站方 App 一致）。
      *
@@ -911,37 +931,56 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         return stream
     }
     /**
-     * 播放模型：一次全新身份、一次请求；空答就换一个新身份再来一次。
+     * 播放模型：拿一个身份问这一集；这个身份整轮都空答，就换一个新身份再问。
      *
-     * 身份是站方发的一次性凭证（见上面第 2 点），所以每次取址都要重新注册；注册本身
-     * 有配额，被拒时 [RegistrationUnavailableException] 直接往外抛，不该被当成空答。
+     * **2026-11-15 实测（这一段整段改写了）**：
      *
-     * **为什么是 [PLAYBACK_TAB_ATTEMPTS] 次而不是两次**（2026-11-14 实测）：
-     * 站方对这条 GET 是**按请求随机软拦截** —— 主域（sinfonlineb）对这个客户端 100% 空答，
-     * 备用域（hl）实测 12 次里 5 次空答，即单次尝试成功率只有 **58%**。
-     * 两个身份都撞上空答的概率是 0.42² ≈ **17.6%** —— 16 集里每轮就有 2~3 集掉到
-     * 公开页（只有 10 秒试看）被判失败。
-     * 证据：这批失败的集**每轮换一批**（同一集上一轮 OK、下一轮就挂），跟片源无关。
-     * 命中即停，所以期望注册数几乎不变（1/(1-0.42)≈1.7 次/集），
-     * 涨的只是尾巴：8 次全空的概率 0.42⁸ ≈ 0.09%。
+     *  - **站方发的号有一半是坏的**。注册响应里看不出好坏（好号坏号的 device_id /
+     *    install_id / device_token 长得一模一样），只有拿号去取址才知道。
+     *  - 坏号是**号级**的：6 个新号各拿同一集连问 3 次，结果是
+     *    OKOKOK / 空空空 / OKOKOK / 空空空 / OKOKOK / 空空空 —— 每个号内部三次
+     *    结果完全一致，号与号之间好坏交替。
+     *  - 坏号**不会自己变好**：坏号隔 30 秒再问还是全空，好号隔 30 秒再问还是全通。
+     *  - 好号可以长期跨集复用：同一个身份连取 60 集全部成功。
+     *
+     * 所以「放不了下一集」的真正机制是「每集换一个身份」：每集都有大约一半的
+     * 概率踩到坏号，那一集就永远取不到地址 —— 正是用户说的「**有时候**」。
+     *
+     * 于是这里：身份跨集复用（好号要一直用，别浪费站方的发号配额）；
+     * 只有这个身份整轮都空答才换号，最多换 [PLAYBACK_TAB_MAX_IDENTITIES] 个身份。
+     *
+     * 注册被拒时 [RegistrationUnavailableException] 直接往外抛，不该被当成空答。
      */
     private fun tabVideoModel(id: String): JSONObject? {
         var failure: Exception?=null
         var empty=false
-        for(attempt in 0 until PLAYBACK_TAB_ATTEMPTS) {
-            val identity=try { takePlaybackIdentity() }
+        // 身份是**复用**的，不是每集换一个（2026-11-15 实测：换得太勤既浪费发号配额，
+        // 又会有一半概率踩到坏号）。
+        var identity: PlaybackIdentity?=null
+        for(round in 0 until PLAYBACK_TAB_MAX_IDENTITIES) {
+            val current=try {
+                if(identity==null) identity=playbackIdentity()
+                identity!!
+            }
             catch(e: Exception) {
                 // 注册被拒是站点「现在不发设备给你」，再问只会把限流拉长 —— 长退避直接上抛，
                 // 不要让它被后面的空答盖成「空内容」。
                 if(e is RegistrationUnavailableException) throw e
                 failure=e; continue
             }
-            val model=try { tabVideoModelOnce(id,identity) }
-            catch(e: Exception) { failure=e; continue }
-            if(model!=null) return model
-            empty=true
+            for(attempt in 0 until PLAYBACK_TAB_ATTEMPTS_PER_IDENTITY) {
+                if(attempt>0) Thread.sleep(PLAYBACK_TAB_RETRY_GAP_MS)
+                val model=try { tabVideoModelOnce(id,current) }
+                catch(e: Exception) { failure=e; continue }
+                if(model!=null) return model
+                empty=true
+            }
+            // 这个身份整轮都空答：坏号是永久坏的（实测），留着它只会一直空答。
+            // 丢掉它、重新注册一个 —— 站方发号大约一半好，换一次是值得的。
+            dropPlaybackIdentity()
+            identity=null
         }
-        // 空答是站方的软拦截（HTTP 200 + 0 字节），不是这一集没有片源。
+        // 空答是站方给的坏号（HTTP 200 + 0 字节），不是这一集没有片源。
         if(!empty && failure!=null) throw failure
         throw EmptySignedAnswerException().also { e -> failure?.let { e.addSuppressed(it) } }
     }
@@ -1081,7 +1120,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
     private fun batchAddresses(ids: List<String>, maxQuality: Int): Map<String, StreamInfo> {
         val list=ids.joinToString(",") { "\"$it\"" }
         val body="""{"biz_param":{"detail_page_version":0,"device_level":$PLAYBACK_DEVICE_LEVEL,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":[$list]}}""".toByteArray()
-        val answer=JSONObject(signedPlaybackWithFreshIdentity(body))
+        val answer=JSONObject(signedPlaybackWithIdentity(body))
         val code=if(answer.has("code")) answer.optInt("code",-1) else answer.optInt("Code",-1)
         if(code!=0) throw IOException("播放接口暂不可用")
         val data=answer.optJSONObject("data") ?: throw IOException("播放信息为空")
@@ -1121,7 +1160,35 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         // 《重生后我给emo修士当狗》第一集 7703473857562151961）：codec_type=3 才给 ByteVC1
         // （HEVC，电视能放），codec_type=0/1/2/4/5 以及不带这个参数都只给 ByteVC2。
         val compatible=fallbackInfo(fallbackWithCodec(fallback,"3"))
-        return pickStream(compatible,maxQuality)
+        if(playableRenditions(compatible).isNotEmpty()) return pickStream(compatible,maxQuality)
+        // 还是只有 ByteVC2：备用地址自己带着站方的「vcube 改良」标记
+        // （encode_user_tag=only_roi_vcube_improve_1）与它钉住的转码版本清单（force_fids），
+        // 站方照着只给字节家的 ByteVC2，电视解不了。
+        //
+        // 2026-11-15 实测（短剧《修仙满级回现代，我让全家横着走！》第 40 集
+        // 7703417207283272728）：把这两个参数去掉再问同一集，站方改给 ByteVC1，四个档位
+        // （360p~1080p）全可播；只去掉其中一个仍然只给 ByteVC2。同一集去掉
+        // encode_user_tag 之后 codec_type 换成 0/1/2/3/4/5/bytevc1/hevc 全都还是 ByteVC2，
+        // 所以真正起作用的是「去掉这两个参数」，不是 codec_type。
+        //
+        // 这两个参数不是签名的一部分（备用地址的 auth_policy 只是 {"vs":3,"uid":"0"}），
+        // 去掉之后地址照样有效 —— 去掉 encode_user_tag 单独那一档实测长度从 16.7K 降到
+        // 10.5K，正是从「五个 ByteVC2 档位」换成「四个 ByteVC1 档位」。
+        val plain=fallbackInfo(fallbackWithoutVcubeTags(fallback))
+        // 到这里还是不行的话，就是真的没有电视能播的清晰度了（pickStream 会抛异常）。
+        return pickStream(plain,maxQuality)
+    }
+    /**
+     * 去掉备用地址上站方的「只给 ByteVC2」标记。
+     *
+     * 两个参数一起去掉才有效（实测），单独去掉任何一个都还是 ByteVC2。
+     */
+    private fun fallbackWithoutVcubeTags(fallback: String): String {
+        var out=fallback
+        for(name in listOf("encode_user_tag","force_fids")) {
+            out=out.replace(Regex("([?&])"+name+"=[^&]*"),"$1").replace("?&","?")
+        }
+        return out
     }
     /**
      * 备用地址（fallback_api）回来的播放信息。
@@ -1156,48 +1223,51 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         return window.subList(from,minOf(window.size,from+PLAYBACK_BATCH_SIZE)).toList()
     }
     /** The address that was already fetched for an episode, if it is still worth having. */
-    private fun cachedAddress(id: String): StreamInfo? {
-        val entry=addressCache[id] ?: return null
-        if(clock()-entry.at>ADDRESS_CACHE_TTL_MS) { addressCache.remove(id); return null }
-        return entry.stream
+    private fun cachedAddress(id: String): StreamInfo? = synchronized(addressLock) {
+        val entry=addressCache[id] ?: return@synchronized null
+        if(clock()-entry.at>ADDRESS_CACHE_TTL_MS) { addressCache.remove(id); return@synchronized null }
+        entry.stream
     }
     /** Keeps an address, so that the episodes around it do not have to be asked for again. */
-    private fun rememberAddress(id: String, stream: StreamInfo) {
+    private fun rememberAddress(id: String, stream: StreamInfo) = synchronized(addressLock) {
         if(addressCache.size>=ADDRESS_CACHE_MAX) addressCache.remove(addressCache.keys.first())
         addressCache[id]=CachedAddress(stream,clock())
     }
     /**
-     * The playback answer, asked with an identity that has not been used yet.
+     * The playback answer, asked with the identity this device already has.
      *
-     * A registered identity is good for exactly one address lookup. The second lookup with the
-     * same identity comes back with an empty body - the endpoint saying that this identity has
-     * been used - and it keeps saying so. So the identity is spent as it is handed out, and a
-     * lookup that comes back empty registers a new one and asks again.
+     * This is the old POST door. It used to spend an identity as it was handed out: measured
+     * 2026-11-05, ten lookups with one identity answered once and were empty nine times, so
+     * every lookup took a fresh registration.
      *
-     * Measured 2026-11-05: ten lookups with one identity answered once and were empty nine
-     * times; the eleventh, with a freshly registered identity, answered at once.
+     * **2026-11-15 更正**：那个实测的解释是错的。现在测清楚了 —— 站方发的号**有一半是坏的**，
+     * 而坏号是永久的（隔 30 秒再问还是全空）；「一个号只有第一次有回答」其实是
+     * 「这个号正好抽到了坏的那一半」。好号是可以一直用的（同一个号连取 60 集全部成功）。
+     *
+     * 所以这里也改成：先用手上这个身份问，空答才丢掉它、换一个再来一次 ——
+     * 保留「换号重试」的能力，又不会每次都白扔一个好号。
      */
-    private fun signedPlaybackWithFreshIdentity(body: ByteArray): String {
+    private fun signedPlaybackWithIdentity(body: ByteArray): String {
         var refusal: Exception?=null
         for(attempt in 0..1) {
-            val identity=try { takePlaybackIdentity() }
+            val identity=try { playbackIdentity() }
             catch(e: Exception) { refusal=e; continue }
             val text=try { signedPlaybackAnswer(identity,body) }
             catch(e: Exception) { refusal=e; "" }
             if(text.isNotBlank()) return text
+            // 空答：这个号多半是坏的（站方发的号约一半坏，且坏号永久坏），换一个新的再试。
+            dropPlaybackIdentity()
         }
         throw refusal ?: EmptySignedAnswerException()
     }
     /**
-     * The registered identity, spent as it is handed out.
+     * 把当前身份丢掉，下一次取址重新注册一个。
      *
-     * The endpoint lets one identity ask for one address, so the identity is dropped here
-     * rather than kept for the next episode.
+     * 只在「这个身份连着几问都是空答」时用 —— 那说明站方已经不看这个身份了，
+     * 留着它只会一直空答下去。
      */
-    @Synchronized private fun takePlaybackIdentity(): PlaybackIdentity {
-        val identity=playbackIdentity()
+    @Synchronized private fun dropPlaybackIdentity() {
         registeredIdentity=null
-        return identity
     }
     /**
      * The playback answer, with the second host as the way out.
@@ -1456,16 +1526,52 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
          */
         const val PLAYBACK_TAB_PATH = "/reading/bookapi/video_tab/multi_video_model/v1/"
         /**
-         * 这一集最多换几个身份去问取址接口。
+         * 一次取址最多换几个身份。
          *
-         * 站方对这条 GET 是**按请求随机软拦截**（2026-11-14 实测）：主域对这个客户端 100%
-         * 空答，备用域 12 次里 5 次空答，单次尝试成功率 58%。只试两次的话每集有 17.6% 的
-         * 概率两连败，16 集里每轮就会掉 2~3 集到公开页（10 秒试看）被判失败。
+         * **2026-11-15 实测（这一段整段改写）**：站方发的号**有一半是坏的**。
          *
-         * 命中即停，所以期望注册数几乎不变（≈1.7 次/集），涨的只是尾巴：
-         * 八次全空的概率 0.42⁸ ≈ 0.09%。
+         *  - 注册响应里看不出好坏：好号坏号的 device_id / install_id / device_token
+         *    长得一模一样，只有拿号去取址才知道。
+         *  - 坏号是**号级**的：6 个新号各拿同一集连问 3 次，结果是
+         *    OKOKOK / 空空空 / OKOKOK / 空空空 / OKOKOK / 空空空 —— 每个号内部
+         *    三次结果完全一致，不同号之间好坏交替。
+         *  - 坏号**不会自己变好**：坏号隔 30 秒再问，还是全空；好号隔 30 秒再问，还是全通。
+         *
+         * 所以「放不了下一集」的真正机制是「每集换一个身份」：每集都有大约一半的
+         * 概率踩到坏号，那一集就永远取不到地址 —— 正是用户说的「**有时候**」。
+         *
+         * 八个身份是权衡出来的：站方发号大约一半好，八个全是坏号的概率约 0.4%，
+         * 而正常情况下第一个号就是好的（平均只注册一次）。注册是要花配额的，
+         * 所以不给更多。
          */
-        const val PLAYBACK_TAB_ATTEMPTS = 8
+        const val PLAYBACK_TAB_MAX_IDENTITIES = 8
+        /**
+         * 一个身份最多问几次。
+         *
+         * 坏号是永久坏的（实测），所以同一个号问第三次没有意义 —— 只会白白耗掉
+         * 换号的机会和时间。但只问一次又太急：万一这一次只是被拦了一下，
+         * 换号反而把好号丢掉。所以问两次。
+         */
+        const val PLAYBACK_TAB_ATTEMPTS_PER_IDENTITY = 2
+        /**
+         * 同一个身份的两次询问之间、以及换号之后，等多久再问。
+         *
+         * 坏号答得极快（HTTP 200 立刻返回 0 字节），所以这个等待几乎只发生在
+         * 「这个号确实是坏的」这条路上。它换来的是：换号不会连着撞，站方也不太会
+         * 把连着换号的客户端当成异常流量。
+         */
+        const val PLAYBACK_TAB_RETRY_GAP_MS = 500L
+        /**
+         * 一个注册身份最多用多久。
+         *
+         * 身份是跨集复用的（2026-11-15 实测：同一个身份连取 60 集全部成功），
+         * 站方给同一台设备发号是有配额的，所以**不能**换得太勤 —— 每集换一个身份
+         * 连打 60 集时，第 30 集起注册就被拒，10 分钟退避，表现正是「放不了下一集」。
+         *
+         * 但也不该用一个身份用到天荒地老：站方可能慢慢地不看它了。
+         * 两小时换一次，一小时也就多花一次注册额度，摊得开。
+         */
+        const val PLAYBACK_IDENTITY_MAX_AGE_MS = 2*60*60*1000L
         /**
          * The user agent the playback request wears.
          *
