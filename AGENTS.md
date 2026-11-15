@@ -56,6 +56,14 @@
   探针的控制台输出也是 GBK，但它自己写的 `probe-report.txt` 是 UTF-8 —— 解析结果要用后者。
 - 探针的 `probe-report.txt` 写在**当前工作目录**，每次运行覆盖。
 - `probe-report.txt` 和 `logs/source-check/` 都是本地产物，已在 `.gitignore` 里，不要提交。
+- 🔴 **`core` 是 app 的依赖模块，`core/src/main/.../Probe.kt` 会被打进 APK**。
+  所以临时加的探针模式（诊断方法、`--show=` 批量模式之类）**出包前必须撤销**：
+  改完用 `git checkout -- kotlin-tv/core/src/main/kotlin/com/hongguotv/core/Probe.kt` 撤干净，
+  再 `git diff` 确认没有 `diag` / `TabTrace` / `--show` 残留，最后扫一遍 APK 的 dex：
+  解压 `classes*.dex` 找这些关键字，有就是没撤干净。
+- 探针没有「连打一部剧 N 集」的现成模式（只有 `--play=` 分类前 8 部各一集、`--stream=` 单集）。
+  要连打就临时在 `Probe.kt` 里加一个 `--show=<seriesId>,<count>,<start>`（2026-11-15 用过，
+  用来验收 0.9.97 的 60 集连打），验证完按上面那条撤掉。
 
 ## 实机验证（Palm / 电视）
 
@@ -211,8 +219,12 @@
 - 推 tag 前查一遍已发布的版本：`gh release list --repo miaoxiaohu/hongguoTV`，
   CI 守卫要求新 tag 的 versionCode **新于所有已发布的 kotlin-v 版本**。
 - **已发布记录**（每条 4 个资产：apk / source.zip / SHA256SUMS / update.json）：
-  0.9.90 → 0.9.91 → 0.9.92 → 0.9.93 → 0.9.94 → 0.9.95 → **0.9.96（9096）**。
+  0.9.90 → 0.9.91 → 0.9.92 → 0.9.93 → 0.9.94 → 0.9.95 → 0.9.96 → **0.9.97（9097）**。
   0.9.96 一次性带了两件事：取址随机软拦截的重试修复 + 自动连播 HUD 显隐（见下面两节）。
+  0.9.97 带来「放不了下一集」的根因修复：身份跨集复用 + 坏号才换号 + ByteVC2 去标记兜底。
+- 🔴 **lint 入口只有一个**：`core` 是纯 JVM 模块，**没有 lint 任务**（别试 `:core:lint`，会报
+  「task 'lint' not found」）。CI 的验收基线在 `.github/workflows/release.yml` 里：
+  `./kotlin-tv/gradlew -p kotlin-tv :core:test :app:testDebugUnitTest :app:lintRelease :app:assembleRelease`。
 - 🔴 **这台机器上 `gh` CLI 的 API 调用不可用**（PowerShell 参数传递 + api.github.com 会被带去网页版，
   返回 HTML）。改用 `curl.exe` + `gh auth token`：
   `curl.exe -sS -H "Authorization: Bearer <token>" -H "Accept: application/vnd.github+json" https://api.github.com/repos/miaoxiaohu/hongguoTV/releases?per_page=6`
