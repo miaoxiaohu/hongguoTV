@@ -25,7 +25,7 @@
 
 想查别的项目，在参数里加 `projectPath`：
 ```json
-{"query": "xxx", "projectPath": "D:\\document\\project\\plam"}
+{"query": "xxx", "projectPath": "D:\\document\\project\\palm"}
 ```
 
 ## 二、CLI 命令（推荐：你自己手动查）
@@ -118,4 +118,4 @@ codegraph uninit        # 删除索引（不想用了就这个）
   只索引到 115 个 js，已建的索引建议删掉。
 - `break` / `libretv-*` / `time_task` 等几十文件的小项目：官方数据显示 110 文件的项目
   成本节省基本持平，小项目不值得建图。
-- **值得考虑的其它项目**：`plam`（1367 文件 / 30 万行，最大）、`hongguoTV_IOS`（Swift 77 文件）。
+- **值得考虑的其它项目**：`palm`（1367 文件 / 30 万行，最大）、`hongguoTV_IOS`（Swift 77 文件）。
