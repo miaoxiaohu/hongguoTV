@@ -856,13 +856,17 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * The doors themselves are described on [stream]; this is where the order is decided.
      */
     private fun streamDoors(seriesId: String, id: String, maxQuality: Int, window: List<String>): StreamInfo {
-        // App 自己用的那条 GET 路先问：2026-11-10 它是唯一还在答的取址接口。
-        try { return tabStream(id,maxQuality) }
-        catch(tab: Exception) {
-            // 它空答时站方没说原因，往后退回老门；老门也空答才轮到公开页（只有 10 秒试看）。
-            if(fallbackCannotHelp(tab)) throw tab
-            try { return streamDoorsLegacy(seriesId,id,maxQuality,window) }
-            catch(legacy: Exception) { legacy.addSuppressed(tab); throw legacy }
+        // 2026-11-16 起站方换了取址协议：v5 的 POST 门是现在还在答的那条，先问它。
+        try { return v5Stream(id,maxQuality) }
+        catch(v5: Exception) {
+            try { return tabStream(id,maxQuality) }
+            catch(tab: Exception) {
+                tab.addSuppressed(v5)
+                // 它空答时站方没说原因，往后退回老门；老门也空答才轮到公开页（只有 10 秒试看）。
+                if(fallbackCannotHelp(tab)) throw tab
+                try { return streamDoorsLegacy(seriesId,id,maxQuality,window) }
+                catch(legacy: Exception) { legacy.addSuppressed(tab); throw legacy }
+            }
         }
     }
     /**
@@ -923,6 +927,23 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * 这条路本来就是 App 自己用的那条（官方 APK 里 GetVideoModelRequest 的参数名就是
      * snake_case），所以它比网页版那条 POST 稳。
      */
+    /**
+     * 一集播放地址，走站方现行的 v5 取址门。
+     *
+     * 2026-11-16 实测：老的 GET /reading/bookapi/video_tab/... 与 POST
+     * /novel/player/multi_video_model/v1/ 都回 HTTP 200 + 0 字节（软拦截），
+     * 现在还在答的是 POST /novel/player/multi_video_model/player/v1 ——
+     * body 是 gzip 过的 JSON，头里只带 x-khronos / x-helios / x-medusa 三个 v5 签名头。
+     */
+    private fun v5Stream(id: String, maxQuality: Int): StreamInfo {
+        cachedAddress(id)?.let { return it }
+        val identity=playbackIdentity()
+        val model=addressLookup { client -> V5Playback.model(client,identity,id,clock()) }
+            ?: throw EmptySignedAnswerException()
+        val stream=episodeStream(model,maxQuality)
+        rememberAddress(id,stream)
+        return stream
+    }
     private fun tabStream(id: String, maxQuality: Int): StreamInfo {
         cachedAddress(id)?.let { return it }
         val model=tabVideoModel(id) ?: throw EmptySignedAnswerException()

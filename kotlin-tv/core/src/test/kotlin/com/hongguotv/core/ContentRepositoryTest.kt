@@ -42,6 +42,13 @@ class ContentRepositoryTest {
      * the query, the body is empty, and the model comes back inline.
      */
     private val TAB_PATH = "/reading/bookapi/video_tab/multi_video_model/v1/"
+    /**
+     * v5 取址门（2026-11-16 起站方现行的那条 POST 路）。
+     *
+     * 默认在 mock 里空答：这一族门与老门一样被站方软拦截时，程序要能退到下一道门，
+     * 所以旧门的测试不受新门影响；v5 门自己的行为另有专项测试。
+     */
+    private val V5_PATH = "/novel/player/multi_video_model/player/v1"
     /** The registration the playback identity comes from. */
     private val REGISTER_PATH = "/service/2/device_register/"
     /** The public player page, the last of the three doors. */
@@ -118,6 +125,7 @@ class ContentRepositoryTest {
             TAB_PATH -> ""
             MODEL_PATH -> """{"code":0,"data":{"video_model":"{\"fallback_api\":\"$FALLBACK\"}"}}"""
             "/video/fplay/1/x" -> """{"video_info":{"data":{"key_seed":"$KEY_SEED","video_list":$videoList}}}"""
+            V5_PATH -> ""
             else -> throw AssertionError("unexpected request ${request.url}")
         }
     }
@@ -127,6 +135,7 @@ class ContentRepositoryTest {
             TAB_PATH -> ""
             MODEL_PATH -> REFUSED
             PUBLIC_PATH -> page
+            V5_PATH -> ""
             else -> throw AssertionError("unexpected request ${request.url}")
         }
     }
@@ -210,7 +219,7 @@ class ContentRepositoryTest {
                 val list=if(plain) """{"video_5":${rendition("1080p","bytevc1")}}"""
                          else """{"video_5":${rendition("1080p","bytevc2")}}"""
                 """{"video_info":{"data":{"key_seed":"$KEY_SEED","video_list":$list}}}"""
-            } else throw AssertionError("unexpected request ${request.url}")
+            } else if(request.url.encodedPath==V5_PATH) "" else throw AssertionError("unexpected request ${request.url}")
         }
         val result=repo.stream("456","123")
         assertEquals("1080P",result.quality)
@@ -230,11 +239,47 @@ class ContentRepositoryTest {
      *
      * 所以这里断言的是：新门答得出来的时候，老门一个都不问。
      */
+    /**
+     * v5 取址门先问（2026-11-16 站方改协议）。
+     *
+     * 站方把老的 GET /reading/bookapi/video_tab/... 与 POST /novel/player/multi_video_model/v1/
+     * 都关掉了 —— 带签名的请求一律回 HTTP 200 + 0 字节（软拦截）。现在还在答的是
+     * POST /novel/player/multi_video_model/player/v1：body 是 gzip 过的 JSON，头里只带
+     * x-khronos / x-helios / x-medusa 三个 v5 签名头。
+     *
+     * 所以这里断言的是：v5 门第一个被问，答得出来的时候老门一个都不问。
+     */
+    @Test fun theV5DoorIsAskedFirstAndItsModelIsPlayed() {
+        val paths=requestPaths()
+        val model=JSONObject().put("video_list",JSONArray().apply { put(inlineRendition("1080p","bytevc1")) })
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            paths+=path
+            val body=when(path) {
+                REGISTER_PATH -> REGISTERED
+                V5_PATH -> JSONObject().put("code",0).put("data",JSONObject().put("1004",
+                    JSONObject().put("123",JSONObject().put("video_model",model)))).toString()
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        val result=repo.stream("456","123")
+        assertEquals("1080P",result.quality)
+        assertTrue(result.url,result.url.startsWith(PLAIN_HOST))
+        // 先注册拿身份，再问 v5 门，老的几道门一个都没走。
+        assertEquals(listOf(REGISTER_PATH,V5_PATH),paths)
+        assertTrue(paths.toString(),paths.none {
+            it==MODEL_PATH || it==PUBLIC_PATH || it==PLAYBACK_PATH || it==TAB_PATH
+        })
+    }
+
     @Test fun streamAsksTheEndpointTheAppItselfUsesFirst() {
         val paths=requestPaths()
         val repo=repository(tab=tabAnswer(inlineRendition("1080p","bytevc1")).toString()) { request ->
             paths+=request.url.encodedPath
-            throw AssertionError("the retired doors must not be asked while the new door answers")
+            // v5 门此刻空答（站方对旧门就是这个样子），所以它被问过，但老门一个都不许问。
+            if(request.url.encodedPath==V5_PATH) "" else throw AssertionError("the retired doors must not be asked while the new door answers")
         }
         val result=repo.stream("456","123")
         assertEquals("1080P",result.quality)
@@ -263,6 +308,7 @@ class ContentRepositoryTest {
             val body=when(request.url.encodedPath) {
                 REGISTER_PATH -> REGISTERED
                 TAB_PATH -> tabAnswer(inlineRendition("1080p","bytevc1")).toString()
+                V5_PATH -> ""
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -317,6 +363,7 @@ class ContentRepositoryTest {
                 TAB_PATH -> tabAnswer(
                     inlineRendition("360p","bytevc1"),
                     inlineRendition("1080p","bytevc1")).toString()
+                V5_PATH -> ""
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -324,8 +371,8 @@ class ContentRepositoryTest {
         }.build())
         val result=repo.stream("456","123")
         assertEquals("1080P",result.quality)
-        // 只有注册和取址这两个请求走了出去。
-        assertEquals(listOf(REGISTER_PATH,TAB_PATH),paths)
+        // 只有注册、v5 门和取址这三个请求走了出去。
+        assertEquals(listOf(REGISTER_PATH,V5_PATH,TAB_PATH),paths)
     }
 
     /**
@@ -342,6 +389,7 @@ class ContentRepositoryTest {
             val body=when(path) {
                 REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
                 TAB_PATH -> tabAnswer(inlineRendition("1080p","bytevc1")).toString()
+                V5_PATH -> ""
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -374,6 +422,7 @@ class ContentRepositoryTest {
                     // 第一轮两个域都空答，第二轮主域就答了。
                     if(asks.incrementAndGet()<=2) "" else tabAnswer(inlineRendition("1080p","bytevc1")).toString()
                 }
+                V5_PATH -> ""
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -404,6 +453,7 @@ class ContentRepositoryTest {
                     // 第一个号整轮两问（两轮 × 两个域 = 四次）都空答；换号之后第五问就答了。
                     if(asks.incrementAndGet()<=4) "" else tabAnswer(inlineRendition("1080p","bytevc1")).toString()
                 }
+                V5_PATH -> ""
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -431,6 +481,7 @@ class ContentRepositoryTest {
                 TAB_PATH -> { asks.incrementAndGet(); "" }
                 // 老门和公开页也都答不出东西：这里要验的是「别没完没了地换号」。
                 PLAYBACK_PATH,MODEL_PATH,PUBLIC_PATH -> ""
+                V5_PATH -> ""
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -460,6 +511,7 @@ class ContentRepositoryTest {
             val body=when(path) {
                 REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
                 TAB_PATH -> tabAnswer(inlineRendition("1080p","bytevc1")).toString()
+                V5_PATH -> ""
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -484,6 +536,7 @@ class ContentRepositoryTest {
             val body=when(path) {
                 REGISTER_PATH -> { registrations.incrementAndGet(); REGISTER_REFUSED }
                 TAB_PATH -> ""
+                V5_PATH -> ""
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -573,6 +626,7 @@ class ContentRepositoryTest {
             val body=when(path) {
                 REGISTER_PATH -> REGISTERED
                 TAB_PATH -> tabAnswer(inlineRendition("1080p","bytevc1")).toString()
+                V5_PATH -> ""
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -624,7 +678,7 @@ class ContentRepositoryTest {
         assertEquals(SignedRetryPolicy.WAVE_SIZE,paths.count { it==MODEL_PATH })
         // 新门在最前面：它空答之后才是签名门和公开页。
         assertTrue(paths.toString(),paths.indexOf(TAB_PATH)<paths.indexOf(MODEL_PATH))
-        assertEquals(listOf("/player/456/123"),paths.filter { it!=MODEL_PATH && it!=TAB_PATH })
+        assertEquals(listOf("/player/456/123"),paths.filter { it!=MODEL_PATH && it!=TAB_PATH && it!=V5_PATH })
     }
 
     @Test fun streamFallsBackToThePublicPlayerPage() {
@@ -652,6 +706,7 @@ class ContentRepositoryTest {
             when(request.url.encodedPath) {
                 MODEL_PATH -> ""      // exactly what the server sends today
                 "/player/456/123" -> """{"contentUrl":"https://hongguoduanju.com/video/public/123/360p.mp4"}"""
+                V5_PATH -> ""
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
         }
@@ -811,6 +866,7 @@ class ContentRepositoryTest {
                 path==TAB_PATH -> ""
                 path==MODEL_PATH -> { if(attempts.getAndIncrement()%2==0) "" else """{"code":0,"data":{"video_model":"{\"fallback_api\":\"$FALLBACK\"}"}}""" }
                 path=="/video/fplay/1/x" -> """{"video_info":{"data":{"key_seed":"$KEY_SEED","video_list":{"video_5":${rendition("1080p","bytevc1")}}}}}"""
+                path==V5_PATH -> ""
                 else -> throw AssertionError("unexpected request ${chain.request().url}")
             }
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
@@ -1135,6 +1191,7 @@ class ContentRepositoryTest {
         when(request.url.encodedPath) {
             "/api/search/result" -> result
             "/api/search/suggestion/" -> suggestion
+            V5_PATH -> ""
             else -> throw AssertionError("unexpected request ${request.url}")
         }
     }
@@ -1188,6 +1245,7 @@ class ContentRepositoryTest {
             when(request.url.encodedPath) {
                 "/api/search/result" -> searchPage()
                 "/api/search/suggestion/" -> suggestionPage()
+                V5_PATH -> ""
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
         }
@@ -1229,6 +1287,7 @@ class ContentRepositoryTest {
             when(request.url.encodedPath) {
                 "/api/search/result" -> throw IOException("no network")
                 "/api/search/suggestion/" -> suggestionPage(suggestionRow("7699683154444946457","我刚穿越，校花竟是重生女帝"))
+                V5_PATH -> ""
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
         }
@@ -1243,6 +1302,7 @@ class ContentRepositoryTest {
             when(request.url.encodedPath) {
                 "/api/search/result" -> searchPage()
                 "/api/search/suggestion/" -> suggestionPage()
+                V5_PATH -> ""
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
         }

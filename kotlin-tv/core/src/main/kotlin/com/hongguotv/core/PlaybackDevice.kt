@@ -99,8 +99,10 @@ internal object PlaybackDevice {
             .post(body.toRequestBody("application/octet-stream;tt-data=a".toMediaType()))
             .build()
         val text = RequestScope.execute(http.newCall(request)) { response ->
+            val t = response.body?.string() ?: ""
             if (!response.isSuccessful) throw HttpStatusException(response.code)
-            response.body?.string() ?: throw IOException("播放设备注册响应为空")
+            if (t.isEmpty()) throw IOException("播放设备注册响应为空")
+            t
         }
         val json = try { JSONObject(text) } catch (e: Exception) { throw IOException("播放设备注册响应无法解析", e) }
         // The registration answer carries no status field at all - it answers with the identity

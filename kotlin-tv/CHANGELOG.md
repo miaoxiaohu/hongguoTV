@@ -4,6 +4,22 @@
 
 电视「检查更新」弹窗里那句短说明，取自每份 `RELEASE_<版本>.md` 中 `<!-- notes -->` 与 `<!-- /notes -->` 之间的块，改文件别动标记。
 
+## 0.9.98 · 站方换取址协议，v5 取址门上线
+
+站方在 2026-11-16 下午换了取址协议：老的 GET `/reading/bookapi/video_tab/...` 与
+POST `/novel/player/multi_video_model/v1/` 一律回 HTTP 200 + 0 字节（软拦截，连错误码都没有），
+所以整部 App 取不到地址 —— 表现就是「又放不了了」。
+这一版接进官方 App 现在真正在用的 v5 取址门，并把它放在取址门的第一位；老的两道门保留成兜底。→ [完整说明](RELEASE_0.9.98.md)
+
+- **真正还在答的是 v5 那条**：`POST /novel/player/multi_video_model/player/v1`，
+  body 是 gzip 过的 JSON，头里只带 `x-khronos` / `x-helios` / `x-medusa` 三个 v5 签名头。
+- **换版本号没有用**：拿 73932 与 73970 两个版本号实测过，旧接口照样 0 字节 —— 原因只有一个，接口换了。
+- **这一版怎么改**：新增 `V5Constants.kt`（v5 的 magic / 许可证号 / 签名 key / v5 专用 sbox）与
+  `V5Playback.kt`（v5 请求与回答解析）；`AesV3.kt` 与 `Signer.kt` 加 v5 分支（老路逻辑一个字没动）；
+  `ContentRepository.kt` 新增 `v5Stream()`，并把 v5 门放在取址门第一位。
+- 单测：`:core:test`（410 个）、`:app:testDebugUnitTest` 全绿；lint：`:app:lintRelease` BUILD SUCCESSFUL。
+- 探针：real-drama 8 集、comic-drama 8 集，全部成功、失败 0，每集实读 1048576 字节媒体。
+
 ## 0.9.97 · 放不了下一集的根因修掉了
 
 不是地址过期 —— 是**每切一集就换一个设备身份去换地址**，而站方发下来的号有一半是坏的，
