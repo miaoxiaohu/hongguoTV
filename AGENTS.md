@@ -219,9 +219,10 @@
 - 推 tag 前查一遍已发布的版本：`gh release list --repo miaoxiaohu/hongguoTV`，
   CI 守卫要求新 tag 的 versionCode **新于所有已发布的 kotlin-v 版本**。
 - **已发布记录**（每条 4 个资产：apk / source.zip / SHA256SUMS / update.json）：
-  0.9.90 → 0.9.91 → 0.9.92 → 0.9.93 → 0.9.94 → 0.9.95 → 0.9.96 → **0.9.97（9097）**。
+  0.9.90 → 0.9.91 → 0.9.92 → 0.9.93 → 0.9.94 → 0.9.95 → 0.9.96 → 0.9.97 → **0.9.98（9098）**。
   0.9.96 一次性带了两件事：取址随机软拦截的重试修复 + 自动连播 HUD 显隐（见下面两节）。
   0.9.97 带来「放不了下一集」的根因修复：身份跨集复用 + 坏号才换号 + ByteVC2 去标记兜底。
+  0.9.98 带来 v5 取址协议（站方 2026-11-16 关停旧取址接口后的根因修复，见「播放取址：v5 协议」那节）。
 - 🔴 **lint 入口只有一个**：`core` 是纯 JVM 模块，**没有 lint 任务**（别试 `:core:lint`，会报
   「task 'lint' not found」）。CI 的验收基线在 `.github/workflows/release.yml` 里：
   `./kotlin-tv/gradlew -p kotlin-tv :core:test :app:testDebugUnitTest :app:lintRelease :app:assembleRelease`。
@@ -763,6 +764,44 @@ iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
 - 单测：`ContentRepositoryTest.anEmptyAnswerIsFollowedByAFreshIdentityAndAnotherAsk`、
   `aRefusedRegistrationIsNotHiddenBehindAnEmptyAnswer`、
   `theFallbackIsAskedAgainWithoutTheVcubeTagsWhenOnlyByteVC2ComesBack`。
+
+
+## 播放取址：v5 协议（2026-11-16 定，别改回去）
+
+🔴 **站方 2026-11-16 下午把旧取址接口关掉了**（0.9.98 的根因）：
+
+- GET `/reading/bookapi/video_tab/multi_video_model/v1/`、POST `/novel/player/multi_video_model/v1/`
+  一律 **HTTP 200 + 0 字节**（`server: volc-dcdn`，就是上面那个软拦截长相）。
+- **注册接口仍然正常发身份** → 症状是「号拿得到、址取不到」，所以现象是全盘放不了。
+- **不是版本号问题**：把 UA/版本资料从 73932 换成 73970 实测无效，已证伪。
+- **修法 = 移植上游 v5 链路**（不要再去旧 v3/tab 链路上试参数）。
+
+### v5 请求形态
+
+- 地址：`POST https://api5-normal-sinfonlinea.fqnovel.com/novel/player/multi_video_model/player/v1`
+- query：`aid=8662&app_name=novelread&version_code=74332&version_name=7.4.3.32&channel=vivo_8662_64&device_platform=android&device_type=PGT-AN10&os_version=12&update_version_code=74332&iid=&cdid=&device_id=&_rticket=`
+- body：**gzip 压缩的 JSON**
+  `{"biz_param":{...,"video_platform":1024},"mixed_video_id_map":{"1004":["<剧集id>"]},"dr_scene":"player"}`
+- 头：`Content-Encoding: gzip`、`x-ss-stub` = **MD5(gzip 字节) 大写**、
+  签名头**只有三个**：`x-khronos` / `x-helios` / `x-medusa`。
+- UA 用上游那串 `com.phoenix.read/73932 (Linux; U; Android 12; zh_CN_#Hans; PGT-AN10; Build/V417IR;tt-ok/3.12.13.20)`，
+  **必须落在签名头之后**，否则会被签名头里的 UA 覆盖掉。
+
+### 代码落点
+
+- 新文件：`core/.../V5Constants.kt`（域名/路径/版本资料/UA）、`core/.../V5Playback.kt`（请求构造与解码）。
+- `AesV3.kt` 加 v5 分支；`Signer.kt` 加 v5 branch 映射、`hashF13()` 的 v5 变体、`medusaV5()`、`signPlayback()`。
+- `ContentRepository.v5Stream()`：**v5 门放在取址门顺序的最第一位**，旧 tab 门、老 POST 门降级兜底。
+
+### 两个坑（都踩过）
+
+- **测试 mock 遇到未知路径抛 `AssertionError`** —— 那是 `Error` 不是 `Exception`，
+  降级链的 `catch` 接不住 → 旧门根本走不到。修法是给 mock **补 v5 分支**（返回空答，
+  模拟站方软拦的真实样子），老门行为照旧被测；v5 另立专项测试
+  `theV5DoorIsAskedFirstAndItsModelIsPlayed`。**不是「改测试凑绿」。**
+- **实机验收判据用「进程 CPU 时间增量」**：读 `/proc/<pid>/stat` 的 utime+stime，
+  播放中 6 秒涨 294 ticks（≈2.94s CPU），退出播放后 6 秒 **0 ticks**。
+  电视 ROM 的 logcat 读不了（`logcat read failure`），截图也判不准，CPU 增量最硬。
 
 
 ## 播放页的缓冲提示（2026-11-11 定，别改回去）
