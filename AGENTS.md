@@ -894,3 +894,13 @@ iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
   ⚠️ 设备时钟可能不准（Palm 那台当时差 8 天），**对齐只认相对差值**，别拿它跟宿主机时间比。
 - **测完必须收尾**：`pkill -f auto3.sh`、`rm -rf /sdcard/auto3`、`am force-stop com.hongguotv.nativeapp`。
   `adb shell rm` 在这些设备上是通的（别套 `su -c`）。
+
+## 小米电视上的在线升级（2026-11-18 实测，已修）
+
+- **现象**：小米电视（192.168.1.25，MiTV-ASTP0 / Android 9）上 App 内「检查更新」提示「新版包名、版本或签名不匹配，已阻止安装」，永远升不了级。
+- **根因不在包**：同一个 APK 用 `pm install -r` 装到这台电视上 Success，证书 SHA-256 与已装版本一致（`4f4cf502…`）。真凶是 App 自己的判断：`getPackageArchiveInfo(apkPath, GET_SIGNING_CERTIFICATES)` 在这台 ROM 上读归档 APK 返回 **signingInfo = null**（包名 / versionCode / versionName / minSdk 都正常），而 `getPackageInfo` 读已装包正常。旧逻辑拿空的候选签名跟 `{652117d}` 硬比，**永远不相等** → 每次在线升级都被自己拦下。
+- **同类坑**：`candidate.applicationInfo?.minSdkVersion` 读不到是 null，与更新说明里的 minSdk 也不等，同样会触发拦截。
+- **解法**：判定下沉到 core `ApkCompatibility.kt`（`ApkFacts` + `blocker()`），**签名与 minSdk 都改成「读不到就放行」**；包名 / 版本号 / 版本名仍严格比对。签名是否一致最终由系统安装器把关。
+- **取证方法**：写一次性探针 APK 打印 `PackageManager` 返回值即可，不需要 root、不需要 logcat。
+- **注意**：修好的版本要先用 adb / 文件管理器手动装一次；旧版本自身仍会拦升级。
+- **apply when**: 在小米电视，以及任何 ROM 上 `getPackageArchiveInfo` 读不出签名的设备，排查「在线升级被自己拦下」。

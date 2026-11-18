@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.ClipData
 import android.content.Intent
+import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -17,6 +18,8 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.content.FileProvider
+import com.hongguotv.core.ApkCompatibility
+import com.hongguotv.core.ApkFacts
 import com.hongguotv.core.AppUpdate
 import com.hongguotv.core.AppUpdateRepository
 import com.hongguotv.core.UpdateFiles
@@ -176,13 +179,31 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         val flags = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
         val candidate = pm.getPackageArchiveInfo(apk.path, flags) ?: throw IOException("安装包无法识别")
         val installed = pm.getPackageInfo(activity.packageName, flags)
-        val version = if (Build.VERSION.SDK_INT >= 28) candidate.longVersionCode else candidate.versionCode.toLong()
-        fun signers(info: android.content.pm.PackageInfo) =
-            (if (Build.VERSION.SDK_INT >= 28) info.signingInfo?.apkContentsSigners else info.signatures)?.map { it.toCharsString() }?.toSet().orEmpty()
-        if (candidate.packageName != activity.packageName || version != update.versionCode || candidate.versionName != update.versionName || version <= BuildConfig.VERSION_CODE ||
-            candidate.applicationInfo?.minSdkVersion != update.minSdk || signers(installed).isEmpty() || signers(installed) != signers(candidate))
-            throw IOException("新版包名、版本或签名不匹配，已阻止安装")
+        val blocker = ApkCompatibility.blocker(facts(candidate), facts(installed), update)
+        if (blocker != null) throw IOException("新版" + blocker + "，已阻止安装")
     }
+
+    /**
+     * 把 PackageInfo 摊平成 [ApkFacts]。
+     *
+     * 读不到的字段就留空（signers 空集合、minSdk 为 null），由 [ApkCompatibility] 决定怎么办：
+     * 小米电视上归档 APK 的签名读不到（signingInfo 为 null），把它当成「签名不一致」会把
+     * 每次在线升级都拦下来。
+     */
+    @Suppress("DEPRECATION")
+    private fun facts(info: PackageInfo): ApkFacts {
+        val version = if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
+        val signers = (if (Build.VERSION.SDK_INT >= 28) info.signingInfo?.apkContentsSigners else info.signatures)
+            ?.map { it.toCharsString() }?.toSet().orEmpty()
+        return ApkFacts(
+            packageName = info.packageName,
+            versionCode = version,
+            versionName = info.versionName ?: "",
+            minSdk = info.applicationInfo?.minSdkVersion?.takeIf { it > 0 },
+            signers = signers,
+        )
+    }
+
     private fun install() {
         val update = available ?: return
         if (busy || !active || !ready) return

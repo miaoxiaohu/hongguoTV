@@ -18,12 +18,14 @@ data class AppUpdate(val versionCode: Long, val versionName: String, val minSdk:
     companion object {
         // 指向本仓库自己的 release。上游 N3urda/hongguoTV-updates 从未发布过任何版本，
         // 留在这里会让「检查更新」永远 404，电视拿不到新版。
+        // 本 App 的包名：更新说明与归档 APK 都以它为准。
+        const val PACKAGE_NAME = "com.hongguotv.nativeapp"
         const val REPOSITORY = "miaoxiaohu/hongguoTV"
         const val RELEASES = "https://github.com/$REPOSITORY/releases"
         const val MAX_APK_BYTES = 80L * 1024 * 1024
         fun parse(json: String): AppUpdate {
             val o = JSONObject(json)
-            require(o.getInt("schema") == 1 && o.getString("packageName") == "com.hongguotv.nativeapp") { "更新信息不匹配" }
+            require(o.getInt("schema") == 1 && o.getString("packageName") == PACKAGE_NAME) { "更新信息不匹配" }
             val apk = o.getJSONObject("apk")
             val update = AppUpdate(o.getLong("versionCode"), o.getString("versionName"), o.getInt("minSdk"),
                 o.getString("tag"), apk.getString("name"), apk.getLong("size"), apk.getString("sha256").lowercase(), o.optString("notes").take(1500))

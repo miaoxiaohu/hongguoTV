@@ -4,6 +4,21 @@
 
 电视「检查更新」弹窗里那句短说明，取自每份 `RELEASE_<版本>.md` 中 `<!-- notes -->` 与 `<!-- /notes -->` 之间的块，改文件别动标记。
 
+## 0.9.99 · 修好小米电视上的在线升级
+
+小米电视上点「检查更新」会提示「新版包名、版本或签名不匹配，已阻止安装」，于是永远升不了级。
+根因不在包上：这台机器（MiTV-ASTP0 / Android 9）的系统接口读归档 APK 时读不出签名，
+而 App 拿这个空结果跟已装包的签名硬比，就把自己拦下了 —— 包名、版本号、minSdk、证书其实全都对得上。
+这一版改成「读不到就不算不匹配」：包名、版本号、版本名仍逐项严格比对；签名只有两边都读到才比，
+读不到就放行给系统安装器（签名真不一致，系统自己会拒绝安装）。详见 [完整说明](RELEASE_0.9.99.md)
+
+- **不是包的问题**：同一个 APK 用 `pm install -r` 装到这台电视上 Success，证书指纹与已装版本完全一致。
+- **判定下沉到 core**：新增 `core/ApkCompatibility.kt`（`ApkFacts` + `ApkCompatibility.blocker()`），纯 JVM 可单测；app 层只负责把 `PackageInfo` 摊平成事实。
+- **签名读不到就放行**：minSdk 同理。签名最终由系统安装器把关，不一致会返回 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`。
+- **提示写清原因**：拦下时逐项说明是包名、版本号、版本名、minSdk 还是签名，不再一句笼统的「不匹配」。
+- **已装版本号取系统真实值**：改用 `longVersionCode`，不再依赖编译期 `BuildConfig.VERSION_CODE`。
+- 单测：`:core:test`（新增 `ApkCompatibilityTest` 8 个用例）、`:app:testDebugUnitTest` 全绿；lint：`:app:lintRelease` BUILD SUCCESSFUL。
+
 ## 0.9.98 · 站方换取址协议，v5 取址门上线
 
 站方在 2026-11-16 下午换了取址协议：老的 GET `/reading/bookapi/video_tab/...` 与
