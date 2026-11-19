@@ -274,6 +274,98 @@ class ContentRepositoryTest {
         })
     }
 
+    /**
+     * v5 取址门的回答：模型挂在 mixed_video_id_map 用的那个键（1004）下面。
+     */
+    private fun v5Answer(vararg renditions: JSONObject) = v5AnswerFor("123", *renditions)
+
+    /** v5 取址门的回答，挂在被问的那一集上（v5 门按 id 精确匹配，不做兜底）。 */
+    private fun v5AnswerFor(id: String, vararg renditions: JSONObject) =
+        JSONObject().put("code",0).put("data",JSONObject().put("1004",
+            JSONObject().put(id,JSONObject().put("video_model",
+                JSONObject().put("video_list",JSONArray().apply { renditions.forEach { put(it) } })))))
+
+    /**
+     * v5 门空答之后要接着问同一个身份，不能一次空答就换号。
+     *
+     * 2026-11-20 实测：v5 门刚接进来的时候是**一次空答就判失败**。站方偶尔回的一次空体
+     * （HTTP 200 + 0 字节）于是把这一集判死，降级链一路退到公开页，用户只看到 10 秒试看片段。
+     * 现在跟 tab 门一样：同一个身份最多问两次，整轮都空才换身份。
+     */
+    @Test fun anEmptyV5AnswerIsFollowedByAnotherAskWithTheSameIdentity() {
+        val registrations=java.util.concurrent.atomic.AtomicInteger()
+        val asks=java.util.concurrent.atomic.AtomicInteger()
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            val body=when(path) {
+                REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
+                // 第一次空答，第二次就答了。
+                V5_PATH -> if(asks.incrementAndGet()<=1) "" else v5Answer(inlineRendition("1080p","bytevc1")).toString()
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        val result=repo.stream("456","123")
+        assertEquals("1080P",result.quality)
+        // 一次空答不换身份：整个过程只注册过一次。
+        assertEquals("空答不该立刻换身份 —— 好号要留着跨集复用",1,registrations.get())
+        assertEquals("空答之后要再问一次同一个身份",2,asks.get())
+    }
+
+    /**
+     * v5 门上一个身份整轮都空答，就换一个新身份。
+     *
+     * 站方发的号大约一半是坏的，坏号是永久的（实测隔 30 秒再问还是全空），
+     * 所以这个号不会再好了 —— 丢掉它、重新注册一个，换到好号就接着放。
+     */
+    @Test fun anIdentityThatKeepsAnsweringEmptyOnTheV5DoorIsReplaced() {
+        val registrations=java.util.concurrent.atomic.AtomicInteger()
+        val asks=java.util.concurrent.atomic.AtomicInteger()
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            val body=when(path) {
+                REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
+                // 第一个号整轮两问都空答；换号之后第三问就答了。
+                V5_PATH -> if(asks.incrementAndGet()<=2) "" else v5Answer(inlineRendition("1080p","bytevc1")).toString()
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        val result=repo.stream("456","123")
+        assertEquals("1080P",result.quality)
+        // 坏号要换掉：换了一个新身份之后第一轮就答了。
+        assertEquals("整轮空答就该换身份",2,registrations.get())
+    }
+
+    /**
+     * v5 取址请求里的 device_level 必须是 1，不能是 3。
+     *
+     * 站方按这个值决定发什么编码：3 只给 ByteVC2（电视解不了），0 和 1 给 ByteVC1（真 HEVC）。
+     * 项目硬约定就是 1。2026-11-20 实测：v5 门刚接进来时这里照抄上游写死成了 3。
+     */
+    @Test fun theV5RequestAsksForTheLevelTheTelevisionCanDecode() {
+        var sent=""
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            val body=when(path) {
+                REGISTER_PATH -> REGISTERED
+                V5_PATH -> {
+                    val buffer=okio.Buffer()
+                    request.body?.writeTo(buffer)
+                    sent=java.util.zip.GZIPInputStream(buffer.inputStream()).readBytes().toString(Charsets.UTF_8)
+                    v5Answer(inlineRendition("1080p","bytevc1")).toString()
+                }
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        repo.stream("456","123")
+        assertTrue("v5 请求必须带 device_level 1，实际：$sent",sent.contains("\"device_level\":1"))
+    }
+
     @Test fun streamAsksTheEndpointTheAppItselfUsesFirst() {
         val paths=requestPaths()
         val repo=repository(tab=tabAnswer(inlineRendition("1080p","bytevc1")).toString()) { request ->
@@ -363,7 +455,10 @@ class ContentRepositoryTest {
                 TAB_PATH -> tabAnswer(
                     inlineRendition("360p","bytevc1"),
                     inlineRendition("1080p","bytevc1")).toString()
-                V5_PATH -> ""
+                // v5 门答得出，档位就在回答里（2026-11-16 起它才是还在答的那道门）。
+                V5_PATH -> v5Answer(
+                    inlineRendition("360p","bytevc1"),
+                    inlineRendition("1080p","bytevc1")).toString()
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -371,8 +466,8 @@ class ContentRepositoryTest {
         }.build())
         val result=repo.stream("456","123")
         assertEquals("1080P",result.quality)
-        // 只有注册、v5 门和取址这三个请求走了出去。
-        assertEquals(listOf(REGISTER_PATH,V5_PATH,TAB_PATH),paths)
+        // 只有注册与 v5 门这两个请求走了出去 —— 内联档位直接播，没有第二个取址地址的请求。
+        assertEquals(listOf(REGISTER_PATH,V5_PATH),paths)
     }
 
     /**
@@ -389,7 +484,8 @@ class ContentRepositoryTest {
             val body=when(path) {
                 REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
                 TAB_PATH -> tabAnswer(inlineRendition("1080p","bytevc1")).toString()
-                V5_PATH -> ""
+                // v5 门是现在还在答的那道门（2026-11-16 起），它答得出就不该再去问老门。
+                V5_PATH -> v5Answer(inlineRendition("1080p","bytevc1")).toString()
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -414,11 +510,15 @@ class ContentRepositoryTest {
     @Test fun anEmptyAnswerIsFollowedByAnotherAskWithTheSameIdentity() {
         val registrations=java.util.concurrent.atomic.AtomicInteger()
         val asks=java.util.concurrent.atomic.AtomicInteger()
+        // v5 门是第一道门，它自己也会换号（2026-11-20 实测：v5 门空答就换号重试）。
+        // 所以这里记下 tab 门开始时的注册数，量的只是 tab 门那一轮的行为。
+        val registrationsWhenTabStarted=java.util.concurrent.atomic.AtomicInteger(-1)
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             val request=chain.request(); val path=request.url.encodedPath
             val body=when(path) {
                 REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
                 TAB_PATH -> {
+                    if(registrationsWhenTabStarted.get()<0) registrationsWhenTabStarted.set(registrations.get())
                     // 第一轮两个域都空答，第二轮主域就答了。
                     if(asks.incrementAndGet()<=2) "" else tabAnswer(inlineRendition("1080p","bytevc1")).toString()
                 }
@@ -430,10 +530,10 @@ class ContentRepositoryTest {
         }.build())
         val result=repo.stream("456","123")
         assertEquals("1080P",result.quality)
-        // 一次空答不换身份：整个过程只注册过一次。
-        assertEquals("空答不该立刻换身份 —— 好号要留着跨集复用",1,registrations.get())
         // 第一轮两个域各问一次（两次空答），第二轮主域就答了。
         assertEquals("一轮空答两问，第二轮答出",3,asks.get())
+        // 空答不该立刻换身份：那次空答之后注册数没有增加 —— 还是同一个身份（好号要留着跨集复用）。
+        assertEquals("空答不该立刻换身份 —— 好号要留着跨集复用",0,registrations.get()-registrationsWhenTabStarted.get())
     }
 
     /**
@@ -445,11 +545,14 @@ class ContentRepositoryTest {
     @Test fun anIdentityThatKeepsAnsweringEmptyIsReplaced() {
         val registrations=java.util.concurrent.atomic.AtomicInteger()
         val asks=java.util.concurrent.atomic.AtomicInteger()
+        // v5 门自己也会换号（2026-11-20），所以这里从 tab 门开始时算起。
+        val registrationsWhenTabStarted=java.util.concurrent.atomic.AtomicInteger(-1)
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             val request=chain.request(); val path=request.url.encodedPath
             val body=when(path) {
                 REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
                 TAB_PATH -> {
+                    if(registrationsWhenTabStarted.get()<0) registrationsWhenTabStarted.set(registrations.get())
                     // 第一个号整轮两问（两轮 × 两个域 = 四次）都空答；换号之后第五问就答了。
                     if(asks.incrementAndGet()<=4) "" else tabAnswer(inlineRendition("1080p","bytevc1")).toString()
                 }
@@ -461,8 +564,8 @@ class ContentRepositoryTest {
         }.build())
         val result=repo.stream("456","123")
         assertEquals("1080P",result.quality)
-        // 坏号要换掉：换了一个新身份之后第一轮就答了。
-        assertEquals("整轮空答就该换身份",2,registrations.get())
+        // 坏号要换掉：tab 门那一整轮都空答之后换了新身份 —— 正好多注册一个身份。
+        assertEquals("整轮空答就该换身份",1,registrations.get()-registrationsWhenTabStarted.get())
     }
 
     /**
@@ -490,8 +593,9 @@ class ContentRepositoryTest {
         assertThrows(IOException::class.java) { repo.stream("456","123") }
         // 新门每个身份问两轮、每轮两个域。
         assertEquals("每个身份问两轮",ContentRepository.PLAYBACK_TAB_MAX_IDENTITIES*ContentRepository.PLAYBACK_TAB_ATTEMPTS_PER_IDENTITY*2,asks.get())
-        // 换号有上限：新门最多换 [PLAYBACK_TAB_MAX_IDENTITIES] 个，老门再补几个 —— 不能无限换下去。
-        assertTrue("换号次数要有上限，实际 ${registrations.get()}",registrations.get()<=ContentRepository.PLAYBACK_TAB_MAX_IDENTITIES+8)
+        // 换号有上限：v5 门最多换 [PLAYBACK_TAB_MAX_IDENTITIES] 个身份，tab 门再换这么多，
+        // 老门再补几个 —— 不能无限换下去。
+        assertTrue("换号次数要有上限，实际 ${registrations.get()}",registrations.get()<=ContentRepository.PLAYBACK_TAB_MAX_IDENTITIES*2+8)
     }
 
     /**
@@ -506,19 +610,22 @@ class ContentRepositoryTest {
      */
     @Test fun oneIdentityServesManyEpisodes() {
         val registrations=java.util.concurrent.atomic.AtomicInteger()
+        val asked=java.util.concurrent.atomic.AtomicReference("123")
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             val request=chain.request(); val path=request.url.encodedPath
             val body=when(path) {
                 REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
                 TAB_PATH -> tabAnswer(inlineRendition("1080p","bytevc1")).toString()
-                V5_PATH -> ""
+                // v5 门是现在还在答的那道门（2026-11-16 起）：它答得出，身份就能一直复用下去。
+                // v5 门按集 id 精确匹配，所以回答要挂在当前被问的那一集上。
+                V5_PATH -> v5AnswerFor(asked.get(),inlineRendition("1080p","bytevc1")).toString()
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
                 .code(200).message("OK").body(body.toResponseBody()).build()
         }.build())
         // 三十集 —— 正好是旧实现里注册配额被打爆的那个位置。
-        for(episode in 9001..9030) repo.stream("456",episode.toString())
+        for(episode in 9001..9030) { asked.set(episode.toString()); repo.stream("456",episode.toString()) }
         assertEquals("身份要跨集复用，不能每集重新注册",1,registrations.get())
     }
 

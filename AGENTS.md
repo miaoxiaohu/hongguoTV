@@ -15,6 +15,11 @@
 - **不推 Bark**（2026-11-04 起按用户要求停用推送）：脚本默认不推，异常只由 cron 会话回报一句。
   要推必须显式加 `-Push`。
   退出码：`0` 正常 / `10` 有异常（结果在脚本 stdout 的「异常明细：」段里）/ `20` 探针没编译。
+- 🔴 **检测前必须重编译探针**（2026-11-20 实测踩过）：脚本直接跑
+  `kotlin-tv\core\build\install\core\bin\core.bat`，**自己不编译**。源码改了而探针二进制没重编，
+  检测跑的就是旧代码 —— 11-20 那趟就是这么把「旧取址接口已被站方关掉」当成了当前代码的故障
+  （探针二进制停在 11-16 20:56，比 v5 取址协议接入还早，里面还留着早先撤掉的 `[DIAG-TEMP]` 埋点）。
+  现在脚本每趟先跑 `:core:installDist`（增量），编译失败只警告、仍用现有探针跑，不因此判失败。
 - **2026-11-05 起任务升级为「检测 + 自动修复 + 发版」**：探针报异常时，任务自己
   读证据 → 定位站方变更 → 改 `kotlin-tv/core` 代码 → 编译 + 跑单测/lint → 重跑探针验证 →
   **推 main + 打 `kotlin-vX.Y.Z` tag → 等 CI 出 release → 验资产和 update.json**。
@@ -219,10 +224,12 @@
 - 推 tag 前查一遍已发布的版本：`gh release list --repo miaoxiaohu/hongguoTV`，
   CI 守卫要求新 tag 的 versionCode **新于所有已发布的 kotlin-v 版本**。
 - **已发布记录**（每条 4 个资产：apk / source.zip / SHA256SUMS / update.json）：
-  0.9.90 → 0.9.91 → 0.9.92 → 0.9.93 → 0.9.94 → 0.9.95 → 0.9.96 → 0.9.97 → **0.9.98（9098）**。
+  0.9.90 → 0.9.91 → 0.9.92 → 0.9.93 → 0.9.94 → 0.9.95 → 0.9.96 → 0.9.97 → 0.9.98 → 0.9.99 → **0.9.100（9100）**。
   0.9.96 一次性带了两件事：取址随机软拦截的重试修复 + 自动连播 HUD 显隐（见下面两节）。
   0.9.97 带来「放不了下一集」的根因修复：身份跨集复用 + 坏号才换号 + ByteVC2 去标记兜底。
   0.9.98 带来 v5 取址协议（站方 2026-11-16 关停旧取址接口后的根因修复，见「播放取址：v5 协议」那节）。
+  0.9.99 修好小米电视上的在线升级（读归档 APK 读不出签名时不再自己拦下）。
+  0.9.100 补上 v5 门的空答换号重试，并把 v5 请求的 device_level 改回 1。
 - 🔴 **lint 入口只有一个**：`core` 是纯 JVM 模块，**没有 lint 任务**（别试 `:core:lint`，会报
   「task 'lint' not found」）。CI 的验收基线在 `.github/workflows/release.yml` 里：
   `./kotlin-tv/gradlew -p kotlin-tv :core:test :app:testDebugUnitTest :app:lintRelease :app:assembleRelease`。
@@ -802,6 +809,19 @@ iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
 - **实机验收判据用「进程 CPU 时间增量」**：读 `/proc/<pid>/stat` 的 utime+stime，
   播放中 6 秒涨 294 ticks（≈2.94s CPU），退出播放后 6 秒 **0 ticks**。
   电视 ROM 的 logcat 读不了（`logcat read failure`），截图也判不准，CPU 增量最硬。
+
+### v5 门也要空答换号（2026-11-20 实测，别改回去）
+
+- v5 门刚接进来的时候**一次空答就直接判失败**（`v5Stream()` 里 `?: throw EmptySignedAnswerException()`），
+  tab 门那套「空答换号」的机制**没搬过来**。站方偶尔回的一次空体（HTTP 200 + 0 字节）
+  于是把这一集判死，降级链一路退到公开页（只有 10 秒试看），用户看到的就是「只放 10 秒就报播放失败」。
+- 现在的做法（`v5VideoModel()`，与 tab 门一致）：同一个身份最多问两次（间隔 `PLAYBACK_TAB_RETRY_GAP_MS`），
+  整轮空答就 `dropPlaybackIdentity()` 换号，最多 `PLAYBACK_TAB_MAX_IDENTITIES` 个身份；
+  注册被拒仍然立刻上抛走长退避，不被空答盖成「空内容」。
+- 🔴 **`V5Playback` 请求体里的 `device_level` 必须是 1**：原来照抄上游写死成 3
+  （3 → ByteVC2，电视解不了；0/1 → ByteVC1 真 HEVC），与老 POST 门、tab 门和项目硬约定都不一致。
+  现在用 `ContentRepository.PLAYBACK_DEVICE_LEVEL`，并有单测锁住（`theV5RequestAsksForTheLevelTheTelevisionCanDecode`）。
+- `Probe.kt` 里那两处 `device_level:3` 仍是对照组，不在生产路径。
 
 
 ## 播放页的缓冲提示（2026-11-11 定，别改回去）

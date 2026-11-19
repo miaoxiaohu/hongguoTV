@@ -937,12 +937,46 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      */
     private fun v5Stream(id: String, maxQuality: Int): StreamInfo {
         cachedAddress(id)?.let { return it }
-        val identity=playbackIdentity()
-        val model=addressLookup { client -> V5Playback.model(client,identity,id,clock()) }
-            ?: throw EmptySignedAnswerException()
+        val model=v5VideoModel(id) ?: throw EmptySignedAnswerException()
         val stream=episodeStream(model,maxQuality)
         rememberAddress(id,stream)
         return stream
+    }
+    /**
+     * v5 门问一集的播放模型：空答就换一个身份再问。
+     *
+     * 2026-11-20 实测：v5 门刚接进来的时候，**一次空答就直接判失败**。站方偶尔回的一次空体
+     * （HTTP 200 + 0 字节）于是把这一集判死，降级链一路退到公开页，用户只看到 10 秒试看片段。
+     * 现在跟 tab 门一样：同一个身份最多问两次（间隔 [PLAYBACK_TAB_RETRY_GAP_MS]），
+     * 整轮都空答就丢掉这个身份换一个新注册的，最多换 [PLAYBACK_TAB_MAX_IDENTITIES] 个身份。
+     * 注册被拒仍然直接上抛（长退避），不被后面的空答盖成「空内容」。
+     */
+    private fun v5VideoModel(id: String): JSONObject? {
+        var failure: Exception?=null
+        var empty=false
+        var identity: PlaybackIdentity?=null
+        for(round in 0 until PLAYBACK_TAB_MAX_IDENTITIES) {
+            val current=try {
+                if(identity==null) identity=playbackIdentity()
+                identity!!
+            }
+            catch(e: Exception) {
+                if(e is RegistrationUnavailableException) throw e
+                failure=e; continue
+            }
+            for(attempt in 0 until PLAYBACK_TAB_ATTEMPTS_PER_IDENTITY) {
+                if(attempt>0) Thread.sleep(PLAYBACK_TAB_RETRY_GAP_MS)
+                val model=try { addressLookup { client -> V5Playback.model(client,current,id,clock()) } }
+                catch(e: Exception) { failure=e; continue }
+                if(model!=null) return model
+                empty=true
+            }
+            // 这个身份整轮都空答：站方已经不看它了（实测坏号是永久坏的），丢掉换一个新的。
+            dropPlaybackIdentity()
+            identity=null
+        }
+        if(!empty && failure!=null) throw failure
+        throw EmptySignedAnswerException().also { e -> failure?.let { e.addSuppressed(it) } }
     }
     private fun tabStream(id: String, maxQuality: Int): StreamInfo {
         cachedAddress(id)?.let { return it }
