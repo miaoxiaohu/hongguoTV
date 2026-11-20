@@ -4,6 +4,8 @@ package com.hongguotv.core
 internal object VendorConstants {
     const val VIDEO_UA = "com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
     const val APP_UA = "com.phoenix.read/72232 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3)"
+    /** 播放模型请求用的厂商 UA；上游 0.16.10 的 video_tab 门戴的就是这一档。 */
+    const val PLAYER_UA = "com.phoenix.read/71532 (Linux; U; Android 9; SM-N9860; Build/PQ3A.190705.10241111;tt-ok/3.12.13.20)"
 
     /**
      * A fresh device identity for one request.

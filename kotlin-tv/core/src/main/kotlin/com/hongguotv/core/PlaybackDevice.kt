@@ -24,9 +24,26 @@ import javax.crypto.spec.SecretKeySpec
  * query. `cdid` is the id the registration body was built with, so it has to come back out of
  * the registration unchanged - it is not a fresh random value per request.
  *
- * Nothing else about the registered device is used or stored.
+ * The session cookies the registration hands back travel with the identity as well;
+ * see [cookie].
  */
-internal data class PlaybackIdentity(val deviceId: String, val iid: String, val cdid: String)
+internal data class PlaybackIdentity(
+    val deviceId: String,
+    val iid: String,
+    val cdid: String,
+    /**
+     * The session cookies the registration handed back (`Set-Cookie`).
+     *
+     * The registration answers with `Set-Cookie` on top of the identity: `store-region`,
+     * `store-region-src=did`, `install_id` and `ttreq`. The official client replays those on
+     * the `video_tab` door, so we do too.
+     *
+     * Measured 2026-11-20: carrying the cookie did **not** change the answer - with it and
+     * without it every playback door answered HTTP 200 with a zero-byte body. So the cookie is
+     * here because it is what the official client sends, not because it fixed anything.
+     */
+    val cookie: String = "",
+)
 
 /**
  * The anonymous playback device.
@@ -98,7 +115,11 @@ internal object PlaybackDevice {
             .header("x-ss-stub", digest("MD5", body).hex().uppercase())
             .post(body.toRequestBody("application/octet-stream;tt-data=a".toMediaType()))
             .build()
+        var cookie = ""
         val text = RequestScope.execute(http.newCall(request)) { response ->
+            // The registration hands back the session cookies as well; they belong to the
+            // identity and have to travel with every playback request.
+            cookie = sessionCookie(response.headers("Set-Cookie"))
             val t = response.body?.string() ?: ""
             if (!response.isSuccessful) throw HttpStatusException(response.code)
             if (t.isEmpty()) throw IOException("播放设备注册响应为空")
@@ -119,7 +140,26 @@ internal object PlaybackDevice {
         if (code != 0) throw PlaybackRegistrationRefusedException("播放设备注册被拒绝 code=$code")
         if (deviceId.isEmpty() || iid.isEmpty())
             throw PlaybackRegistrationRefusedException("播放设备注册没有发回可用身份（站方这次没放号，稍后再试）")
-        return PlaybackIdentity(deviceId, iid, cdid)
+        return PlaybackIdentity(deviceId, iid, cdid, cookie)
+    }
+
+    /**
+     * The session cookies out of the registration's `Set-Cookie` headers.
+     *
+     * Only the `name=value` pair of each header's first segment counts - the rest of the segment
+     * is the cookie's attributes (`Path`, `Expires`, ...), which belong in the answer to the
+     * server and not in the request we send back.
+     */
+    private fun sessionCookie(setCookies: List<String>): String {
+        val cookies = linkedMapOf<String, String>()
+        for (header in setCookies) {
+            val pair = header.split(';').firstOrNull()?.trim() ?: continue
+            if (!pair.contains('=')) continue
+            val name = pair.substringBefore('=').trim()
+            val value = pair.substringAfter('=').trim()
+            if (name.isNotEmpty() && value.isNotEmpty()) cookies[name] = value
+        }
+        return cookies.entries.joinToString("; ") { it.key + "=" + it.value }
     }
 
     /**

@@ -652,9 +652,10 @@ iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
 - **好号可以长期跨集复用**：同一个身份连取 **60 集全部成功**。
 - 所以「放不了下一集」的真正机制是「每集换一个身份」= 每集约 50% 概率踩到坏号，
   而且每集换号还会**打爆站方发号配额**（实测连打 60 集时第 30 集起注册被拒、退避 10 分钟）。
-- **现在的做法（0.9.97 起）**：身份跨集复用（`playbackIdentity()`，寿命 `PLAYBACK_IDENTITY_MAX_AGE_MS` = 2 小时）；
-  每个身份最多问 2 次（间隔 `PLAYBACK_TAB_RETRY_GAP_MS` = 500ms）；整轮空答才
-  `dropPlaybackIdentity()` 换号，最多 `PLAYBACK_TAB_MAX_IDENTITIES` = 8 个号。
+- **现在的做法（2026-11-20 改）**：身份跨集复用（`playbackIdentity()`，寿命 `PLAYBACK_IDENTITY_MAX_AGE_MS` = 2 小时）；
+  v5 门每个身份最多问 2 次（间隔 `PLAYBACK_TAB_RETRY_GAP_MS` = 500ms），tab 门每个身份问一轮
+  （两个域 × 两种形态都试过）；**两道门都空答**才换号，一集最多 `PLAYBACK_IDENTITY_ROUNDS` = 2 个身份，
+  且两次换号之间至少隔 `PLAYBACK_IDENTITY_ROTATE_COOLDOWN_MS` = 30 秒。
 - `takePlaybackIdentity()`（「用掉即弃」）已删除，别再引用。
 
 ### 四、全档 ByteVC2 的集：换 codec_type=3 再要一次备用地址
@@ -764,8 +765,13 @@ iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
 - **0.9.96 的修法（已被 0.9.97 取代）**：`ContentRepository.PLAYBACK_TAB_ATTEMPTS = 8` ——
   空答就换一个**全新身份**再问。这个改法治的是「随机拦截」，但真正的病是「换号太勤」，
   所以它反而把发号配额打爆（0.9.96 那套每集换号，连打 60 集时第 30 集起注册被拒）。
-- **0.9.97 的修法（现在这样）**：**身份跨集复用**；每个身份最多问 2 次（间隔 500ms）；
-  整轮空答才换号，最多换 8 个号；身份寿命 2 小时。正常情况下**一集一次注册都不多花**。
+- **现在的修法（2026-11-20 再改）**：**身份跨集复用**；v5 门每个身份最多问 2 次（间隔 500ms），
+  tab 门每个身份问一轮（两个域 × 两种形态）；**两道门都空答**才换号，一集最多 2 个身份，
+  且两次换号之间至少隔 30 秒（`PLAYBACK_IDENTITY_ROTATE_COOLDOWN_MS`，与上游 0.16.10 同量级）；
+  身份寿命 2 小时。正常情况下**一集一次注册都不多花**。
+- 🔴 **换号必须有冷却（2026-11-20 实测）**：原先 v5 门一轮空答就换一个号、一集最多换 8 个，
+  一次检测 16 集最多烧掉 128 次注册 —— 站方发号配额被打爆之后，后半程的集数直接
+  「注册被拒」+ 10 分钟退避，表现从「有几集放不了」变成「十分钟都放不了」。
 - **注册被拒仍然立刻上抛**：`RegistrationUnavailableException` 不被空答盖住（走长退避），
   否则电视放 10 秒试看再报「播放失败」，完全看不出是注册的事。
 - 单测：`ContentRepositoryTest.anEmptyAnswerIsFollowedByAFreshIdentityAndAnotherAsk`、
@@ -810,18 +816,44 @@ iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
   播放中 6 秒涨 294 ticks（≈2.94s CPU），退出播放后 6 秒 **0 ticks**。
   电视 ROM 的 logcat 读不了（`logcat read failure`），截图也判不准，CPU 增量最硬。
 
-### v5 门也要空答换号（2026-11-20 实测，别改回去）
+### v5 门空答要往 tab 门走，但换号不归 v5 门管（2026-11-20 实测，别改回去）
 
 - v5 门刚接进来的时候**一次空答就直接判失败**（`v5Stream()` 里 `?: throw EmptySignedAnswerException()`），
   tab 门那套「空答换号」的机制**没搬过来**。站方偶尔回的一次空体（HTTP 200 + 0 字节）
   于是把这一集判死，降级链一路退到公开页（只有 10 秒试看），用户看到的就是「只放 10 秒就报播放失败」。
-- 现在的做法（`v5VideoModel()`，与 tab 门一致）：同一个身份最多问两次（间隔 `PLAYBACK_TAB_RETRY_GAP_MS`），
-  整轮空答就 `dropPlaybackIdentity()` 换号，最多 `PLAYBACK_TAB_MAX_IDENTITIES` 个身份；
+- 现在的做法（`v5VideoModel()`）：同一个身份最多问两次（间隔 `PLAYBACK_TAB_RETRY_GAP_MS`），
+  **v5 门自己不换号** —— 空答就往 tab 门走；两道门都空答才由 `streamDoors()` 统一换号
+  （一集最多 `PLAYBACK_IDENTITY_ROUNDS` = 2 个身份，两次换号之间至少隔 30 秒）。
   注册被拒仍然立刻上抛走长退避，不被空答盖成「空内容」。
+- 单测锁住这个配额纪律：`anEmptyV5DoorDoesNotBurnTheRegistrationQuotaByItself`、
+  `theIdentityIsNotRotatedAgainWhileTheCooldownLasts`。
 - 🔴 **`V5Playback` 请求体里的 `device_level` 必须是 1**：原来照抄上游写死成 3
   （3 → ByteVC2，电视解不了；0/1 → ByteVC1 真 HEVC），与老 POST 门、tab 门和项目硬约定都不一致。
   现在用 `ContentRepository.PLAYBACK_DEVICE_LEVEL`，并有单测锁住（`theV5RequestAsksForTheLevelTheTelevisionCanDecode`）。
 - `Probe.kt` 里那两处 `device_level:3` 仍是对照组，不在生产路径。
+
+
+## 播放取址：站方整体软拦截（2026-11-20 上午起，别再逐个形态试）
+
+🔴 **2026-11-20 14:00 那趟检测：real-drama 8/8 + comic-drama 8/8 全失败**，
+根因**不在我方代码**，是站方把取址这一族门整体软拦截了。
+
+- 现象：所有取址门回 **HTTP 200 + 0 字节**、`server: volc-dcdn` —— 与 11-11 签名收紧、
+  11-16 接口关闭同一个长相。目录页 / 详情页 / 搜索全部正常 → 不是网络、不是节点问题。
+- **同一份代码 03:37 跑还全绿，14:00 就全红** → 收紧发生在当天上午。上游同日同样中招：
+  N3urda/hongguoTV 的 issue #81「0.16.10 并未修复空响应」、#82「0.16.10 返回为空」、
+  #83「最新版播放不了」—— 他们 11-19 发的 0.16.10 也没解决。
+- **九种形态实测全是同一个空答**（一次注册、同一身份）：v5 门（上游形态，带 / 不带 cookie）、
+  v5 门（完整 profile）、tab 门（完整 profile + PLAYER_UA，带 / 不带 cookie）、
+  tab 门（最小字段）、tab 门（VIDEO_UA）、单集 POST 门（上游 0.16.10 的主力门，两个域）。
+  结论：**软拦截与请求形态无关** —— 换形态没有意义，别再逐个试。
+- 因此代码改成**两种形态都发**（不赌单一形态）：tab 门先发上游 0.16.10 的现行形态
+  （完整设备 profile + `signPlayback` 签名 + `PLAYER_UA` + 注册 cookie），
+  再发我们自己 551 Argus 那一套（11-20 03:37 还在答的那一形态）。
+- **会话 cookie**：注册响应下发的 `store-region` / `install_id` / `ttreq` 随身份存着
+  （`PlaybackIdentity.cookie`），tab 门带上、v5 门不带（上游就是这样）。实测带不带 cookie
+  对站方的空答**没有任何影响** —— 别再当成「缺 cookie 才被拦」。
+- **站方恢复前检测必然是红的**，所以那天没有发版（没修好不发版）；等检测转绿再打 tag。
 
 
 ## 播放页的缓冲提示（2026-11-11 定，别改回去）

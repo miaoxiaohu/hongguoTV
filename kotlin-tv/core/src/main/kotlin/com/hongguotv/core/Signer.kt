@@ -269,7 +269,9 @@ internal class Signer(
                 "x-xs-from-web" to "0", "x-khronos" to ts.toString(),
                 "x-ladon" to be32(ts).base64(), "x-argus" to le32(ts).base64(),
                 "x-gorgon" to gorgon(query,body,ts,(random()*65536).toInt()),
-                "x-helios" to helios(ts), "x-medusa" to medusa(url,body,ts,if (mobileV5) values else VendorConstants.device),
+                // The medusa plaintext carries the identity: it must be the one in the query, not a
+                // standing placeholder - otherwise the site drops the answer without saying why.
+                "x-helios" to helios(ts), "x-medusa" to medusa(url,body,ts,values),
             )
             if (mobileV5) headers.keys.retainAll(setOf("x-khronos","x-helios","x-medusa"))
             if (body!=null) {

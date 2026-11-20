@@ -314,20 +314,25 @@ class ContentRepositoryTest {
     }
 
     /**
-     * v5 门上一个身份整轮都空答，就换一个新身份。
+     * v5 门空答不自己换号 —— 换号留给整条链。
      *
-     * 站方发的号大约一半是坏的，坏号是永久的（实测隔 30 秒再问还是全空），
-     * 所以这个号不会再好了 —— 丢掉它、重新注册一个，换到好号就接着放。
+     * 2026-11-20 改：换号要花站方的发号配额。以前 v5 门一轮空答就换一个号，
+     * 一次检测 16 集最多能换 128 次，配额打爆之后剩下的集数直接「注册被拒」+
+     * 10 分钟退避 —— 表现从「有几集放不了」变成「十分钟都放不了」。
+     * 现在换号由整条链统一决定：v5 门空答就往 tab 门走，两道门都空答才换号，
+     * 而且换号有冷却。
      */
-    @Test fun anIdentityThatKeepsAnsweringEmptyOnTheV5DoorIsReplaced() {
+    @Test fun anEmptyV5DoorDoesNotBurnTheRegistrationQuotaByItself() {
         val registrations=java.util.concurrent.atomic.AtomicInteger()
         val asks=java.util.concurrent.atomic.AtomicInteger()
         val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             val request=chain.request(); val path=request.url.encodedPath
             val body=when(path) {
                 REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
-                // 第一个号整轮两问都空答；换号之后第三问就答了。
-                V5_PATH -> if(asks.incrementAndGet()<=2) "" else v5Answer(inlineRendition("1080p","bytevc1")).toString()
+                // v5 门整轮两问都空答。
+                V5_PATH -> { asks.incrementAndGet(); "" }
+                // tab 门答得出来：说明这个身份是好的，只是 v5 门那一条路被站方拦了。
+                TAB_PATH -> tabAnswer(inlineRendition("1080p","bytevc1")).toString()
                 else -> throw AssertionError("unexpected request ${request.url}")
             }
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -335,8 +340,36 @@ class ContentRepositoryTest {
         }.build())
         val result=repo.stream("456","123")
         assertEquals("1080P",result.quality)
-        // 坏号要换掉：换了一个新身份之后第一轮就答了。
-        assertEquals("整轮空答就该换身份",2,registrations.get())
+        // v5 门空答不换号：整个过程只注册过一次（配额不能白烧）。
+        assertEquals("v5 门空答不该自己换身份",1,registrations.get())
+        assertEquals("v5 门问了两轮",2,asks.get())
+    }
+
+    /**
+     * 换号有冷却：冷却期内的集数不再换号。
+     *
+     * 2026-11-20：换号 = 一次注册 = 一次站方配额。配额很紧，换得太勤会把配额用光
+     * （实测第 30 集起注册被拒 + 10 分钟退避），所以两次换号之间至少隔 30 秒
+     * —— 与上游 0.16.10 同一个量级。
+     */
+    @Test fun theIdentityIsNotRotatedAgainWhileTheCooldownLasts() {
+        val registrations=java.util.concurrent.atomic.AtomicInteger()
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            val body=when(path) {
+                REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
+                TAB_PATH, V5_PATH, PLAYBACK_PATH, MODEL_PATH, PUBLIC_PATH -> ""
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        assertThrows(IOException::class.java) { repo.stream("456","123") }
+        val afterFirst=registrations.get()
+        // 同一集再来一次：公开页那条路的路径是按集号拼的，换集号会走到别的路径上。
+        assertThrows(IOException::class.java) { repo.stream("456","123") }
+        // 第二集在冷却期内，不再注册新身份。
+        assertEquals("冷却期内不该再换号",afterFirst,registrations.get())
     }
 
     /**
@@ -569,10 +602,13 @@ class ContentRepositoryTest {
     }
 
     /**
-     * 全是坏号时，最多换 [ContentRepository.PLAYBACK_TAB_MAX_IDENTITIES] 个身份就收手。
+     * 全是坏号时，换号是有上限的。
      *
      * 换号要花站方的发号配额，不能没完没了地换下去；换够了还是答不出来，
      * 就如实报「播放接口返回空内容」。
+     *
+     * 2026-11-20：一集最多两个身份（原来的 + 换的一个），两次换号之间还有冷却，
+     * 所以一轮检测注册次数是个位数，不是上百次。
      */
     @Test fun everyIdentityIsBadAndTheAttemptIsBounded() {
         val registrations=java.util.concurrent.atomic.AtomicInteger()
@@ -591,11 +627,12 @@ class ContentRepositoryTest {
                 .code(200).message("OK").body(body.toResponseBody()).build()
         }.build())
         assertThrows(IOException::class.java) { repo.stream("456","123") }
-        // 新门每个身份问两轮、每轮两个域。
-        assertEquals("每个身份问两轮",ContentRepository.PLAYBACK_TAB_MAX_IDENTITIES*ContentRepository.PLAYBACK_TAB_ATTEMPTS_PER_IDENTITY*2,asks.get())
-        // 换号有上限：v5 门最多换 [PLAYBACK_TAB_MAX_IDENTITIES] 个身份，tab 门再换这么多，
-        // 老门再补几个 —— 不能无限换下去。
-        assertTrue("换号次数要有上限，实际 ${registrations.get()}",registrations.get()<=ContentRepository.PLAYBACK_TAB_MAX_IDENTITIES*2+8)
+        // tab 门每个身份问一轮：两个域 × 两种形态（上游形态 + 我们自己那套 551 Argus）。
+        val perIdentity=ContentRepository.PLAYBACK_HOSTS.size*2
+        assertEquals("每个身份在 tab 门问一轮（两个域 × 两种形态）",
+            perIdentity*ContentRepository.PLAYBACK_IDENTITY_ROUNDS,asks.get())
+        // 换号有上限：一集最多换一次 —— 注册次数是个位数，不是上百次。
+        assertEquals("换号次数要有上限，实际 ${registrations.get()}",2,registrations.get())
     }
 
     /**

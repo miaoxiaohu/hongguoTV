@@ -857,18 +857,29 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      */
     private fun streamDoors(seriesId: String, id: String, maxQuality: Int, window: List<String>): StreamInfo {
         // 2026-11-16 起站方换了取址协议：v5 的 POST 门是现在还在答的那条，先问它。
-        try { return v5Stream(id,maxQuality) }
-        catch(v5: Exception) {
-            try { return tabStream(id,maxQuality) }
-            catch(tab: Exception) {
-                tab.addSuppressed(v5)
-                // 它空答时站方没说原因，往后退回老门；老门也空答才轮到公开页（只有 10 秒试看）。
-                if(fallbackCannotHelp(tab)) throw tab
-                try { return streamDoorsLegacy(seriesId,id,maxQuality,window) }
-                catch(legacy: Exception) { legacy.addSuppressed(tab); throw legacy }
+        var failure: Exception?=null
+        // 一集最多用 [PLAYBACK_IDENTITY_ROUNDS] 个身份：两道门都空答才换号，
+        // 而且换号有冷却（见 [rotatePlaybackIdentity]）—— 换号要花站方的发号配额，
+        // 2026-11-20 实测换得太勤会把配额打爆（注册被拒 + 10 分钟退避）。
+        for(round in 0 until PLAYBACK_IDENTITY_ROUNDS) {
+            try { return v5Stream(id,maxQuality) }
+            catch(v5: Exception) {
+                try { return tabStream(id,maxQuality) }
+                catch(tab: Exception) {
+                    tab.addSuppressed(v5); failure=tab
+                    // 这个身份两道门都空答：换一个身份再来一轮（冷却期内就不换）。
+                    if(round==0 && rotatePlaybackIdentity(clock())) continue
+                    break
+                }
             }
         }
+        val problem=failure ?: EmptySignedAnswerException()
+        // 它空答时站方没说原因，往后退回老门；老门也空答才轮到公开页（只有 10 秒试看）。
+        if(fallbackCannotHelp(problem)) throw problem
+        try { return streamDoorsLegacy(seriesId,id,maxQuality,window) }
+        catch(legacy: Exception) { legacy.addSuppressed(problem); throw legacy }
     }
+
     /**
      * 老的三道门：注册身份 → 签名 POST → 公开页。
      *
@@ -954,30 +965,25 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
     private fun v5VideoModel(id: String): JSONObject? {
         var failure: Exception?=null
         var empty=false
-        var identity: PlaybackIdentity?=null
-        for(round in 0 until PLAYBACK_TAB_MAX_IDENTITIES) {
-            val current=try {
-                if(identity==null) identity=playbackIdentity()
-                identity!!
-            }
-            catch(e: Exception) {
-                if(e is RegistrationUnavailableException) throw e
-                failure=e; continue
-            }
-            for(attempt in 0 until PLAYBACK_TAB_ATTEMPTS_PER_IDENTITY) {
-                if(attempt>0) Thread.sleep(PLAYBACK_TAB_RETRY_GAP_MS)
-                val model=try { addressLookup { client -> V5Playback.model(client,current,id,clock()) } }
-                catch(e: Exception) { failure=e; continue }
-                if(model!=null) return model
-                empty=true
-            }
-            // 这个身份整轮都空答：站方已经不看它了（实测坏号是永久坏的），丢掉换一个新的。
-            dropPlaybackIdentity()
-            identity=null
+        // 身份跨集复用（2026-11-15 实测）；换号由整条链统一决定，见 [streamDoors]。
+        val current=try { playbackIdentity() }
+        catch(e: Exception) {
+            // 注册被拒是站点「现在不发设备给你」，再问只会把限流拉长 —— 长退避直接上抛，
+            // 不要让它被后面的空答盖成「空内容」。
+            if(e is RegistrationUnavailableException) throw e
+            throw e
+        }
+        for(attempt in 0 until PLAYBACK_TAB_ATTEMPTS_PER_IDENTITY) {
+            if(attempt>0) Thread.sleep(PLAYBACK_TAB_RETRY_GAP_MS)
+            val model=try { addressLookup { client -> V5Playback.model(client,current,id,clock()) } }
+            catch(e: Exception) { failure=e; continue }
+            if(model!=null) return model
+            empty=true
         }
         if(!empty && failure!=null) throw failure
         throw EmptySignedAnswerException().also { e -> failure?.let { e.addSuppressed(it) } }
     }
+
     private fun tabStream(id: String, maxQuality: Int): StreamInfo {
         cachedAddress(id)?.let { return it }
         val model=tabVideoModel(id) ?: throw EmptySignedAnswerException()
@@ -1009,67 +1015,115 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
     private fun tabVideoModel(id: String): JSONObject? {
         var failure: Exception?=null
         var empty=false
-        // 身份是**复用**的，不是每集换一个（2026-11-15 实测：换得太勤既浪费发号配额，
-        // 又会有一半概率踩到坏号）。
-        var identity: PlaybackIdentity?=null
-        for(round in 0 until PLAYBACK_TAB_MAX_IDENTITIES) {
-            val current=try {
-                if(identity==null) identity=playbackIdentity()
-                identity!!
-            }
-            catch(e: Exception) {
-                // 注册被拒是站点「现在不发设备给你」，再问只会把限流拉长 —— 长退避直接上抛，
-                // 不要让它被后面的空答盖成「空内容」。
-                if(e is RegistrationUnavailableException) throw e
-                failure=e; continue
-            }
-            for(attempt in 0 until PLAYBACK_TAB_ATTEMPTS_PER_IDENTITY) {
-                if(attempt>0) Thread.sleep(PLAYBACK_TAB_RETRY_GAP_MS)
-                val model=try { tabVideoModelOnce(id,current) }
-                catch(e: Exception) { failure=e; continue }
-                if(model!=null) return model
-                empty=true
-            }
-            // 这个身份整轮都空答：坏号是永久坏的（实测），留着它只会一直空答。
-            // 丢掉它、重新注册一个 —— 站方发号大约一半好，换一次是值得的。
-            dropPlaybackIdentity()
-            identity=null
+        // 身份跨集复用（2026-11-15 实测）；换号由整条链统一决定，见 [streamDoors]。
+        val current=try { playbackIdentity() }
+        catch(e: Exception) {
+            // 注册被拒是站点「现在不发设备给你」，长退避直接上抛，不被空答盖住。
+            if(e is RegistrationUnavailableException) throw e
+            throw e
         }
-        // 空答是站方给的坏号（HTTP 200 + 0 字节），不是这一集没有片源。
+        // 一个身份只问一轮：这一轮已经把两个域 × 两种形态都试过了
+        // （站方发的号约一半是坏的，而且坏号永久坏 —— 同一个号再问一遍也是空答）。
+        val model=try { tabVideoModelOnce(id,current) }
+        catch(e: Exception) { failure=e; null }
+        if(model!=null) return model
+        empty=true
         if(!empty && failure!=null) throw failure
         throw EmptySignedAnswerException().also { e -> failure?.let { e.addSuppressed(it) } }
     }
+
     /**
      * 一次 GET 请求的播放模型；空答、结构不对、业务码非 0 都算没有。
      */
     private fun tabVideoModelOnce(id: String, identity: PlaybackIdentity): JSONObject? {
-        // 签名绑的是「最终 query 原文 + 实际发送的 body」，所以 query 只拼一次，
-        // 两个域名用的是同一份 query 与同一份签名。
+        // 2026-11-20：站方把这一族门整体软拦截了（HTTP 200 + 0 字节，server: volc-dcdn），
+        // 而且与请求形态无关 —— v5 门、tab 门、单集门，四种 query、两种签名、带不带会话
+        // cookie，九种形态实测都是同一个空答（上游 N3urda/hongguoTV 当天也一样，
+        // 见它的 issue #81 / #82 / #83）。所以这里不再赌某一种形态能活：
+        // **两种形态都发** —— 上游 0.16.10 的现行形态先发，我们自己 551 Argus 那一套后发
+        //（后者是 11-20 03:37 还在答的那一形态）。
         val ts=clock()/1000
-        val query=tabQuery(id,identity,ts,clock())
+        val legacyQuery=tabQuery(id,identity,ts,clock())
         for(host in PLAYBACK_HOSTS) {
-            val text=try { tabVideoModelText(host,query,ts) } catch(e: Exception) { "" }
-            if(text.isBlank()) continue
-            val root=runCatching { JSONObject(text) }.getOrNull() ?: continue
-            val code=if(root.has("code")) root.optInt("code",-1) else root.optInt("Code",-1)
-            if(code!=0) continue
-            val data=root.optJSONObject("data") ?: continue
-            // 模型挂在 video_model_data 下面这一集的位置上；老形状直接挂在 data 下面。
-            val rows=data.optJSONObject("video_model_data") ?: data
-            val row=rows.optJSONObject(id)
-                ?: rows.keys().asSequence().mapNotNull { rows.optJSONObject(it) }.firstOrNull()
-                ?: continue
-            val raw=row.opt("video_model") ?: continue
-            val model=when(raw) {
-                is JSONObject -> raw
-                is String -> runCatching { JSONObject(raw) }.getOrNull()
-                else -> null
-            } ?: continue
-            // 没有片源、也没有第二个地址，就是这一集没有可播的东西。
-            if((model.optJSONArray("video_list")?.length() ?: 0)==0 && !model.has("fallback_api")) continue
+            val upstreamText=try { tabVideoModelText(host,id,identity) } catch(e: Exception) { "" }
+            if(upstreamText.isNotBlank()) {
+                val model=parseTabModel(upstreamText,id)
+                if(model!=null) return model
+            }
+            val legacyText=try { tabVideoModelLegacyText(host,legacyQuery,ts) } catch(e: Exception) { "" }
+            if(legacyText.isBlank()) continue
+            val model=parseTabModel(legacyText,id) ?: continue
             return model
         }
         return null
+    }
+    /**
+     * 从一次回答里取出这一集的播放模型。
+     *
+     * 模型挂在 video_model_data 下面这一集的位置上；老形状直接挂在 data 下面。
+     */
+    private fun parseTabModel(text: String, id: String): JSONObject? {
+        val root=runCatching { JSONObject(text) }.getOrNull() ?: return null
+        val code=if(root.has("code")) root.optInt("code",-1) else root.optInt("Code",-1)
+        if(code!=0) return null
+        val data=root.optJSONObject("data") ?: return null
+        val rows=data.optJSONObject("video_model_data") ?: data
+        val row=rows.optJSONObject(id)
+            ?: rows.keys().asSequence().mapNotNull { rows.optJSONObject(it) }.firstOrNull()
+            ?: return null
+        val raw=row.opt("video_model") ?: return null
+        val model=when(raw) {
+            is JSONObject -> raw
+            is String -> runCatching { JSONObject(raw) }.getOrNull()
+            else -> null
+        } ?: return null
+        // 没有片源、也没有第二个地址，就是这一集没有可播的东西。
+        if((model.optJSONArray("video_list")?.length() ?: 0)==0 && !model.has("fallback_api")) return null
+        return model
+    }
+    /**
+     * 上游 0.16.10 现行的那条 GET：完整设备资料 + 真实身份 + version 覆盖，
+     * 签名用 [Signer.signPlayback]，UA 用播放模型那一档，注册时下发的会话 cookie 一起带上。
+     *
+     * 2026-11-20 实测：站方这一族门当时整体软拦截，但形态照上游留着 ——
+     * 站方收紧是按「路径 + 指纹」来的，跟上游走最保险。
+     */
+    private fun tabVideoModelText(host: String, id: String, identity: PlaybackIdentity): String {
+        val values=LinkedHashMap<String,String>()
+        // 设备资料用站方 App 的全套字段（[VendorConstants.device]），身份与版本覆盖在上面。
+        for((k,v) in VendorConstants.device) values[k]=v
+        values["device_id"]=identity.deviceId
+        values["iid"]=identity.iid
+        values["cdid"]=identity.cdid
+        values["version_code"]="73932"
+        values["manifest_version_code"]="73932"
+        values["update_version_code"]="73932"
+        values["pv_player"]="73932"
+        values["version_name"]="7.3.9.32"
+        // App 这条 GET 把参数写在 query 上，body 是空的。
+        values["video_id"]=id
+        values["video_id_type"]="0"
+        values["device_level"]=PLAYBACK_DEVICE_LEVEL.toString()
+        values["need_all_video_definition"]="1"
+        values["need_mp4_align"]="0"
+        values["use_os_player"]="0"
+        values["video_platform"]="1024"
+        values["source"]="0"
+        values["from_video_id"]=""
+        val base="https://$host"+PLAYBACK_TAB_PATH
+        val signed=signer.signPlayback(base,values,null,clock())
+        val request=Request.Builder().url(signed.url)
+        request.header("Accept-Language","zh-CN,zh;q=0.9")
+        for((k,v) in signed.headers) request.header(k,v)
+        // 上游这一门戴的是播放模型那一档 UA（71532 / SM-N9860）。
+        request.header("User-Agent",VendorConstants.PLAYER_UA)
+        // 注册时下发的会话 cookie 一起带上（上游 0.16.10 就是这么发的）。
+        if(identity.cookie.isNotBlank()) request.header("Cookie",identity.cookie)
+        request.get()
+        return addressLookup { client -> RequestScope.execute(client.newCall(request.build())) { response ->
+            if(!response.isSuccessful) throw HttpStatusException(response.code)
+            response.body?.string() ?: ""
+        } }
     }
     /**
      * 取址这条 GET 的 query，参数顺序照抄站方 App。
@@ -1087,7 +1141,6 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         values["device_id"]=identity.deviceId
         values["iid"]=identity.iid
         values["cdid"]=identity.cdid
-        // App 这条 GET 把参数写在 query 上，body 是空的。
         values["video_id"]=id
         values["video_id_type"]="0"
         values["device_level"]=PLAYBACK_DEVICE_LEVEL.toString()
@@ -1102,16 +1155,12 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         return values.entries.joinToString("&") { (k,v) -> playbackEncode(k)+"="+playbackEncode(v) }
     }
     /**
-     * 一次签名的 GET：query 与真签名头一起发给站方。
-     *
-     * 2026-11-11 起这里换掉了占位签名（x-argus / x-ladon 只是时间戳的 base64）：
-     * 站方收下占位签名，一律回 HTTP 200 + 0 字节，既不报错也不说是限流。
-     * 现在用的是真的 551 Argus / Ladon，见 [PlayerSigner]。
+     * 我们自己那套 551 Argus 形态：2026-11-20 03:37 这一族还在答的就是它。
      *
      * 头只带这条 GET 该带的：无正文，所以没有 Content-Type、没有 gzip、没有 x-ss-stub；
      * 带 x-tt-request-tag，passport-sdk-version 用 tab 这一档的 50561。
      */
-    private fun tabVideoModelText(host: String, query: String, ts: Long): String {
+    private fun tabVideoModelLegacyText(host: String, query: String, ts: Long): String {
         val signature=PlayerSigner.headers(query,null,ts)
         val request=Request.Builder().url("https://$host"+PLAYBACK_TAB_PATH+"?"+query)
         request.header("User-Agent",PLAYBACK_TAB_UA)
@@ -1131,6 +1180,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             response.body?.string() ?: ""
         } }
     }
+
     /**
      * The playback endpoint as it answers today.
      *
@@ -1310,10 +1360,30 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             val text=try { signedPlaybackAnswer(identity,body) }
             catch(e: Exception) { refusal=e; "" }
             if(text.isNotBlank()) return text
-            // 空答：这个号多半是坏的（站方发的号约一半坏，且坏号永久坏），换一个新的再试。
-            dropPlaybackIdentity()
+            // 空答：这个号多半是坏的（站方发的号约一半坏，且坏号永久坏），换一个新的再试 ——
+            // 但丢号要花站方的发号配额，所以走换号冷却（见 [rotatePlaybackIdentity]）。
+            rotatePlaybackIdentity(clock())
         }
         throw refusal ?: EmptySignedAnswerException()
+    }
+    /**
+     * 上一次换号的时间（毫秒）。0 = 还没换过。
+     */
+    private var playbackIdentityRotatedAt = 0L
+    /**
+     * 换一个身份再来一轮，但换号有冷却。
+     *
+     * 返回 true 表示这个身份已经换掉了（下一个请求会重新注册），false 表示还在冷却里。
+     *
+     * 换号要花站方的发号配额：2026-11-20 实测原先一集最多换八个号，一次检测就把配额
+     * 打爆，后半程的集数直接「注册被拒」+ 10 分钟退避。所以这里按上游 0.16.10 的量级，
+     * 两次换号之间至少隔 [PLAYBACK_IDENTITY_ROTATE_COOLDOWN_MS]。
+     */
+    @Synchronized private fun rotatePlaybackIdentity(now: Long): Boolean {
+        if(now-playbackIdentityRotatedAt<PLAYBACK_IDENTITY_ROTATE_COOLDOWN_MS) return false
+        playbackIdentityRotatedAt=now
+        dropPlaybackIdentity()
+        return true
     }
     /**
      * 把当前身份丢掉，下一次取址重新注册一个。
@@ -1581,24 +1651,26 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
          */
         const val PLAYBACK_TAB_PATH = "/reading/bookapi/video_tab/multi_video_model/v1/"
         /**
-         * 一次取址最多换几个身份。
+         * 一集最多用几个身份。
          *
-         * **2026-11-15 实测（这一段整段改写）**：站方发的号**有一半是坏的**。
+         * **2026-11-20 改（这一段整段改写了）**：原先是「一集最多换八个身份」。
+         * 换号是要花站方发号配额的，而配额很紧 —— 一次检测 16 集，一集最多换八个号，
+         * 最多能烧掉 128 次注册；实测第 30 集起注册就被拒（RegistrationUnavailableException
+         * + 10 分钟退避），表现从「有几集放不了」变成「十分钟都放不了」。
          *
-         *  - 注册响应里看不出好坏：好号坏号的 device_id / install_id / device_token
-         *    长得一模一样，只有拿号去取址才知道。
-         *  - 坏号是**号级**的：6 个新号各拿同一集连问 3 次，结果是
-         *    OKOKOK / 空空空 / OKOKOK / 空空空 / OKOKOK / 空空空 —— 每个号内部
-         *    三次结果完全一致，不同号之间好坏交替。
-         *  - 坏号**不会自己变好**：坏号隔 30 秒再问，还是全空；好号隔 30 秒再问，还是全通。
-         *
-         * 所以「放不了下一集」的真正机制是「每集换一个身份」：每集都有大约一半的
-         * 概率踩到坏号，那一集就永远取不到地址 —— 正是用户说的「**有时候**」。
-         *
-         * 八个身份是权衡出来的：站方发号大约一半好，八个全是坏号的概率约 0.4%，
-         * 而正常情况下第一个号就是好的（平均只注册一次）。注册是要花配额的，
-         * 所以不给更多。
+         * 现在一集最多两个身份（原来的 + 换的一个），而且换号有冷却
+         * （[PLAYBACK_IDENTITY_ROTATE_COOLDOWN_MS]）—— 站方发号大约一半好，
+         * 正常情况下第一个号就是好的（平均只注册一次），坏号才值得换一个。
          */
+        const val PLAYBACK_IDENTITY_ROUNDS = 2
+        /**
+         * 两次换号之间至少隔多久。
+         *
+         * 换号 = 一次注册 = 一次配额。上游 0.16.10 用的是同一个量级（换号之后至少冷却
+         * 三十秒），这里照它来：站方收紧的时候我们可能连着几集都放不了，这时候
+         * 「慢慢换」比「快点换」更划算 —— 快只会把配额提前用光，然后连一个号都没有。
+         */
+        const val PLAYBACK_IDENTITY_ROTATE_COOLDOWN_MS = 30_000L
         const val PLAYBACK_TAB_MAX_IDENTITIES = 8
         /**
          * 一个身份最多问几次。
