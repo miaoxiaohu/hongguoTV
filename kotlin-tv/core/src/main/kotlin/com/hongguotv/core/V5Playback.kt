@@ -24,6 +24,8 @@ internal object V5Playback {
     const val HOST = "api5-normal-sinfonlinea.fqnovel.com"
     const val PATH = "/novel/player/multi_video_model/player/v1"
     private const val UA = "com.phoenix.read/73932 (Linux; U; Android 12; zh_CN_#Hans; PGT-AN10; Build/V417IR;tt-ok/3.12.13.20)"
+    /** tab 门（GET video_tab）用这一档 UA：版本 73932，但说的是 Android 16 / 25053RT47C。 */
+    private const val TAB_UA = "com.phoenix.read/73932 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
     private val signer = Signer(mobileV5 = true)
 
     /**
@@ -80,4 +82,50 @@ internal object V5Playback {
             }
         }
     }
+
+    /**
+     * tab 取址门用 **v5 签名**的那一套 GET。
+     *
+     * 2026-11-23 实测（上游 0.16.12 同日发现）：站方现在要求这条 GET 也用 v5 的签名 ——
+     * 头里只带 x-khronos / x-helios / x-medusa 三个，而且 medusa 吃的是
+     * **MD5(空字节)**（不是 16 个零字节）；query 用的是 v5 那套设备字段
+     * （version_code 74332 / vivo_8662_64 / PGT-AN10 / Android 12）。
+     * 我们此前那两套形态（551 Argus 的 v3 形态、v4 signPlayback 形态）都被软拦截成
+     * HTTP 200 + 0 字节 —— 站方要的是这一套。
+     *
+     * **2026-11-23 实测**：这一套答出 21684 字节的完整模型（code=0），播放 1080P 成功；
+     * 同一时刻另外两套形态仍然回 0 字节。
+     */
+    fun tabModel(client: OkHttpClient, identity: PlaybackIdentity, id: String, now: Long, host: String): String {
+        val values=linkedMapOf(
+            "aid" to "8662", "app_name" to "novelread",
+            "version_code" to "74332", "version_name" to "7.4.3.32",
+            "channel" to "vivo_8662_64", "device_platform" to "android",
+            "device_type" to "PGT-AN10", "os_version" to "12", "update_version_code" to "74332",
+            "iid" to identity.iid, "cdid" to identity.cdid, "device_id" to identity.deviceId,
+            "video_id" to id, "video_id_type" to "0",
+            "device_level" to ContentRepository.PLAYBACK_DEVICE_LEVEL.toString(),
+            "need_all_video_definition" to "1", "need_mp4_align" to "0", "use_os_player" to "0",
+            "video_platform" to "1024", "source" to "0", "from_video_id" to "",
+        )
+        val base="https://$host"+ContentRepository.PLAYBACK_TAB_PATH
+        // 空字节只是**签名输入**：这条 GET 没有正文，但 medusa 要的是 MD5(空字节)，
+        // 不是 16 个零字节 —— 差这一位，站方就回 0 字节。
+        val signed=signer.signPlayback(base,values,ByteArray(0),now)
+        val request=Request.Builder().url(signed.url).get()
+        request.header("User-Agent",TAB_UA)
+        request.header("Accept","application/json; charset=utf-8")
+        request.header("Accept-Language","zh-CN,zh;q=0.9")
+        for((k,v) in signed.headers) request.header(k,v)
+        // 这三个头是 POST 才有的：空字节只是签名输入，不能留在请求上。
+        request.removeHeader("x-ss-stub")
+        request.removeHeader("Content-Type")
+        request.removeHeader("Content-Encoding")
+        val transport=client.newBuilder().cookieJar(CookieJar.NO_COOKIES).build()
+        return RequestScope.execute(transport.newCall(request.build())) { response ->
+            if(!response.isSuccessful) throw HttpStatusException(response.code)
+            response.body?.string() ?: ""
+        }
+    }
+
 }

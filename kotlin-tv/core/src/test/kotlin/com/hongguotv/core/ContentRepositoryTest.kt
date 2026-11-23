@@ -346,6 +346,48 @@ class ContentRepositoryTest {
     }
 
     /**
+     * tab 取址门现在要用 **v5 签名**（2026-11-23 实测，别改回去）。
+     *
+     * 站方在这一天改了要求：这条 GET 的头里只带 x-khronos / x-helios / x-medusa 三个，
+     * 不再有 x-argus / x-gorgon，也没有 POST 才有的 x-ss-stub / Content-Type；
+     * query 里的设备字段用 v5 那套（version_code 74332 / vivo_8662_64 / PGT-AN10）。
+     * 用错签名（551 Argus 的 v3 形态、v4 signPlayback 形态）一律回 HTTP 200 + 0 字节 ——
+     * 2026-11-23 实测：v5 签名这一套答出 21684 字节的完整模型，另外两套仍是 0 字节。
+     */
+    @Test fun theTabDoorAsksWithTheV5Signature() {
+        var seen: okhttp3.Request?=null
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request(); val path=request.url.encodedPath
+            val body=when(path) {
+                REGISTER_PATH -> REGISTERED
+                TAB_PATH -> { seen=request; tabAnswer(inlineRendition("1080p","bytevc1")).toString() }
+                V5_PATH -> ""
+                else -> throw AssertionError("unexpected request ${request.url}")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build())
+        val result=repo.stream("456","123")
+        assertEquals("1080P",result.quality)
+        val ask=seen!!
+        // 三个 v5 签名头在，v3 / v4 那套不在。
+        assertTrue("x-khronos 缺失",ask.header("x-khronos")!=null)
+        assertTrue("x-helios 缺失",ask.header("x-helios")!=null)
+        assertTrue("x-medusa 缺失",ask.header("x-medusa")!=null)
+        assertTrue("x-argus 不该在",ask.header("x-argus")==null)
+        assertTrue("x-gorgon 不该在",ask.header("x-gorgon")==null)
+        // POST 才有的头也不该在：空字节只是签名输入。
+        assertTrue("x-ss-stub 不该在",ask.header("x-ss-stub")==null)
+        assertTrue("Content-Type 不该在",ask.header("Content-Type")==null)
+        assertTrue("Content-Encoding 不该在",ask.header("Content-Encoding")==null)
+        // query 用 v5 那套设备字段。
+        assertEquals("74332",ask.url.queryParameter("version_code"))
+        assertEquals("vivo_8662_64",ask.url.queryParameter("channel"))
+        assertEquals("PGT-AN10",ask.url.queryParameter("device_type"))
+        assertEquals("123",ask.url.queryParameter("video_id"))
+    }
+
+    /**
      * 换号有冷却：冷却期内的集数不再换号。
      *
      * 2026-11-20：换号 = 一次注册 = 一次站方配额。配额很紧，换得太勤会把配额用光
@@ -419,6 +461,9 @@ class ContentRepositoryTest {
      * 2026-11-11：请求发往官方 App 现在用的那条 GET 路。身份是一次性凭证，所以身份得写在
      * query 上；签名头也换成了真的 551 Argus / Ladon —— 占位签名（时间戳的 base64）会被
      * 站方软拦截成 HTTP 200 + 0 字节。
+     *
+     * 2026-11-23：站方又改了一次 —— 这条 GET 现在用 **v5 签名**（只三个头），
+     * query 里的客户端版本也换成 v5 那一档。详见 [theTabDoorAsksWithTheV5Signature]。
      */
     @Test fun thePlaybackRequestCarriesTheRegisteredIdentityAndTheSignature() {
         val queries=mutableListOf<String>()
@@ -447,13 +492,15 @@ class ContentRepositoryTest {
         assertTrue(queries.first(),queries.first().contains("cdid="))
         // 这条 GET 把参数全写在 query 上，body 是空的。
         assertTrue(queries.first(),queries.first().contains("video_id=123"))
-        // 取址这一档的客户端版本是 73932 / 7.3.9.32，跟注册 body 一致。
-        assertTrue(queries.first(),queries.first().contains("version_name=7.3.9.32"))
-        // 真签名的四个头：请求票据、时钟、Ladon、Argus。
-        for(header in listOf("X-Ss-Req-Ticket","X-Khronos","X-Ladon","X-Argus"))
+        // 2026-11-23 起这条门改用 v5 那一档客户端资料（74332 / 7.4.3.32）。
+        assertTrue(queries.first(),queries.first().contains("version_name=7.4.3.32"))
+        // 真签名现在是 v5 的三个头：时钟、Helios、Medusa。
+        for(header in listOf("X-Khronos","X-Helios","X-Medusa"))
             assertTrue(header,headers.first().contains(header,ignoreCase=true))
-        // 无正文，所以没有 x-ss-stub；占位签名那套头也不该再出现。
+        // 无正文，所以没有 x-ss-stub；v3 / v4 那套签名头也不该再出现。
         assertFalse(headers.first().contains("X-Ss-Stub",ignoreCase=true))
+        assertFalse(headers.first().contains("X-Argus",ignoreCase=true))
+        assertFalse(headers.first().contains("X-Gorgon",ignoreCase=true))
     }
 
 
@@ -586,8 +633,8 @@ class ContentRepositoryTest {
                 REGISTER_PATH -> { registrations.incrementAndGet(); REGISTERED }
                 TAB_PATH -> {
                     if(registrationsWhenTabStarted.get()<0) registrationsWhenTabStarted.set(registrations.get())
-                    // 第一个号整轮两问（两轮 × 两个域 = 四次）都空答；换号之后第五问就答了。
-                    if(asks.incrementAndGet()<=4) "" else tabAnswer(inlineRendition("1080p","bytevc1")).toString()
+                    // 第一个号整轮都空答（两轮 × 两个域 × 三套形态 = 六次）；换号之后第七问就答了。
+                    if(asks.incrementAndGet()<=6) "" else tabAnswer(inlineRendition("1080p","bytevc1")).toString()
                 }
                 V5_PATH -> ""
                 else -> throw AssertionError("unexpected request ${request.url}")
@@ -627,9 +674,9 @@ class ContentRepositoryTest {
                 .code(200).message("OK").body(body.toResponseBody()).build()
         }.build())
         assertThrows(IOException::class.java) { repo.stream("456","123") }
-        // tab 门每个身份问一轮：两个域 × 两种形态（上游形态 + 我们自己那套 551 Argus）。
-        val perIdentity=ContentRepository.PLAYBACK_HOSTS.size*2
-        assertEquals("每个身份在 tab 门问一轮（两个域 × 两种形态）",
+        // tab 门每个身份问一轮：两个域 × 三套形态（v5 签名 + 上游 v4 形态 + 我们自己那套 551 Argus）。
+        val perIdentity=ContentRepository.PLAYBACK_HOSTS.size*3
+        assertEquals("每个身份在 tab 门问一轮（两个域 × 三套形态）",
             perIdentity*ContentRepository.PLAYBACK_IDENTITY_ROUNDS,asks.get())
         // 换号有上限：一集最多换一次 —— 注册次数是个位数，不是上百次。
         assertEquals("换号次数要有上限，实际 ${registrations.get()}",2,registrations.get())

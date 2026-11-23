@@ -1044,16 +1044,21 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         //（后者是 11-20 03:37 还在答的那一形态）。
         val ts=clock()/1000
         val legacyQuery=tabQuery(id,identity,ts,clock())
+        // 三套形态挨个试：① v5 签名（现行，2026-11-23 实测答得出来）
+        // ② 上游 0.16.10 的 v4 signPlayback 形态 ③ 我们自己那套 551 Argus 形态。
+        // 后两套留着当兜底 —— 站方哪天换回去还能接住。
+        val shapes=listOf<(String)->String>(
+            { host -> addressLookup { client -> V5Playback.tabModel(client,identity,id,clock(),host) } },
+            { host -> tabVideoModelText(host,id,identity) },
+            { host -> tabVideoModelLegacyText(host,legacyQuery,ts) },
+        )
         for(host in PLAYBACK_HOSTS) {
-            val upstreamText=try { tabVideoModelText(host,id,identity) } catch(e: Exception) { "" }
-            if(upstreamText.isNotBlank()) {
-                val model=parseTabModel(upstreamText,id)
-                if(model!=null) return model
+            for(shape in shapes) {
+                val text=try { shape(host) } catch(e: Exception) { "" }
+                if(text.isBlank()) continue
+                val model=parseTabModel(text,id) ?: continue
+                return model
             }
-            val legacyText=try { tabVideoModelLegacyText(host,legacyQuery,ts) } catch(e: Exception) { "" }
-            if(legacyText.isBlank()) continue
-            val model=parseTabModel(legacyText,id) ?: continue
-            return model
         }
         return null
     }

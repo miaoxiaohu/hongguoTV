@@ -224,13 +224,14 @@
 - 推 tag 前查一遍已发布的版本：`gh release list --repo miaoxiaohu/hongguoTV`，
   CI 守卫要求新 tag 的 versionCode **新于所有已发布的 kotlin-v 版本**。
 - **已发布记录**（每条 4 个资产：apk / source.zip / SHA256SUMS / update.json）：
-  0.9.90 → 0.9.91 → 0.9.92 → 0.9.93 → 0.9.94 → 0.9.95 → 0.9.96 → 0.9.97 → 0.9.98 → 0.9.99 → 0.9.100 → **0.9.101（9101）**。
+  0.9.90 → 0.9.91 → 0.9.92 → 0.9.93 → 0.9.94 → 0.9.95 → 0.9.96 → 0.9.97 → 0.9.98 → 0.9.99 → 0.9.100 → 0.9.101 → **0.9.102（9102）**。
   0.9.96 一次性带了两件事：取址随机软拦截的重试修复 + 自动连播 HUD 显隐（见下面两节）。
   0.9.97 带来「放不了下一集」的根因修复：身份跨集复用 + 坏号才换号 + ByteVC2 去标记兜底。
   0.9.98 带来 v5 取址协议（站方 2026-11-16 关停旧取址接口后的根因修复，见「播放取址：v5 协议」那节）。
   0.9.99 修好小米电视上的在线升级（读归档 APK 读不出签名时不再自己拦下）。
   0.9.100 补上 v5 门的空答换号重试，并把 v5 请求的 device_level 改回 1。
   0.9.101 让 tab 门同时发两套形态，并把换号改成链级 + 30 秒冷却（见下面「站方整体软拦截」那节）。
+  0.9.102 让 tab 门改用 v5 签名（站方 11-23 又改了签名要求，见下面「tab 门改用 v5 签名」那节）。
 - 🔴 **lint 入口只有一个**：`core` 是纯 JVM 模块，**没有 lint 任务**（别试 `:core:lint`，会报
   「task 'lint' not found」）。CI 的验收基线在 `.github/workflows/release.yml` 里：
   `./kotlin-tv/gradlew -p kotlin-tv :core:test :app:testDebugUnitTest :app:lintRelease :app:assembleRelease`。
@@ -834,6 +835,34 @@ iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
 - `Probe.kt` 里那两处 `device_level:3` 仍是对照组，不在生产路径。
 
 
+## 播放取址：tab 门改用 v5 签名（2026-11-23 定，别改回去）
+
+🔴 **站方 2026-11-23 上午又改了 video_tab 这条 GET 的签名要求**（0.9.102 的根因）：
+
+- 症状：当天 **03:01 检测还全绿，14:02 全红**（16/16 集）。取址门一律 **HTTP 200 + 0 字节** ——
+  又是软拦截，但**这次不是整族门被关，而是签名要求变了**：v5 POST 门、tab 门的 v4 形态、
+  tab 门的 551 Argus 形态，三种全是 0 字节。
+- **站方要的是 v5 签名**：tab 这条 GET 现在只带 **x-khronos / x-helios / x-medusa** 三个头，
+  没有 x-argus / x-gorgon；而且 medusa 吃的是 **MD5(空字节)**（不是 16 个零字节）——
+  空字节只是**签名输入**，请求本身没有正文，所以 x-ss-stub / Content-Type / Content-Encoding
+  三个头都不能留。query 的客户端资料换成 v5 那一档：version_code 74332 / version_name 7.4.3.32 /
+  channel vivo_8662_64 / device_type PGT-AN10 / os_version 12；
+  UA 用 tab 那一档（`com.phoenix.read/73932 (Linux; U; Android 16; zh_CN; 25053RT47C; ...)`）。
+  身份三字段（device_id / iid / cdid）照旧在 query 上。
+  出处：上游 N3urda/hongguoTV 的 **0.16.12**（commit `1782dda4`，11-22 发布）——
+  他们连发 0.16.11 / 0.16.12 / 0.16.13 三个版本修「空响应」，这次就是他们找到的。
+- **落地**：`V5Playback.tabModel()` 造这条请求；`ContentRepository.tabVideoModelOnce()`
+  一次发**三套形态**挨个试：① v5 签名（现行）② 上游 0.16.10 的 v4 `signPlayback` 形态
+  ③ 我们自己那套 551 Argus 形态 —— 后两套留着当兜底，站方换回去时还能接住。
+- **实测**：v5 形态答出 **21684 字节**的完整模型（code=0），播放 1080P 成功；
+  同一时刻另外两套形态仍是 0 字节 —— 所以「站方又改了什么」这次能定位到签名头这一层。
+- 单测锁住形态：`theTabDoorAsksWithTheV5Signature`（三个 v5 头在、v3/v4 头不在、
+  POST 的三个头不在、query 用 v5 那套设备字段）。
+- 🔴 **排查顺序**：站方收紧时**先查上游同款项目有没有同一天的 issue**（这次上游 11-21/11-22
+  连发三个版本修同一症状），再考虑自己逐个试形态 —— 上游的 commit 里往往直接写着
+  「站方要的是哪一套签名」。
+
+
 ## 播放取址：站方整体软拦截（2026-11-20 上午起，别再逐个形态试）
 
 🔴 **2026-11-20 14:00 那趟检测：real-drama 8/8 + comic-drama 8/8 全失败**，
@@ -960,3 +989,81 @@ iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
 - **取证方法**：写一次性探针 APK 打印 `PackageManager` 返回值即可，不需要 root、不需要 logcat。
 - **注意**：修好的版本要先用 adb / 文件管理器手动装一次；旧版本自身仍会拦升级。
 - **apply when**: 在小米电视，以及任何 ROM 上 `getPackageArchiveInfo` 读不出签名的设备，排查「在线升级被自己拦下」。
+
+## 小米电视（192.168.1.25 / MiTV-ASTP0 / Android 9）在线升级排查（2026-11-21 定案）
+
+### 设备身份（2026-11-21 更正：还是那一台机器）
+
+- `http://192.168.1.25:6095/request?action=isalive` 返回 `devicename=REDMI A65, platform=1492, build=-1, version=16777510`；
+  mDNS 里 `srcvers=220.68`、`model=AppleTV3,2`、`REDMI A65._airplay._tcp.local`。
+- 🔴 **`devicename=REDMI A65` 是用户自己起的名字，不是机型**。这台机器就是上面 2026-11-18 那条的
+  **MiTV-ASTP0 / Android 9 / SDK 28 / 1920x1080**（同 IP、同 DHCP 名 `MiTV`、同一张证书指纹 `4f4cf502…`）。
+  2026-11-18 那条的签名结论**适用这台机器**，别再当成两台。
+
+### 这台电视能远程控制到什么程度
+
+- **adb（5555）已关**：`adb connect` 拒连；全端口扫出 25/110/143/6087/6088/6091/6093/6095/8790/8899/9093/9095/10027/47000/49152，
+  没有第二个 adb 端口（2026-11-21 重启后复扫，5555 仍不在其中；对 6087/6088/6091/6093/10003/47000/49152
+  逐个 `adb connect` 全是 **offline** —— TCP 通但不是 adbd）。
+- 🔴 **这台 ROM 每次开机都会把 adb 关掉**（2026-11-21 实测 + 同款小米 ROM 公开记录一致）：
+  开机时 `AdbService` 带 adb 起来，约 **4 秒后** `com.xiaomi.mitv.settings`（SettingsUtil）把全局
+  `adb_enabled` 写回 **0**，adbd 被关 → 5555 端口随之关闭。
+  `persist.adb.tcp.port` 仍是 5555，所以**去设置里把「ADB 调试」重新打开，端口立刻回来**。
+  - 重启前快照（当时 adb 还连得上时读到的）：
+    `persist.adb.tcp.port=5555`、`service.adb.tcp.port=5555`、`init.svc.adbd=running`、
+    `settings global adb_enabled=1`、`persist.sys.usb.config=adb`、`persist.service.adb.enable=1`、
+    `ro.adb.secure=1`、`development_settings_enabled=null`。
+  - 结论：**「adb 开了为什么开机不自动开」不是配置丢了，是 ROM 的开机策略**；
+    想开机就有 adb，只能每次开机去设置里重新开（或做开机自启守护 —— 属侵入手段，先问用户）。
+  - 复现实验方法：重启后**每 200ms 轮询一次 `adb connect`**，在窗口期内可能抓到 adbd 短暂开放的瞬间
+    （实测 1 秒一轮、45 轮全拒绝 → 窗口比 1 秒还短或根本没开）。
+- 🔴 **别用 6095 的 `keyevent=power` 去「重启电视」**（2026-11-21 踩过）：
+  电源键把电视打进 **xiaoai_mode 待机**，**网口跟着断电**（ARP INCOMPLETE、ping 100% 丢包、
+  6095/9095 全部无响应）→ 之后**无法远程唤醒**：
+  - 本机发 WOL 魔术包（广播 255.255.255.255:9）无效；
+  - 路由器上 `etherwake -i br-lan e8:b8:53:f6:c2:08` 也只是把邻居表刷成 FAILED，电视不回。
+  - 只能**让用户在电视前按遥控器开机**。
+  → 想远程重启电视，**只有 adb 这条路**（`adb reboot`）；adb 断了就只剩物理电源。
+- 端口含义：6095/9095 = MiTV Assistant Server（官方控制口）；6087/6088/6091/6093/10027 = 投屏通道；
+  1900 = SSDP；49152 = DLNA/UPnP；8790 = 一个 Go 服务（所有路径回 `Not found`）；25/110/143 是邮件口。
+- **6095 只有 5 个 action 真的存在**：`isalive` / `getinstalledapp` / `startapp` / `keyevent` / `changesource` / `getResource`。
+  `getinstalledapp` **只回包名+应用名+图标，没有版本号**；穷举 install*/push*/upload*/screenshot/getversion 等几十个 action 全 404。
+  → **没有推送安装、没有版本查询、没有截图**。
+- 结论：**读不回「已装版本号」和「检查更新的报错原文」**，只能靠人在电视前读屏，或开 adb。
+
+### 网络侧（基本排除，但不是结论）
+
+- 路由器 passwall：`tcp/udp_proxy_mode=proxy`、`acl_enable=0`；路由器本机 curl github.com /
+  release-assets.githubusercontent.com / objects.githubusercontent.com 全部正常响应，DNS 解析干净。
+- 路由器上抓包（`host 192.168.1.25`，90 秒，`/tmp/tv3.pcap`）：电视这 90 秒里
+  **零 DNS 查询、零对外 443 连接**（只有 mDNS/SSDP 和 1.1.1.1 上的 UDP）。
+  → 说明**那段时间 App 根本没触发更新检查**（`AppUpdater` 只在前台 + idle + 距上次 ≥6 小时才查），
+  **不能据此判定「电视连不上 github」**。
+- 🔴 别拿「抓包没看到 github」当成网络故障的证据 —— 自动检查本来就 6 小时才跑一次。
+
+### 根因（2026-11-21 定案）：这台 ROM 没有「装 APK」的落地点
+
+- **不是网络、不是签名、不是未知来源权限**（那三样都已排除）。卡在安装落地这一步：
+  - `cmd package resolve-activity -a android.intent.action.VIEW -t application/vnd.android.package-archive`
+    → **No activity found**；`cmd package query-activities`（VIEW+apk mime、INSTALL_PACKAGE）→ No activities found。
+  - `pm list packages -u` 能看到被隐藏的 `com.android.packageinstaller`，但 `pm install-existing` 装回来后
+    **只有 UninstallerActivity，没有任何安装 Activity**（无实质作用，别再试这条路）。
+  - 系统里**也没有任何文件管理器**；电视无 su。
+  - App 侧（`AppUpdater.kt:73,212-220`）：`canRequestPackageInstalls()` 为 false → 走 REQUEST_INSTALL_PACKAGES 授权；
+    授权后 `startActivity(ACTION_VIEW, apk)` 抛异常被 catch → 提示「电视未提供安装或授权入口，请通过系统文件管理器安装新版」。
+  - → **没有任何 Activity 能处理 APK 安装 intent，App 内在线升级的「装」这一公里不存在，只能 adb 装。**
+- 0.9.99 那条（App 自己拦升级）对这台机器适用且已修（读不到签名/minSdk 就放行），所以**下载这一步是通的**
+  （更新弹窗能变成「安装新版」），**卡的是安装落地**。老版本自身仍会拦升级，必须先手动装一次 0.9.99+。
+- DNS 污染是**干扰项，不是根因**：电视 DNS 把 github.com 解析到 57.155.223.240（阿里 DNS 污染），
+  但 App 经 passwall 透明代理实际能连通并把 APK 下载下来。**不要为此改路由 DNS。**
+
+### 已备好的东西
+
+- `out/hongguotv-kotlin-0.9.101-android8.apk`（2,755,174 B），证书 SHA-256 `4f4cf502b9ea2b2cccada54ab62031de1ef4dc9aecdf3addbcf4099dd853cf08`
+  （与历史发布同一张证书 → 可覆盖安装）。版本 0.9.101 / versionCode 9101。
+- adb 一通就能装：`adb -s 192.168.1.25:5555 install -r <apk>` → `dumpsys package com.hongguotv.nativeapp | Select-String versionName` 回读。
+- **2026-11-21 已完成**：用上面这条把 0.9.101 装上电视，`adb install -r` → Success，
+  回读 versionCode=9101 / versionName=0.9.101 / lastUpdateTime=2026-11-21 20:12:51。
+  电视上的 App **已是最新**，重启不丢。
+- 长期结论：这台 ROM 上 App 内在线升级永远装不上，**别再指望它在电视上自更新**；
+  要升级就走 adb（adb 通道本身受上面「开机被关」限制），或在 App 侧改提示文案明确告知需 adb / 文件管理器。
