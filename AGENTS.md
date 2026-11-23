@@ -224,7 +224,7 @@
 - 推 tag 前查一遍已发布的版本：`gh release list --repo miaoxiaohu/hongguoTV`，
   CI 守卫要求新 tag 的 versionCode **新于所有已发布的 kotlin-v 版本**。
 - **已发布记录**（每条 4 个资产：apk / source.zip / SHA256SUMS / update.json）：
-  0.9.90 → 0.9.91 → 0.9.92 → 0.9.93 → 0.9.94 → 0.9.95 → 0.9.96 → 0.9.97 → 0.9.98 → 0.9.99 → 0.9.100 → 0.9.101 → **0.9.102（9102）**。
+  0.9.90 → 0.9.91 → 0.9.92 → 0.9.93 → 0.9.94 → 0.9.95 → 0.9.96 → 0.9.97 → 0.9.98 → 0.9.99 → 0.9.100 → 0.9.101 → 0.9.102 → **0.9.103（9103）**。
   0.9.96 一次性带了两件事：取址随机软拦截的重试修复 + 自动连播 HUD 显隐（见下面两节）。
   0.9.97 带来「放不了下一集」的根因修复：身份跨集复用 + 坏号才换号 + ByteVC2 去标记兜底。
   0.9.98 带来 v5 取址协议（站方 2026-11-16 关停旧取址接口后的根因修复，见「播放取址：v5 协议」那节）。
@@ -232,6 +232,7 @@
   0.9.100 补上 v5 门的空答换号重试，并把 v5 请求的 device_level 改回 1。
   0.9.101 让 tab 门同时发两套形态，并把换号改成链级 + 30 秒冷却（见下面「站方整体软拦截」那节）。
   0.9.102 让 tab 门改用 v5 签名（站方 11-23 又改了签名要求，见下面「tab 门改用 v5 签名」那节）。
+  0.9.103 换成站方现行的 medusa 明文字段集 + 两道门共用完整设备档案（站方 11-23 下午再次收紧，见下面「站方换了 medusa 明文字段」那节）。
 - 🔴 **lint 入口只有一个**：`core` 是纯 JVM 模块，**没有 lint 任务**（别试 `:core:lint`，会报
   「task 'lint' not found」）。CI 的验收基线在 `.github/workflows/release.yml` 里：
   `./kotlin-tv/gradlew -p kotlin-tv :core:test :app:testDebugUnitTest :app:lintRelease :app:assembleRelease`。
@@ -926,6 +927,46 @@ iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
   是记录器数错了。要改的是记录器，不是断言。
 - ⚠️ **别再往生产代码里加「补发」**：一度以为是「12 个里有 1 个在发出前就失败」，
   探针证伪了 —— 生产代码每次都真的发出了 12 个请求。改生产代码属于没病治病。
+
+## 播放取址：站方换了 medusa 明文字段（2026-11-23 下午起，别改回去）
+
+🔴 **2026-11-23 下午起，model 门与 tab 门全部回 HTTP 200 + 0 字节**（0.9.102 之后又收紧一次）。
+根因是**站方换了 medusa 的明文字段集**，不是头集合、不是 query 字段数量、不是 UA。
+
+- **症状**：14:00 检测 16/16 集全失败；model 门（POST v5）、tab 门（GET v5）全是 0 字节；
+  目录页 / 详情页 / 搜索正常。
+- **消融实验（决定性证据，四组对照）**：
+  1. 新 medusa + 完整 query + 只带 3 个 v5 头 → real-drama **8/8 通过**；
+  2. 新 medusa + 完整 query + 带 7 个 v5 头 → real-drama **8/8 通过**；
+  3. **旧 medusa + 完整 query + 7 头 → 0/8 全失败**；
+  4. tab 门单独验证（不经 model 门）：7 头 22519 字节 / 3 头 22531 字节，均 `code=0`、含 video_model。
+  ⇒ **必需项是 medusa 明文字段集**；头集合 3 个或 7 个都行。
+- **新 medusa 字段集出处**：上游 **lvguo-tv** 的 `v5.go`（本地缓存 `kotlin-tv/tmp/lv/v5.go`）。
+  与旧形态的关键差异：
+  - `flags=4480000000000000`（旧形态为空）；
+  - device 补齐到 **30 个字段**（旧形态 13 个）；
+  - env 9 个字段：f1/f2/f3/f5/f7/f13（`f13` 即 `klink_egdi`）；
+  - `nested=(1,305)(2,4)(3,694367)(5,1621072674)`；
+  - message f(16)=secToken、f(21)=**312**（旧形态 377）；
+  - license `646637794`、magic `2d4b4fca…`；
+  - `medusaV5Token()`：25 字符、首位 `A`。
+- **已失效的形态（别再回头试）**：`beilunyang/openhongguo` 的
+  `internal/protocol/sign/playback_v5.go`、站方 Rust 实现 `fq_sign_v5.rs` —— 两者的 medusa
+  **仍是旧形态**（flags 空、device 13 字段、f(21)=377），照抄会 0 字节。
+  ⚠️ 站方 Rust 实现 GET 只带 3 个头，说明 **3 头足够**，不必扩到 7 头。
+- **落地**：`Signer.medusaV5()` 换成新字段集；头集合**保持 3 个**
+  （`x-khronos` / `x-helios` / `x-medusa`，= 0.9.102 原样，既有单测断言不用改）；
+  `V5Playback` 的 model 门与 tab 门**共用同一份完整设备档案**
+  （`deviceProfile(identity, withRomVersion)`，上游 openhongguo 的 29 字段固定顺序 + 可选 `klink_egdi`）；
+  `PlaybackDevice` 解析注册响应里的 `klink_egdi` 并带上（实测带上、不带都 code=0，**不是根因**，
+  只是跟随上游）。
+- **query 完整化与 medusa 新字段集必须同批上线**：medusa 的身份字段从 query 取，
+  缺字段签名编不出来 —— 不能分批灰度。
+- **排查顺序（沿用并强化）**：站方收紧先查上游同款项目当天 issue/提交，再自己试形态；
+  本次直接从上游 `v5.go` 取 medusa 形态，比逐个试形态快一个量级。
+- **验证**：real-drama 8/8、comic-drama 8/8（每集实读 1048576 字节、1080P）；
+  core 423 项 / app 60 项单测全绿；`:app:lintRelease` + `:app:assembleRelease` BUILD SUCCESSFUL。
+  发版：tag `kotlin-v0.9.103` / versionCode 9103。
 
 ## 播放页 HUD 的显隐（2026-11-12 定，别改回去）
 

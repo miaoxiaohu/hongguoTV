@@ -4,6 +4,22 @@
 
 电视「检查更新」弹窗里那句短说明，取自每份 `RELEASE_<版本>.md` 中 `<!-- notes -->` 与 `<!-- /notes -->` 之间的块，改文件别动标记。
 
+## 0.9.103 · 取址请求换成站方现行的那套 medusa 明文字段
+
+2026-11-23 晚，用户报「现在不正常播放失败」：取址门整族空答（HTTP 200 + 0 字节，站方的软拦截），
+每集只剩 10 秒试看。根因是**站方又改了签名内容** —— x-medusa 里那段 protobuf 明文换成了新的字段集
+（flags 4480000000000000、device 补齐到 30 个字段、env 补齐到 9 个字段、nested 换成
+305/4/694367/1621072674、message 加 f(16) 的 sec_device_token、f(21) 从 377 改成 312），
+我们还在发旧的。同时 model 门的 query 只有 13 个字段，而 medusa 的身份字段是从 query 上取的，
+签名编不出来 —— 两道门一起换成完整设备档案（上游 openhongguo 的 29 字段固定顺序）。
+消融确认必需项是 medusa 字段集（头集合 3 个还是 7 个都行）。[完整说明](RELEASE_0.9.103.md)
+
+- **medusa 明文换成站方现行字段集**：照搬上游 lvguo-tv 的 v5.go，含新增的 secDeviceToken()。
+- **两道门共用完整设备档案**：新增 V5Playback.deviceProfile()，model 门 query 从 13 字段升到 29 字段。
+- **带上 klink_egdi**：跟随上游从注册响应里取（实测非必需，注释里写明了）。
+- 单测：core:test 423 项、app:testDebugUnitTest 60 项全绿；lint、assembleRelease BUILD SUCCESSFUL。
+- 探针：real-drama 8 集、comic-drama 8 集全部成功、失败 0，每集实读 1048576 字节媒体、画质 1080P。
+
 ## 0.9.102 · tab 取址门改用 v5 签名（站方 11-23 又改了签名要求）
 
 2026-11-23 14:00 的检测 real-drama 8/8 + comic-drama 8/8 全失败（当天 03:01 还全绿）。

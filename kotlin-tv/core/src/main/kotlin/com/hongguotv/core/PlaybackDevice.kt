@@ -43,6 +43,13 @@ internal data class PlaybackIdentity(
      * here because it is what the official client sends, not because it fixed anything.
      */
     val cookie: String = "",
+    /**
+     * 注册响应里的 `klink_egdi`。
+     *
+     * 跟随上游带上它（上游 v2.0.8 才接上的）。2026-11-23 实测：带上、不带，
+     * 取址门都回 code=0 —— 它不是被封锁的根因，但留着无副作用。
+     */
+    val klinkEgdi: String = "",
 )
 
 /**
@@ -140,7 +147,7 @@ internal object PlaybackDevice {
         if (code != 0) throw PlaybackRegistrationRefusedException("播放设备注册被拒绝 code=$code")
         if (deviceId.isEmpty() || iid.isEmpty())
             throw PlaybackRegistrationRefusedException("播放设备注册没有发回可用身份（站方这次没放号，稍后再试）")
-        return PlaybackIdentity(deviceId, iid, cdid, cookie)
+        return PlaybackIdentity(deviceId, iid, cdid, cookie, json.optString("klink_egdi"))
     }
 
     /**

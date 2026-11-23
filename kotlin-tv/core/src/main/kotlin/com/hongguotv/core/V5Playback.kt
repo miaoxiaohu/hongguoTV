@@ -29,17 +29,42 @@ internal object V5Playback {
     private val signer = Signer(mobileV5 = true)
 
     /**
+     * 完整设备档案（上游 openhongguo 的 29 字段固定顺序）。
+     *
+     * 这些字段不只是「参数」：medusa 的明文里逐个引用了 version_name / device_id /
+     * device_type / device_brand / channel / os_version，站方拿它们跟 query 对账，
+     * 少一个就是 HTTP 200 + 0 字节的静默封锁。
+     */
+    private fun deviceProfile(identity: PlaybackIdentity, withRomVersion: Boolean): LinkedHashMap<String, String> {
+        val values = linkedMapOf(
+            "device_platform" to "android", "os" to "android", "ssmix" to "a",
+            "cdid" to identity.cdid, "channel" to "vivo_8662_64",
+            "aid" to "8662", "app_name" to "novelread",
+            "version_code" to "74332", "version_name" to "7.4.3.32",
+            "manifest_version_code" to "74332", "update_version_code" to "74332",
+            "resolution" to "1920*1080", "dpi" to "280",
+            "device_type" to "PGT-AN10", "device_brand" to "HONOR",
+            "language" to "zh", "os_api" to "31", "os_version" to "12",
+            "ac" to "wifi", "host_abi" to "arm64-v8a",
+            "dragon_device_type" to "phone", "pv_player" to "74332",
+            "compliance_status" to "0", "need_personal_recommend" to "1",
+            "player_so_load" to "1", "is_android_pad_screen" to "0",
+        )
+        if (withRomVersion) values["rom_version"] = "V417IR+release-keys"
+        values["iid"] = identity.iid
+        values["device_id"] = identity.deviceId
+        if (identity.klinkEgdi.isNotEmpty()) values["klink_egdi"] = identity.klinkEgdi
+        return values
+    }
+
+    /**
      * 取一集的播放模型（video_model）。空答、业务码非 0、结构不对都返回 null。
      */
     fun model(http: OkHttpClient, identity: PlaybackIdentity, id: String, now: Long): JSONObject? {
-        val values = linkedMapOf(
-            "aid" to "8662", "app_name" to "novelread",
-            "version_code" to "74332", "version_name" to "7.4.3.32",
-            "channel" to "vivo_8662_64", "device_platform" to "android",
-            "device_type" to "PGT-AN10", "os_version" to "12", "update_version_code" to "74332",
-            "iid" to identity.iid, "cdid" to identity.cdid, "device_id" to identity.deviceId,
-            "_rticket" to now.toString(),
-        )
+        // 站方现在要的是**完整设备档案**：query 里的字段同时被写进 medusa 明文
+        // （version_name / device_id / device_type / device_brand / channel / os_version），
+        // 少一个就回 HTTP 200 + 0 字节。
+        val values = deviceProfile(identity, withRomVersion = false)
         val base = "https://$HOST$PATH"
         val url = base.toHttpUrl().newBuilder().apply {
             values.forEach { (key, value) -> addQueryParameter(key, value) }
@@ -57,7 +82,7 @@ internal object V5Playback {
         // 被签名头里的那份覆盖掉就成了另一个机型。
         signed.headers.forEach { (key, value) -> request.header(key, value) }
         request.header("User-Agent", UA)
-            .header("Accept", "application/json")
+            .header("Accept", "application/json; charset=utf-8,application/x-protobuf")
             .header("Content-Encoding", "gzip")
             .header("x-ss-stub", MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { "%02X".format(it) })
         request.post(bytes.toRequestBody("application/json; charset=utf-8".toMediaType()))
@@ -97,16 +122,14 @@ internal object V5Playback {
      * 同一时刻另外两套形态仍然回 0 字节。
      */
     fun tabModel(client: OkHttpClient, identity: PlaybackIdentity, id: String, now: Long, host: String): String {
-        val values=linkedMapOf(
-            "aid" to "8662", "app_name" to "novelread",
-            "version_code" to "74332", "version_name" to "7.4.3.32",
-            "channel" to "vivo_8662_64", "device_platform" to "android",
-            "device_type" to "PGT-AN10", "os_version" to "12", "update_version_code" to "74332",
-            "iid" to identity.iid, "cdid" to identity.cdid, "device_id" to identity.deviceId,
-            "video_id" to id, "video_id_type" to "0",
-            "device_level" to ContentRepository.PLAYBACK_DEVICE_LEVEL.toString(),
-            "need_all_video_definition" to "1", "need_mp4_align" to "0", "use_os_player" to "0",
-            "video_platform" to "1024", "source" to "0", "from_video_id" to "",
+        val values = deviceProfile(identity, withRomVersion = true)
+        values.putAll(
+            linkedMapOf(
+                "video_id" to id, "video_id_type" to "0",
+                "device_level" to ContentRepository.PLAYBACK_DEVICE_LEVEL.toString(),
+                "need_all_video_definition" to "1", "need_mp4_align" to "0", "use_os_player" to "0",
+                "video_platform" to "1024", "source" to "0", "from_video_id" to "",
+            )
         )
         val base="https://$host"+ContentRepository.PLAYBACK_TAB_PATH
         // 空字节只是**签名输入**：这条 GET 没有正文，但 medusa 要的是 MD5(空字节)，
