@@ -1,9 +1,10 @@
 // Derived from drpys 22261ad; GPL-3.0-only. Protocol-specific transform, not standard AES.
 package com.hongguotv.core
 
-internal class AesV3(key: ByteArray, timestamp: Int, private val v5: Boolean = false) {
+internal class AesV3(key: ByteArray, timestamp: Int, private val v5: Boolean = false, sbox: ByteArray? = null) {
     private val word = timestamp and 3
-    private val box = (if (v5) V5Constants.sbox else VendorConstants.sbox).copyOfRange(word * 256, (word + 1) * 256).map { it.u() }
+    // v5 的替换表来自协议档案（站方会换），老协议的那张留在代码里（站方不动它）。
+    private val box = (if (v5) sbox ?: V5Constants.sbox else VendorConstants.sbox).copyOfRange(word * 256, (word + 1) * 256).map { it.u() }
     private val con =
         if (v5) arrayOf(
             intArrayOf(2, 0, 3, 1), intArrayOf(1, 3, 2, 0),

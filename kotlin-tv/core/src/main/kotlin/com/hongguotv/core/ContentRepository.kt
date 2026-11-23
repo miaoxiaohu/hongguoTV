@@ -1052,7 +1052,8 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             { host -> tabVideoModelText(host,id,identity) },
             { host -> tabVideoModelLegacyText(host,legacyQuery,ts) },
         )
-        for(host in PLAYBACK_HOSTS) {
+        // 分集门问哪几个 host 由协议档案说了算（站方换域时不用发版）。
+        for(host in PlaybackProfiles.active.v5.tabGate.hosts) {
             for(shape in shapes) {
                 val text=try { shape(host) } catch(e: Exception) { "" }
                 if(text.isBlank()) continue

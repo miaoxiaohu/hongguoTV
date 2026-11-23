@@ -1108,3 +1108,35 @@ iOS 锁屏后不回 ARP，看起来就跟被隔离一模一样。
   电视上的 App **已是最新**，重启不丢。
 - 长期结论：这台 ROM 上 App 内在线升级永远装不上，**别再指望它在电视上自更新**；
   要升级就走 adb（adb 通道本身受上面「开机被关」限制），或在 App 侧改提示文案明确告知需 adb / 文件管理器。
+## 协议档案外置（2026-11-23 改造，1.0.0 引入）
+
+背景：站方改的从来是**数据**（medusa 字段集、magic/sbox、门地址、设备档案），
+算法（xmxor / hashF13 / sm3 / AesV3 / 编码规则）一次都没动过。
+所以把「会变的那部分」抽成一份 JSON 档案，端上从远端拉取覆盖内置默认 ——
+站方下次改字段集**不用发版**，改一下仓库里那份 JSON 就行。
+
+- 档案模型：`kotlin-tv/core/src/main/kotlin/com/hongguotv/core/PlaybackProfile.kt`（**public**，app 模块要用）。
+  - **内置默认在 `PlaybackProfile.builtin()`，那才是事实来源**；仓库根的 `playback-profile.json` 是它的序列化。
+  - 端上生效的那份在 `PlaybackProfiles.active`；`PlaybackProfiles.apply` **只接受更大的 revision**（版本号只增不减）。
+  - 档案的 `revision` 从 1 起（内置默认是 0，表示「没被下发覆盖过」）。
+- 下发通道：`https://raw.githubusercontent.com/miaoxiaohu/hongguoTV/main/playback-profile.json`
+  - HTTPS + 域白名单（`raw.githubusercontent.com` / `github.com` / `objects.githubusercontent.com`）+ 256KB 上限。
+  - app 层 `PlaybackProfileUpdater`：启动时读本地缓存 → 后台拉远端。**拉不到就继续用内置默认**，行为与改造前完全一致。
+  - 缓存落 `filesDir/playback-profile.json`：先写 `.part` 再原子替换，坏缓存当没有。
+- **外置了什么 / 没外置什么**（别越界）：
+  - 外置：medusa 明文的五张字段表、magic / license / signKey / sbox、签名头集合、
+    单集门与分集门的 host/path/UA、query 的设备档案（含顺序与取值来源）、tab 业务参数、model 正文模板。
+  - **不外置**：xmxor / hashF13 / sm3 / AesV3 的表与位序、随机量的取法与顺序、protobuf 编码规则。
+    那些是算法，站方不动，外置了反而多一个出错的地方。
+- 🔴 **顺序敏感**：protobuf 字段表按写入顺序编码，query 的字段顺序也进签名 —— 改档案时不能重排字段。
+- 🔴 **随机量取值顺序不能动**：envLaunch → envPid → 明文里的 rand → nonce → 包头 rand。
+- 站方改字段集的操作流程：
+  1. 改 `PlaybackProfile.builtin()` 里的数据；
+  2. 跑导出器生成仓库根的 `playback-profile.json`：
+     `cd kotlin-tv` → `.\gradlew.bat :core:test --tests 'com.hongguotv.core.PlaybackProfileExportTool' -Dprofile.revision=N --console=plain --no-daemon`
+  3. 跑 `python kotlin-tv/tools/order_profile.py` 排键序（好 diff）；
+  4. **revision 加一**再提交 —— 不加一端上不会采纳（版本号只增不减）。
+- 验收：`PlaybackProfileTest`（含「档案驱动的签名与改造前逐字节一致」这条对照测试，
+  参照件是 test 目录里的 `LegacyV5Signer`）、`PlaybackProfileStoreTest`。
+- 回滚：把 `playback-profile.json` 的内容改回旧值并把 revision **加一**（端上只认更大的版本号）。
+

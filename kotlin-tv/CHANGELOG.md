@@ -4,6 +4,25 @@
 
 电视「检查更新」弹窗里那句短说明，取自每份 `RELEASE_<版本>.md` 中 `<!-- notes -->` 与 `<!-- /notes -->` 之间的块，改文件别动标记。
 
+## 1.0.0 · 取址协议里的数据抽成可远程下发的档案
+
+2026-11-23：过去三个月站方改了三轮取址协议，每次都要发一版 APK。
+回头看三次改的全是**数据**（medusa 字段表、magic/sbox、门地址、设备档案），
+算法一次没动。这一版把会变的那部分抽成一份 JSON 协议档案，
+端上启动时从远端拉取覆盖内置默认 —— 站方下次改字段不用发版，改一份 JSON 就行。
+拉不到 / 解析不过 / 版本号不新，一律继续用内置默认，行为与改造前完全一致。
+[完整说明](RELEASE_1.0.0.md)
+
+- **新增协议档案**：`PlaybackProfile`（数据模型 + 内置默认 + 严格校验）、`ProtoCodec`（protobuf 编码）、
+  `PlaybackProfileStore`（本地缓存）、`PlaybackProfileRepository`（远端拉取）。
+- **签名改由档案驱动**：`Signer.medusaV5` 的字段表、magic/license/signKey/sbox、签名头集合，
+  `V5Playback` 的门地址/UA/query 设备档案、正文模板，全部读档案。
+- **端上接入**：`PlaybackProfileUpdater` 启动时读缓存、后台拉远端；`MainActivity` 挂上。
+- **对照测试**：`PlaybackProfileTest` 断言档案驱动的签名与改造前那版 Signer **逐字节一致**
+  （参照件是 test 目录里的 `LegacyV5Signer`），并守住「仓库下发的那份 == 内置默认」。
+- 单测：core:test 440 项、app:testDebugUnitTest 60 项全绿；lint、assembleRelease BUILD SUCCESSFUL。
+- 探针：real-drama 8 集、comic-drama 8 集全部成功、失败 0，每集实读 1048576 字节媒体、画质 1080P。
+
 ## 0.9.103 · 取址请求换成站方现行的那套 medusa 明文字段
 
 2026-11-23 晚，用户报「现在不正常播放失败」：取址门整族空答（HTTP 200 + 0 字节，站方的软拦截），

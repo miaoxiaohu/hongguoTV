@@ -174,53 +174,43 @@ internal class Signer(
     /**
      * v5（04.10.03）的 medusa：明文里带专用 magic、许可证号与进程 nonce，
      * 密文用 v5 专用 sbox 与位序加密。
+     *
+     * 明文里写哪几个字段、写成什么值，由协议档案（[PlaybackProfile]）说了算 ——
+     * 那是站方会改的数据；xmxor、sm3、字节序这些算法留在这里。
      */
     private fun medusaV5(url: String, body: ByteArray?, ts: Int, who: Map<String, String>): String {
+        val spec = PlaybackProfiles.active.v5
         val query = sm3(url.substringAfter('?').toByteArray(Charsets.UTF_8))
         val f13 = hashF13(query, body?.let { digest("MD5", it) } ?: ByteArray(16), ts)
-        val flags = hex("4480000000000000")
-        val version = who.getValue("version_name")
-        val did = who.getValue("device_id")
-        val devType = who.getValue("device_type")
-        val brand = who["device_brand"]?.takeIf { it.isNotEmpty() } ?: "HONOR"
-        val secToken = secDeviceToken()
-        val nowMs = clock()
-        val deviceInfo = proto(
-            f(1, 1, "sint"), f(2, 2, "sint"), f(3, "8662"), f(4, did),
-            f(5, secToken), f(6, "!noperm!"),
-            f(7, -888888, "sint"), f(8, -888888, "sint"), f(9, 3, "sint"), f(10, -888888, "sint"),
-            f(11, "!notset!"), f(12, "Asia/Shanghai,8"), f(13, "zh_CN"),
-            f(14, 4, "sint"),
-            f(16, 0f, "float"), f(17, 0f, "float"), f(18, 0f, "float"),
-            f(19, 0f, "float"), f(20, 0f, "float"), f(21, 0f, "float"),
-            f(22, who.getValue("os_version")), f(23, 41, "sint"), f(24, 36, "sint"),
-            f(25, processStarted, "sint"), f(26, processStarted, "sint"),
-            f(27, processStarted, "sint"), f(28, nowMs, "sint"),
-            f(29, -1, "sint"), f(30, devType), f(31, brand), f(32, devType),
-            f(33, devType), f(34, brand), f(35, brand), f(36, brand),
-            f(38, 31, "sint"),
-        )
-        val envLaunch = (random() * 21).toInt() + 100
-        val envPid = (random() * 2000).toInt() + 10001
-        val envSub13 = proto(f(1, ts, "sint"), f(2, -2, "sint"), f(4, 200, "sint"))
-        val env = proto(
-            f(1, envLaunch, "sint"), f(2, 247235599, "sint"), f(3, 247235596, "sint"), f(5, 7, "sint"),
-            f(6, "v04.10.03.04-bugfix"), f(7, envPid, "sint"), f(8, who.getValue("channel")),
-            f(12, deviceInfo), f(13, envSub13), f(14, version),
-        )
-        val nested = proto(f(1, 305, "sint"), f(2, 4, "sint"), f(3, 694367, "sint"), f(5, 1621072674, "sint"))
-        val message = proto(
-            f(1, V5Constants.magic), f(2, 5, "sint"), f(3, unsigned(rand()), "sint"),
-            f(4, "8662"), f(5, did), f(6, V5Constants.license),
-            f(7, version), f(8, "v04.10.03-ml-android"), f(9, 0x040a0300, "sint"),
-            f(10, flags), f(12, ts, "sint"), f(13, f13), f(14, query.copyOf(6)),
-            f(15, nested),
-            f(16, secToken),
-            f(17, ts, "sint"), f(20, "none"), f(21, 312, "sint"), f(23, env),
-            f(24, """{"cmr":16777216,"cmr2":16777216,"un_h":11,"vpn":0,"kd":0,"dyn":"","do":1,"tk":true}"""),
-        )
+        val flags = spec.medusa.flags
+        val values = ProtoValues()
+        // 身份字段（device_id / version_name / os_version / channel 那些）来自 query：
+        // medusa 明文里的每一个都要跟 query 对得上，缺一个就是 HTTP 200 + 0 字节。
+        for ((key, value) in who) values.put(key, value)
+        values.put("ts", ts)
+        values.put("nowMs", clock())
+        values.put("processStarted", processStarted)
+        values.put("f13", f13)
+        values.put("query6", query.copyOf(6))
+        values.put("secToken", secDeviceToken())
+        values.put("magic", spec.magic)
+        values.put("license", spec.license)
+        values.put("flags", flags)
+        // 随机量的取值顺序跟改造前一致：envLaunch → envPid → 明文里的 rand → nonce → 包头 rand。
+        values.put("envLaunch", (random() * 21).toInt() + 100)
+        values.put("envPid", (random() * 2000).toInt() + 10001)
+        val deviceInfo = ProtoCodec.encode(spec.medusa.device, values)
+        values.put("device", deviceInfo)
+        val envSub13 = ProtoCodec.encode(spec.medusa.envSub13, values)
+        values.put("envSub13", envSub13)
+        val env = ProtoCodec.encode(spec.medusa.env, values)
+        values.put("env", env)
+        val nested = ProtoCodec.encode(spec.medusa.nested, values)
+        values.put("nested", nested)
+        values.put("rand", unsigned(rand()))
+        val message = ProtoCodec.encode(spec.medusa.message, values)
         val nonce = rand()
-        val key = V5Constants.signKey
+        val key = spec.signKey
         val hash = sm3(key + le32(nonce) + key)
         val high = (nonce ushr 16) and 255
         val seed = le32((((high shl 11) or (nonce ushr 24)) xor (high ushr 5) xor high).inv())
@@ -229,9 +219,9 @@ internal class Signer(
         val check = 0x18000001 or ((query[0].u() and 63) shl 14) or ((f13[0].u() and 63) shl 8)
         val packed = byteArrayOf(0xca.toByte()) + le32(rand()) + le32(check) + transformed +
             byteArrayOf((nonce ushr 16).toByte(), (nonce ushr 24).toByte())
-        val encrypted = AesV3(digest("MD5", key.copyOfRange(0, 16)), ts, v5 = true)
+        val encrypted = AesV3(digest("MD5", key.copyOfRange(0, 16)), ts, v5 = true, sbox = spec.sbox)
             .encrypt(packed, digest("MD5", key.copyOfRange(16, 32)))
-        val prefix = le32(5) + V5Constants.magic
+        val prefix = le32(5) + spec.magic
         for (i in prefix.indices) prefix[i] = (prefix[i].u() xor le32(ts)[i and 3].u()).toByte()
         return (prefix + byteArrayOf(nonce.toByte(), (nonce ushr 8).toByte(), 0, 1) + encrypted).base64()
     }
@@ -244,7 +234,7 @@ internal class Signer(
             var x8 = (java.lang.Long.rotateRight(b8,8)+b0) xor i.toLong()
             words.add(x8); x8 = x8 xor java.lang.Long.rotateRight(b0,61); table.add(x8); b0=x8; b8=words.removeAt(0)
         }
-        val license = if (mobileV5) V5Constants.license else "1588093228"
+        val license = if (mobileV5) PlaybackProfiles.active.v5.license else "1588093228"
         val text = "$ts-$license-8662".toByteArray(); val padding = 16 - text.size % 16
         val data = text+ByteArray(padding) { padding.toByte() }
         var output = le32(random)
@@ -285,7 +275,7 @@ internal class Signer(
      *
      * query 里已经有设备字段与身份，签名把 query 原文与 body 一起算进去；
      * v5 的 hash 分支只有 12 一支，所以这里靠微调 _rticket 找到那一支（最多试 1024 次）。
-     * v5 的头集合只有三个：x-khronos / x-helios / x-medusa。
+     * v5 的头集合由协议档案说了算（当前是三个：x-khronos / x-helios / x-medusa）。
      */
     fun signPlayback(base: String, values: Map<String,String>, body: ByteArray?=null, now: Long=clock()): Request {
         val ts=(now/1000).toInt()
@@ -305,7 +295,7 @@ internal class Signer(
                 // standing placeholder - otherwise the site drops the answer without saying why.
                 "x-helios" to helios(ts), "x-medusa" to medusa(url,body,ts,values),
             )
-            if (mobileV5) headers.keys.retainAll(setOf("x-khronos","x-helios","x-medusa"))
+            if (mobileV5) headers.keys.retainAll(PlaybackProfiles.active.v5.headers.toSet())
             if (body!=null) {
                 headers["Content-Type"]="application/json; charset=utf-8"
                 headers["x-ss-stub"]=digest("MD5",body).hex().uppercase()

@@ -162,6 +162,7 @@ class MainActivity: Activity() {
     private lateinit var library: Library
     private lateinit var tvTools: TvTools
     private lateinit var updater: AppUpdater
+    private lateinit var profileUpdater: PlaybackProfileUpdater
     private lateinit var mediaSession: TvMediaSession
     private val sleepTimer=SleepTimer { android.os.SystemClock.elapsedRealtime() }
     private var sleepStopped=false
@@ -393,6 +394,9 @@ class MainActivity: Activity() {
             override fun onGlobalLayout() { if(!isDestroyed) focusRouter.apply(root) }
         })
         updater=AppUpdater(this) { foreground && library.isLoaded && screen=="catalog" && !tvTools.showing }
+        // 协议档案：先用本地缓存换上生效的那份，再去后台拉远端那份。
+        // 拉不到就用内置默认 —— 跟改造前的行为完全一样。
+        profileUpdater=PlaybackProfileUpdater(this); profileUpdater.loadCached(); profileUpdater.refresh()
         connectivity=getSystemService(ConnectivityManager::class.java)
         runCatching { connectivity.registerDefaultNetworkCallback(networkCallback); networkRegistered=true }
         favoriteMonitor=FavoriteMonitor(library,repository) { refreshFavoriteLabels() }
@@ -2253,7 +2257,7 @@ class MainActivity: Activity() {
     override fun onDestroy() {
         generation++; cancelWork()
         if(networkRegistered) connectivity.unregisterNetworkCallback(networkCallback)
-        favoriteMonitor.destroy(); tvTools.destroy(); updater.destroy(); saveProgress(); releasePlayer(); library.close()
+        favoriteMonitor.destroy(); tvTools.destroy(); updater.destroy(); profileUpdater.close(); saveProgress(); releasePlayer(); library.close()
         // 备着的那两集放掉：活动没了，它们也没人要了。
         pagePreparation.cancel(); nextPreparation.cancel()
         preparedPage.clear(); preparedNext.clear()
