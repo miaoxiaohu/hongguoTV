@@ -1958,6 +1958,23 @@ class ContentRepositoryTest {
         assertEquals(listOf("2","3","1"),seasons.map { it.series.id })
     }
 
+    @Test fun detailFallsBackToAppDirectoryWhenWebVidListIsObfuscated() {
+        val repo=repository { request ->
+            when {
+                request.url.encodedPath=="/detail" ->
+                    """<script>_ROUTER_DATA={"loaderData":{"detail_page":{"seriesDetail":{"series_id":"7709114780467858456","series_name":"谁让这个文盲修仙的第七季","vid_list":["v1_QMelE5ysHOf0nDNPVKvRGd5V1fk","v1_ExKssDt3EYMfAU2o6iI0z29Af6g"]}}}};</script>"""
+                request.url.encodedPath=="/reading/bookapi/directory/all_items/v/" -> {
+                    assertEquals("7709114780467858456", request.url.queryParameter("book_id"))
+                    """{"code":0,"message":"SUCCESS","data":{"item_data_list":[{"item_id":"7709114791150767128","title":"第1集"},{"item_id":"7709114791150767129","title":"第2集"}]}}"""
+                }
+                else -> error("unexpected ${request.url}")
+            }
+        }
+        val detail=repo.detail("7709114780467858456")
+        assertEquals("谁让这个文盲修仙的第七季", detail.series.title)
+        assertEquals(listOf("7709114791150767128", "7709114791150767129"), detail.episodes)
+    }
+
     @Test fun seasonsTreatsAnUnmarkedTitleAsTheFirstSeason() {
         val repo=repository { searchPage(searchRow("1","某剧第二季"),searchRow("2","某剧")) }
         assertEquals(listOf(1,2),repo.seasons(Series("2","某剧")).map { it.season })

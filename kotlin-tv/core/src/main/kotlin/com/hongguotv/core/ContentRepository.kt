@@ -772,10 +772,79 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
     fun detail(id: String): Detail {
         require(id.matches(Regex("[0-9]{1,30}")))
         val o=router("$site/detail?series_id=$id").optJSONObject("detail_page")?.optJSONObject("seriesDetail") ?: throw IOException("剧集详情暂不可用")
-        val raw=o.optJSONArray("vid_list") ?: throw IOException("分集暂不可用")
-        val episodes=(0 until raw.length()).map { raw.getString(it) }
-        if(episodes.isEmpty() || episodes.any { !it.matches(Regex("[0-9]{1,30}")) } || episodes.distinct().size!=episodes.size) throw IOException("分集数据异常")
+        val raw=o.optJSONArray("vid_list")
+        val numeric=Regex("[0-9]{1,30}")
+        val webEpisodes=raw?.let { arr -> (0 until arr.length()).map { arr.optString(it) } }.orEmpty()
+        val episodes=if(webEpisodes.isNotEmpty() && webEpisodes.all { it.matches(numeric) } && webEpisodes.distinct().size==webEpisodes.size) {
+            webEpisodes
+        } else {
+            // 2026-11-27 实测：官网详情页把 vid_list 改成了仅 5 条的混淆串（v1_...），
+            // 不再下发全集纯数字 id。回落站方 App 目录接口拿全量纯数字 item_id。
+            directoryEpisodes(id) ?: throw IOException("分集数据异常")
+        }
         return Detail(card(o).copy(id=id),episodes)
+    }
+
+    /**
+     * 走站方 App 目录接口 `/reading/bookapi/directory/all_items/v/` 取全量纯数字分集 id。
+     *
+     * 先试 v4 签名（免设备注册，不消耗发号配额）；空答或失败再退到 v5 签名（复用已注册身份）。
+     */
+    private fun directoryEpisodes(bookId: String): List<String>? {
+        val hosts=PlaybackProfiles.active.v5.tabGate.hosts
+        for(host in hosts) {
+            val text=try { directoryItemsV4(host,bookId) }
+            catch(e: CancelledException) { throw e }
+            catch(_: Exception) { "" }
+            parseDirectoryEpisodes(text)?.let { return it }
+        }
+        val identity=try { playbackIdentity() }
+        catch(e: CancelledException) { throw e }
+        catch(_: Exception) { return null }
+        for(host in hosts) {
+            val text=try { addressLookup { client -> V5Playback.directoryItems(client,identity,bookId,clock(),host) } }
+            catch(e: CancelledException) { throw e }
+            catch(_: Exception) { "" }
+            parseDirectoryEpisodes(text)?.let { return it }
+        }
+        return null
+    }
+
+    private fun directoryItemsV4(host: String, bookId: String): String {
+        val dev=LinkedHashMap(VendorConstants.newDevice())
+        dev["book_id"]=bookId
+        dev["need_version"]="true"
+        val signed=signer.sign("https://$host/reading/bookapi/directory/all_items/v/",dev,null)
+        val req=Request.Builder().url(signed.url).get()
+        signed.headers.forEach { (k,v) -> req.header(k,v) }
+        return addressLookup { client ->
+            RequestScope.execute(client.newCall(req.build())) { response ->
+                if(!response.isSuccessful) throw HttpStatusException(response.code)
+                response.body?.string() ?: ""
+            }
+        }
+    }
+
+    private fun parseDirectoryEpisodes(text: String): List<String>? {
+        if(text.isBlank()) return null
+        val root=runCatching { JSONObject(text) }.getOrNull() ?: return null
+        val hasCode=root.has("code") || root.has("Code")
+        if(hasCode) {
+            val code=if(root.has("code")) root.optInt("code",-1) else root.optInt("Code",-1)
+            if(code!=0) return null
+        } else if(!root.optString("message").equals("SUCCESS",ignoreCase=true)) {
+            return null
+        }
+        val list=root.optJSONObject("data")?.optJSONArray("item_data_list") ?: return null
+        if(list.length()==0) return null
+        val numeric=Regex("[0-9]{1,30}")
+        val ids=LinkedHashSet<String>(list.length())
+        for(i in 0 until list.length()) {
+            val itemId=list.optJSONObject(i)?.optString("item_id")?.trim().orEmpty()
+            if(!itemId.matches(numeric)) return null
+            ids+=itemId
+        }
+        return if(ids.isEmpty()) null else ids.toList()
     }
     /**
      * Find the other seasons of the same show.

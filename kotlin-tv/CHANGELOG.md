@@ -4,6 +4,16 @@
 
 电视「检查更新」弹窗里那句短说明，取自每份 `RELEASE_<版本>.md` 中 `<!-- notes -->` 与 `<!-- /notes -->` 之间的块，改文件别动标记。
 
+## 1.0.2 · 适配站方官网详情页分集 ID 混淆（改走 App 目录接口）
+
+2026-11-27：凌晨 00:08–00:43 站方把官网详情页 `seriesDetail.vid_list` 改成了仅 5 条的混淆串（`v1_...`），
+导致所有剧集打开报「分集数据异常」（16/16 全失败）。这一版在官网 `vid_list` 非纯数字时自动回落站方 App 目录接口
+`/reading/bookapi/directory/all_items/v/` 拉取全量纯数字 `item_id`（优先 v4 签名免注册，失败回退 v5 签名）。
+[完整说明](RELEASE_1.0.2.md)
+
+- **`ContentRepository.detail()`**：官网 `vid_list` 为混淆串时走 `directoryEpisodes()`，支持 v4 免注册与 `V5Playback.directoryItems()` v5 兜底。
+- 单测与探针：新增 `detailFallsBackToAppDirectoryWhenWebVidListIsObfuscated`；`:core:test`、`:app:testDebugUnitTest`、`:app:lintRelease` 全绿；real-drama 8/8、comic-drama 8/8 全通过（1080P）。
+
 ## 1.0.1 · 全量稳定性与边界缺陷修复
 
 2026-11-27：对 `core` 和 `app` 模块做了一轮全面排查与修复：补齐 1.0.0 协议档案的严格校验与单次请求快照一致；

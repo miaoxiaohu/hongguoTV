@@ -124,4 +124,33 @@ internal object V5Playback {
             response.body?.string() ?: ""
         }
     }
+
+    /**
+     * 拉一部剧的完整分集目录（`/reading/bookapi/directory/all_items/v/`，v5 签名）。
+     *
+     * 2026-11-27 实测：官网详情页（`detail?series_id=`）的 `vid_list` 改成了仅 5 条的混淆串
+     * （`v1_...`），不再下发全集纯数字 `video_id`。这里改走站方 App 的目录接口拿全量 `item_id`。
+     */
+    fun directoryItems(client: OkHttpClient, identity: PlaybackIdentity, bookId: String, now: Long, host: String): String {
+        val profile = PlaybackProfiles.active
+        val gate = profile.v5.tabGate
+        val values = profile.deviceQuery(identityValues(identity), withRomVersion = true)
+        values["book_id"] = bookId
+        values["need_version"] = "true"
+        val base = "https://$host/reading/bookapi/directory/all_items/v/"
+        val signed = signer.signPlayback(base, values, ByteArray(0), now, profile)
+        val request = Request.Builder().url(signed.url).get()
+            .header("User-Agent", gate.userAgent)
+            .header("Accept", "application/json; charset=utf-8")
+            .header("Accept-Language", "zh-CN,zh;q=0.9")
+        for ((k, v) in signed.headers) request.header(k, v)
+        request.removeHeader("x-ss-stub")
+        request.removeHeader("Content-Type")
+        request.removeHeader("Content-Encoding")
+        val transport = client.newBuilder().cookieJar(CookieJar.NO_COOKIES).build()
+        return RequestScope.execute(transport.newCall(request.build())) { response ->
+            if (!response.isSuccessful) throw HttpStatusException(response.code)
+            response.body?.string() ?: ""
+        }
+    }
 }
