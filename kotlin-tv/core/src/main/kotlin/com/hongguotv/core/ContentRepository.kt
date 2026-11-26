@@ -335,6 +335,8 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * 「刚存进去的地址又找不到了」。所以读写都走这把锁。
      */
     private val addressLock=Any()
+    private val identityLock=Any()
+    private val rankingLock=Any()
 
     /**
      * Registers one anonymous device, or hands back the one this repository already has.
@@ -342,12 +344,12 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * @throws IOException when the registration cannot be made or does not answer with the two
      *   numbers the playback request needs.
      */
-    @Synchronized private fun playbackIdentity(): PlaybackIdentity {
+    private fun playbackIdentity(): PlaybackIdentity = synchronized(identityLock) {
         registeredIdentity?.let {
             // 身份可以跨集复用（2026-11-15 实测：同一个身份连取 60 集全部成功），
             // 但也不该用一个身份用到天荒地老 —— 站方可能慢慢地不看它了。
             // 所以给它定个寿命：过了就换一个，省得哪天它开始一直空答。
-            if(clock()-registeredIdentityAt<PLAYBACK_IDENTITY_MAX_AGE_MS) return it
+            if(clock()-registeredIdentityAt<PLAYBACK_IDENTITY_MAX_AGE_MS) return@synchronized it
             registeredIdentity=null
         }
         val now=clock()
@@ -375,7 +377,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         registeredIdentity=identity
         registeredIdentityAt=clock()
         registrationFailedAt=0
-        return identity
+        identity
     }
     /**
      * One registration attempt, and a second one on a fresh connection when the first stalled.
@@ -479,10 +481,9 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      *
      * @param force fetch even when a list fetched recently is already held.
      */
-    @Synchronized
-    fun rankingList(type: ContentType = ContentType.SHORT, force: Boolean = false): HotRank.HotList {
+    fun rankingList(type: ContentType = ContentType.SHORT, force: Boolean = false): HotRank.HotList = synchronized(rankingLock) {
         val now=System.currentTimeMillis()
-        rankingCache[type]?.let { if(!force && !it.isStale(now)) return it }
+        rankingCache[type]?.let { if(!force && !it.isStale(now)) return@synchronized it }
         var failure: Exception?=null
         val boards=mutableListOf<HotRank.Board>()
         for(route in type.routes) {
@@ -499,7 +500,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         if(boards.isEmpty()) throw failure ?: IOException("热播榜暂不可用")
         val list=HotRank.combine(boards,type)
         rankingCache[type]=list
-        return list
+        list
     }
     /**
      * Throws the fetched boards away, so the next request goes to the site again.
@@ -508,7 +509,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * reads and writes, and a plain [LinkedHashMap] being emptied while another thread walks it
      * is not a safe thing to do.
      */
-    @Synchronized fun clearRankingCache() { rankingCache.clear() }
+    fun clearRankingCache() = synchronized(rankingLock) { rankingCache.clear() }
     /**
      * One route's page, exactly as the site serves it.
      *
@@ -864,9 +865,12 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         for(round in 0 until PLAYBACK_IDENTITY_ROUNDS) {
             try { return v5Stream(id,maxQuality) }
             catch(v5: Exception) {
+                if(v5 is CancelledException || fallbackCannotHelp(v5)) throw v5
                 try { return tabStream(id,maxQuality) }
                 catch(tab: Exception) {
+                    if(tab is CancelledException) throw tab
                     tab.addSuppressed(v5); failure=tab
+                    if(fallbackCannotHelp(tab)) throw tab
                     // 这个身份两道门都空答：换一个身份再来一轮（冷却期内就不换）。
                     if(round==0 && rotatePlaybackIdentity(clock())) continue
                     break
@@ -947,10 +951,10 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * body 是 gzip 过的 JSON，头里只带 x-khronos / x-helios / x-medusa 三个 v5 签名头。
      */
     private fun v5Stream(id: String, maxQuality: Int): StreamInfo {
-        cachedAddress(id)?.let { return it }
+        cachedAddress(id,maxQuality)?.let { return it }
         val model=v5VideoModel(id) ?: throw EmptySignedAnswerException()
         val stream=episodeStream(model,maxQuality)
-        rememberAddress(id,stream)
+        rememberAddress(id,maxQuality,stream)
         return stream
     }
     /**
@@ -974,8 +978,12 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             throw e
         }
         for(attempt in 0 until PLAYBACK_TAB_ATTEMPTS_PER_IDENTITY) {
-            if(attempt>0) Thread.sleep(PLAYBACK_TAB_RETRY_GAP_MS)
+            if(attempt>0) {
+                try { Thread.sleep(PLAYBACK_TAB_RETRY_GAP_MS) }
+                catch(_: InterruptedException) { Thread.currentThread().interrupt(); throw CancelledException() }
+            }
             val model=try { addressLookup { client -> V5Playback.model(client,current,id,clock()) } }
+            catch(e: CancelledException) { throw e }
             catch(e: Exception) { failure=e; continue }
             if(model!=null) return model
             empty=true
@@ -985,10 +993,10 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
     }
 
     private fun tabStream(id: String, maxQuality: Int): StreamInfo {
-        cachedAddress(id)?.let { return it }
+        cachedAddress(id,maxQuality)?.let { return it }
         val model=tabVideoModel(id) ?: throw EmptySignedAnswerException()
         val stream=episodeStream(model,maxQuality)
-        rememberAddress(id,stream)
+        rememberAddress(id,maxQuality,stream)
         return stream
     }
     /**
@@ -1013,8 +1021,6 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * 注册被拒时 [RegistrationUnavailableException] 直接往外抛，不该被当成空答。
      */
     private fun tabVideoModel(id: String): JSONObject? {
-        var failure: Exception?=null
-        var empty=false
         // 身份跨集复用（2026-11-15 实测）；换号由整条链统一决定，见 [streamDoors]。
         val current=try { playbackIdentity() }
         catch(e: Exception) {
@@ -1022,14 +1028,11 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             if(e is RegistrationUnavailableException) throw e
             throw e
         }
-        // 一个身份只问一轮：这一轮已经把两个域 × 两种形态都试过了
+        // 一个身份只问一轮：这一轮已经把两个域 × 三种形态都试过了
         // （站方发的号约一半是坏的，而且坏号永久坏 —— 同一个号再问一遍也是空答）。
-        val model=try { tabVideoModelOnce(id,current) }
-        catch(e: Exception) { failure=e; null }
+        val model=tabVideoModelOnce(id,current)
         if(model!=null) return model
-        empty=true
-        if(!empty && failure!=null) throw failure
-        throw EmptySignedAnswerException().also { e -> failure?.let { e.addSuppressed(it) } }
+        throw EmptySignedAnswerException()
     }
 
     /**
@@ -1052,15 +1055,21 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
             { host -> tabVideoModelText(host,id,identity) },
             { host -> tabVideoModelLegacyText(host,legacyQuery,ts) },
         )
+        var failure: Exception?=null
+        var answered=false
         // 分集门问哪几个 host 由协议档案说了算（站方换域时不用发版）。
         for(host in PlaybackProfiles.active.v5.tabGate.hosts) {
             for(shape in shapes) {
-                val text=try { shape(host) } catch(e: Exception) { "" }
+                val text=try { shape(host) }
+                catch(e: CancelledException) { throw e }
+                catch(e: Exception) { if(failure==null) failure=e; continue }
+                answered=true
                 if(text.isBlank()) continue
                 val model=parseTabModel(text,id) ?: continue
                 return model
             }
         }
+        if(!answered && failure!=null) throw failure
         return null
     }
     /**
@@ -1207,19 +1216,19 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      */
     private fun registeredStream(id: String, maxQuality: Int, window: List<String>): StreamInfo {
         // An address that was already fetched is an address that costs nothing.
-        cachedAddress(id)?.let { return it }
+        cachedAddress(id,maxQuality)?.let { return it }
         // One signed request carries a whole window of episodes, and that is the whole point:
         // the registration - the thing the site limits - is spent once for the window instead
         // of once per episode.
         val ids=windowFor(id,window)
         val batch=batchAddresses(ids,maxQuality)
-        batch.forEach { (key,value) -> rememberAddress(key,value) }
+        batch.forEach { (key,value) -> rememberAddress(key,maxQuality,value) }
         batch[id]?.let { return it }
         // The answer came back and this episode was not in it: the model it carries holds only
         // renditions the television cannot decode, and the site answers one episode asked on
         // its own with a different model. So it is asked on its own.
         val single=batchAddresses(listOf(id),maxQuality)
-        single.forEach { (key,value) -> rememberAddress(key,value) }
+        single.forEach { (key,value) -> rememberAddress(key,maxQuality,value) }
         return single[id] ?: throw AddressLookupException(false,IOException("没有取到这一集的播放地址"))
     }
     /**
@@ -1317,7 +1326,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
     private fun fallbackWithCodec(fallback: String, codec: String): String {
         val re=Regex("([?&])codec_type=[^&]*")
         if(re.containsMatchIn(fallback)) return fallback.replace(re,"\$1codec_type=" + codec)
-        return fallback + (if(fallback.contains('&')) "&" else "?") + "codec_type=" + codec
+        return fallback + (if(fallback.contains('?')) "&" else "?") + "codec_type=" + codec
     }
     /**
      * The episodes one request carries, with the wanted one among them.
@@ -1333,16 +1342,18 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
         val from=index.coerceAtMost(last)
         return window.subList(from,minOf(window.size,from+PLAYBACK_BATCH_SIZE)).toList()
     }
+    private fun addressKey(id: String, maxQuality: Int): String = "$id:$maxQuality"
     /** The address that was already fetched for an episode, if it is still worth having. */
-    private fun cachedAddress(id: String): StreamInfo? = synchronized(addressLock) {
-        val entry=addressCache[id] ?: return@synchronized null
-        if(clock()-entry.at>ADDRESS_CACHE_TTL_MS) { addressCache.remove(id); return@synchronized null }
+    private fun cachedAddress(id: String, maxQuality: Int): StreamInfo? = synchronized(addressLock) {
+        val key=addressKey(id,maxQuality)
+        val entry=addressCache[key] ?: return@synchronized null
+        if(clock()-entry.at>ADDRESS_CACHE_TTL_MS) { addressCache.remove(key); return@synchronized null }
         entry.stream
     }
     /** Keeps an address, so that the episodes around it do not have to be asked for again. */
-    private fun rememberAddress(id: String, stream: StreamInfo) = synchronized(addressLock) {
+    private fun rememberAddress(id: String, maxQuality: Int, stream: StreamInfo) = synchronized(addressLock) {
         if(addressCache.size>=ADDRESS_CACHE_MAX) addressCache.remove(addressCache.keys.first())
-        addressCache[id]=CachedAddress(stream,clock())
+        addressCache[addressKey(id,maxQuality)]=CachedAddress(stream,clock())
     }
     /**
      * The playback answer, asked with the identity this device already has.
@@ -1385,11 +1396,11 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * 打爆，后半程的集数直接「注册被拒」+ 10 分钟退避。所以这里按上游 0.16.10 的量级，
      * 两次换号之间至少隔 [PLAYBACK_IDENTITY_ROTATE_COOLDOWN_MS]。
      */
-    @Synchronized private fun rotatePlaybackIdentity(now: Long): Boolean {
-        if(now-playbackIdentityRotatedAt<PLAYBACK_IDENTITY_ROTATE_COOLDOWN_MS) return false
+    private fun rotatePlaybackIdentity(now: Long): Boolean = synchronized(identityLock) {
+        if(now-playbackIdentityRotatedAt<PLAYBACK_IDENTITY_ROTATE_COOLDOWN_MS) return@synchronized false
         playbackIdentityRotatedAt=now
         dropPlaybackIdentity()
-        return true
+        true
     }
     /**
      * 把当前身份丢掉，下一次取址重新注册一个。
@@ -1397,7 +1408,7 @@ class ContentRepository(val http: OkHttpClient = playbackHttpClient(), private v
      * 只在「这个身份连着几问都是空答」时用 —— 那说明站方已经不看这个身份了，
      * 留着它只会一直空答下去。
      */
-    @Synchronized private fun dropPlaybackIdentity() {
+    private fun dropPlaybackIdentity() = synchronized(identityLock) {
         registeredIdentity=null
     }
     /**

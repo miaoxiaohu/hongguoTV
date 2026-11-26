@@ -200,6 +200,32 @@ class PlaybackProfileTest {
         assertTrue("下发域不在白名单里：$host", host in PlaybackProfileRepository.ALLOWED_HOSTS)
     }
 
+    /** 严格校验：拒绝 deviceProfile 引用 tab 专属字段、medusa 类型/顺序错误、以及非法 JSON 正文模板。 */
+    @Test fun rejectsInvalidDeviceRefsMedusaTypesOrderAndMalformedModelBody() {
+        // 1. deviceProfile 引用了 ${id}（单集门 query 里没有 id）
+        val badDevice = PlaybackProfile.builtin().toJson().put("revision", 1)
+        badDevice.getJSONObject("v5").getJSONObject("deviceProfile").getJSONArray("fields")
+            .put(JSONObject().put("key", "bad_id").put("value", "\${id}").put("when", "always"))
+        assertThrows(IllegalArgumentException::class.java) { PlaybackProfile.parse(badDevice.toString()) }
+
+        // 2. medusa.device 引用了尚未生成的 ${env}
+        val badOrder = PlaybackProfile.builtin().toJson().put("revision", 1)
+        badOrder.getJSONObject("v5").getJSONObject("medusa").getJSONArray("device")
+            .put(JSONObject().put("tag", 99).put("type", "bytes").put("value", "\${env}"))
+        assertThrows(IllegalArgumentException::class.java) { PlaybackProfile.parse(badOrder.toString()) }
+
+        // 3. medusa 字段类型与引用类型不匹配（ts 是 sint，不能标成 string）
+        val badType = PlaybackProfile.builtin().toJson().put("revision", 1)
+        badType.getJSONObject("v5").getJSONObject("medusa").getJSONArray("device")
+            .put(JSONObject().put("tag", 99).put("type", "string").put("value", "\${ts}"))
+        assertThrows(IllegalArgumentException::class.java) { PlaybackProfile.parse(badType.toString()) }
+
+        // 4. modelBody 含占位符但不是合法 JSON
+        val badBody = PlaybackProfile.builtin().toJson().put("revision", 1)
+        badBody.getJSONObject("v5").put("modelBody", """{"broken": ${'$'}{device_level}, "${'$'}{id}" """)
+        assertThrows(IllegalArgumentException::class.java) { PlaybackProfile.parse(badBody.toString()) }
+    }
+
     /** 造一份指定版本号的档案（基于内置默认）。 */
     private fun profileWithRevision(revision: Long): PlaybackProfile =
         PlaybackProfile.parse(PlaybackProfile.builtin().toJson().put("revision", revision).toString())

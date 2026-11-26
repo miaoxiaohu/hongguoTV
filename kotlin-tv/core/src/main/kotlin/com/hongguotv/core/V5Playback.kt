@@ -56,7 +56,7 @@ internal object V5Playback {
         GZIPOutputStream(output).use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
         val bytes = output.toByteArray()
         // 签名吃的是最终 query 原文与真正发出去的 body（gzip 之后的字节）。
-        val signed = signer.signPlayback(url.newBuilder().query(null).build().toString(), values, bytes, now)
+        val signed = signer.signPlayback(url.newBuilder().query(null).build().toString(), values, bytes, now, profile)
         val request = Request.Builder().url(signed.url)
         // 签名头先落，再落这几个固定的：User-Agent 要与 query 里的设备字段对得上，
         // 被签名头里的那份覆盖掉就成了另一个机型。
@@ -108,7 +108,7 @@ internal object V5Playback {
         val base = "https://$host" + gate.path
         // 空字节只是**签名输入**：这条 GET 没有正文，但 medusa 要的是 MD5(空字节)，
         // 不是 16 个零字节 —— 差这一位，站方就回 0 字节。
-        val signed = signer.signPlayback(base, values, ByteArray(0), now)
+        val signed = signer.signPlayback(base, values, ByteArray(0), now, profile)
         val request = Request.Builder().url(signed.url).get()
         request.header("User-Agent", gate.userAgent)
         request.header("Accept", "application/json; charset=utf-8")

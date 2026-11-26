@@ -137,8 +137,14 @@ internal class Signer(
         if(value.isEmpty()) throw IllegalStateException("设备身份缺失：$key 为空，服务器会静默封锁（HTTP 200 空响应）")
         return value
     }
-    fun medusa(url: String, body: ByteArray?, ts: Int, device: Map<String, String> = VendorConstants.device): String {
-        if (mobileV5) return medusaV5(url, body, ts, device)
+    fun medusa(
+        url: String,
+        body: ByteArray?,
+        ts: Int,
+        device: Map<String, String> = VendorConstants.device,
+        profile: PlaybackProfile = PlaybackProfiles.active,
+    ): String {
+        if (mobileV5) return medusaV5(url, body, ts, device, profile)
         val deviceId=identity(device,"device_id"); val version=identity(device,"version_name")
         val bodyMd5 = body?.let { digest("MD5",it) } ?: ByteArray(16)
         val query = url.substringAfter('?').toByteArray(); val querySm3 = sm3(query)
@@ -178,8 +184,14 @@ internal class Signer(
      * 明文里写哪几个字段、写成什么值，由协议档案（[PlaybackProfile]）说了算 ——
      * 那是站方会改的数据；xmxor、sm3、字节序这些算法留在这里。
      */
-    private fun medusaV5(url: String, body: ByteArray?, ts: Int, who: Map<String, String>): String {
-        val spec = PlaybackProfiles.active.v5
+    private fun medusaV5(
+        url: String,
+        body: ByteArray?,
+        ts: Int,
+        who: Map<String, String>,
+        profile: PlaybackProfile = PlaybackProfiles.active,
+    ): String {
+        val spec = profile.v5
         val query = sm3(url.substringAfter('?').toByteArray(Charsets.UTF_8))
         val f13 = hashF13(query, body?.let { digest("MD5", it) } ?: ByteArray(16), ts)
         val flags = spec.medusa.flags
@@ -225,7 +237,7 @@ internal class Signer(
         for (i in prefix.indices) prefix[i] = (prefix[i].u() xor le32(ts)[i and 3].u()).toByte()
         return (prefix + byteArrayOf(nonce.toByte(), (nonce ushr 8).toByte(), 0, 1) + encrypted).base64()
     }
-    fun helios(ts: Int): String {
+    fun helios(ts: Int, profile: PlaybackProfile = PlaybackProfiles.active): String {
         val random = rand()
         val ascii = digest("MD5",le32(random)+"8662".toByteArray()).hex().toByteArray()
         val words = (0..3).map { ascii.i64(it*8,true) }.toMutableList(); val table = mutableListOf(words[0])
@@ -234,7 +246,7 @@ internal class Signer(
             var x8 = (java.lang.Long.rotateRight(b8,8)+b0) xor i.toLong()
             words.add(x8); x8 = x8 xor java.lang.Long.rotateRight(b0,61); table.add(x8); b0=x8; b8=words.removeAt(0)
         }
-        val license = if (mobileV5) PlaybackProfiles.active.v5.license else "1588093228"
+        val license = if (mobileV5) profile.v5.license else "1588093228"
         val text = "$ts-$license-8662".toByteArray(); val padding = 16 - text.size % 16
         val data = text+ByteArray(padding) { padding.toByte() }
         var output = le32(random)
@@ -277,7 +289,13 @@ internal class Signer(
      * v5 的 hash 分支只有 12 一支，所以这里靠微调 _rticket 找到那一支（最多试 1024 次）。
      * v5 的头集合由协议档案说了算（当前是三个：x-khronos / x-helios / x-medusa）。
      */
-    fun signPlayback(base: String, values: Map<String,String>, body: ByteArray?=null, now: Long=clock()): Request {
+    fun signPlayback(
+        base: String,
+        values: Map<String,String>,
+        body: ByteArray?=null,
+        now: Long=clock(),
+        profile: PlaybackProfile = PlaybackProfiles.active,
+    ): Request {
         val ts=(now/1000).toInt()
         for (offset in 0..1023) {
             val ticket=now+offset
@@ -293,9 +311,9 @@ internal class Signer(
                 "x-gorgon" to gorgon(query,body,ts,(random()*65536).toInt()),
                 // The medusa plaintext carries the identity: it must be the one in the query, not a
                 // standing placeholder - otherwise the site drops the answer without saying why.
-                "x-helios" to helios(ts), "x-medusa" to medusa(url,body,ts,values),
+                "x-helios" to helios(ts, profile), "x-medusa" to medusa(url,body,ts,values,profile),
             )
-            if (mobileV5) headers.keys.retainAll(PlaybackProfiles.active.v5.headers.toSet())
+            if (mobileV5) headers.keys.retainAll(profile.v5.headers.toSet())
             if (body!=null) {
                 headers["Content-Type"]="application/json; charset=utf-8"
                 headers["x-ss-stub"]=digest("MD5",body).hex().uppercase()

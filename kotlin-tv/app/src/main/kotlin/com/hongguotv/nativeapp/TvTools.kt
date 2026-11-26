@@ -63,8 +63,9 @@ class TvTools(private val activity: Activity) {
      * 手机浏览器只能对着一个没人监听的地址转圈到超时。
      * 会话的生命周期应该跟 App 走（退出 App 才结束），不该跟界面上的弹窗走。
      */
+    private var destroyed=false
     fun close() { dialog?.dismiss() }
-    fun destroy() { close(); worker.shutdownNow() }
+    fun destroy() { destroyed=true; close(); closeSession(); worker.shutdownNow() }
     private fun closeSession() {
         sessions.release()
         phoneUrl=null; phoneDialog=null; phoneContent=null; phoneAnchor=null; phoneSubmit=null
@@ -211,12 +212,12 @@ class TvTools(private val activity: Activity) {
                 lateinit var session: PhoneSearchServer
                 session=PhoneSearchServer(address,{ query -> main.post { deliverPhoneQuery(query,session) } },{ main.post { sessions.expire(session) { expirePhoneSession() } } })
                 main.post {
-                    if(owner!=null && owner!==this@TvTools.dialog) { session.close(); return@post }
+                    if(destroyed || (owner!=null && owner!==this@TvTools.dialog)) { session.close(); return@post }
                     sessions.attach(session,session.url); phoneUrl=session.url
                     if(content!=null) renderPhoneCode(content,session.url)
                 }
             } catch(_: Exception) {
-                main.post { if(content!=null) { content.removeAllViews(); content.addView(label("无法开启手机输入，请检查网络后重试。")) } }
+                main.post { if(!destroyed && content!=null) { content.removeAllViews(); content.addView(label("无法开启手机输入，请检查网络后重试。")) } }
             }
         }
     }
@@ -242,7 +243,7 @@ class TvTools(private val activity: Activity) {
         worker.execute {
             try {
                 val session=LibraryTransferServer(address,backup,{ data -> main.post {
-                    if(dialog!==next) return@post
+                    if(destroyed || dialog!==next) return@post
                     next.dismiss()
                     val preview=column()
                     preview.addView(label("备份含 ${data.favorites.size} 部收藏、${data.history.size} 条观看记录、${data.searches.size} 条搜索、${data.later.size} 部稍后看、${data.hidden.size} 部已隐藏推荐。\n\n收藏合并，观看位置以较新的记录为准；已有收藏优先保留（最多 500 部），历史保留最近 200 条。",16f))
@@ -251,9 +252,9 @@ class TvTools(private val activity: Activity) {
                         .setView(ScrollView(activity).apply { addView(preview) }).setNegativeButton("取消",null)
                         .setPositiveButton("合并恢复") { _,_-> restore(data,settings.isChecked) }.create()
                     open(confirm,anchor); confirm.getButton(AlertDialog.BUTTON_NEGATIVE).requestFocus()
-                } },{ main.post { if(dialog===next) { content.removeAllViews(); content.addView(label("二维码已过期，请关闭后重新打开。")) } } })
+                } },{ main.post { if(!destroyed && dialog===next) { content.removeAllViews(); content.addView(label("二维码已过期，请关闭后重新打开。")) } } })
                 main.post {
-                    if(dialog!==next) { session.close(); return@post }
+                    if(destroyed || dialog!==next) { session.close(); return@post }
                     sessions.attach(session); content.removeAllViews()
                     val row=LinearLayout(activity).apply { gravity=Gravity.CENTER_VERTICAL }
                     row.addView(qr(session.url),LinearLayout.LayoutParams(dp(185),dp(185)))
@@ -261,7 +262,7 @@ class TvTools(private val activity: Activity) {
                     instructions.addView(label("手机扫码，用浏览器下载备份或选择备份文件恢复。\n仅限同一局域网；关闭即失效，最长 5 分钟。恢复需在电视确认。",16f))
                     instructions.addView(label(session.url,12f)); row.addView(instructions,LinearLayout.LayoutParams(0,-2,1f)); content.addView(row)
                 }
-            } catch(_: Exception) { main.post { if(dialog===next) status.text="无法开启备份传输，请检查网络后重试。" } }
+            } catch(_: Exception) { main.post { if(!destroyed && dialog===next) status.text="无法开启备份传输，请检查网络后重试。" } }
         }
     }
 }

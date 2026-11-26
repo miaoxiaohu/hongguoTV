@@ -58,7 +58,7 @@ class MainActivity: Activity() {
     private inner class Preparation {
         var scope: RequestScope?=null
         var job: java.util.concurrent.Future<*>?=null
-        var watchdog: Runnable?=null
+        @Volatile var watchdog: Runnable?=null
         /**
          * 这一份在备哪一集，以及它已经问到的地址。
          *
@@ -312,6 +312,13 @@ class MainActivity: Activity() {
     private var transportPlay: TextView?=null
     private var sleepButton: TextView?=null
     private var speedDialog: AlertDialog?=null
+    private var qualityDialog: AlertDialog?=null
+    private var licenseDialog: AlertDialog?=null
+    private fun dismissTransientDialogs() {
+        speedDialog?.dismiss(); speedDialog=null
+        qualityDialog?.dismiss(); qualityDialog=null
+        licenseDialog?.dismiss(); licenseDialog=null
+    }
     private var pendingSeek: Long?=null
     private var playError=false
     /**
@@ -852,9 +859,10 @@ class MainActivity: Activity() {
      * and this must not cancel the page the user is on.
      */
     private fun refreshRankingInBackground() {
-        if(library.freshRanking(library.contentType)!=null) return
+        val type=library.contentType
+        if(library.freshRanking(type)!=null) return
         io.submit {
-            runCatching { repository.rankingList(library.contentType) }
+            runCatching { repository.rankingList(type) }
                 .onSuccess { list -> main.post { if(!isDestroyed) library.saveRanking(list) } }
         }
     }
@@ -1294,7 +1302,11 @@ class MainActivity: Activity() {
         lateinit var updates: TextView
         updates=setting(device,"版本与更新  ·  ${BuildConfig.VERSION_NAME}") { updater.show(updates) }
         val license=setting(device,"开源许可") {
-            AlertDialog.Builder(this).setTitle("开源许可").setMessage("本原生版以 GPL-3.0 发布。\n内容协议与加密处理移植自 drpys（22261ad）。\nAndroidX Media3 / OkHttp：Apache-2.0\nKotlin：Apache-2.0\nBouncy Castle：MIT\n完整源码和许可证见 GitHub：${AppUpdate.REPOSITORY}。").setPositiveButton("关闭",null).show()
+            licenseDialog?.dismiss()
+            val dialog=AlertDialog.Builder(this).setTitle("开源许可").setMessage("本原生版以 GPL-3.0 发布。\n内容协议与加密处理移植自 drpys（22261ad）。\nAndroidX Media3 / OkHttp：Apache-2.0\nKotlin：Apache-2.0\nBouncy Castle：MIT\n完整源码和许可证见 GitHub：${AppUpdate.REPOSITORY}。").setPositiveButton("关闭",null).create()
+            licenseDialog=dialog
+            dialog.setOnDismissListener { if(licenseDialog===dialog) licenseDialog=null }
+            dialog.show()
         }
         // 两列之间的左右、以及每一列里的上下，都由焦点图按实际位置算 —— 设置页的按钮是
         // 左边一列、右边一列，手写的连线只照顾了其中几个方向。
@@ -1388,13 +1400,14 @@ class MainActivity: Activity() {
         (searchInput as? EditText)?.let { (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(it.windowToken,0) }
         if(library.contentType!=type) { library.contentType=type; dropShelfCachedPages() }
         library.rememberSearch(clean,type); query=clean
-        // 切到搜索页之前先把当前 tab 的 page/catalog/catalogFocus 存下来，
-        // 否则在详情页或其他 tab 触发的搜索会让 switchTab 回来时回到第 1 页。
+        if(collection!=null) leaveCollection()
+        // 切到搜索页之前先把当前 tab 的 page/catalog/catalogFocus/totalPages 存下来，
+        // 否则在详情页或其他 tab 触发的搜索会让 switchTab 回来时回到第 1 页或丢总页数。
         if(tab!=TAB_SEARCH) {
-            tabState[tab]=CatalogState(page,catalog,hasMore,ranking); tabFocus[tab]=catalogFocus
+            tabState[tab]=CatalogState(page,catalog,hasMore,ranking,catalogTotalPages); tabFocus[tab]=catalogFocus
             tab=TAB_SEARCH
             val saved=tabState[TAB_SEARCH]
-            page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking
+            page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; catalogTotalPages=saved?.totalPages
             catalogFocus=tabFocus[TAB_SEARCH].orEmpty()
         }
         page=1; catalogFocus=""; focusColumn=null
@@ -1574,7 +1587,7 @@ class MainActivity: Activity() {
         saveProgress(); library.flush(); invalidatePage(); favoriteMonitor.stop(); releaseCatalogViews()
         if(reuse) {
             cancelRecovery(); cancelPrefetch(); tvTools.close()
-            episodePanel?.dismiss(); episodePanel=null; speedDialog?.dismiss(); speedDialog=null
+            episodePanel?.dismiss(); episodePanel=null; dismissTransientDialogs()
             playerListener?.let { player?.removeListener(it) }; playerListener=null
             player?.stop(); player?.clearMediaItems()
             video?.close(); video=null
@@ -1685,7 +1698,13 @@ class MainActivity: Activity() {
                         android.util.Log.i("HongguoTV","Playback first frame episode=${episodeIndex+1} preloaded=${prefetched!=null} reused=$reuse elapsedMs=${android.os.SystemClock.elapsedRealtime()-playbackStarted}")
                     }
                 }
-                override fun onIsPlayingChanged(playing: Boolean) { if(active()) { if(hud.visibility==View.VISIBLE) showHud(); syncMediaSession() } }
+                override fun onIsPlayingChanged(playing: Boolean) {
+                    if(active()) {
+                        if(playing && library.danmakuEnabled) danmakuOverlay?.start() else danmakuOverlay?.stop()
+                        if(hud.visibility==View.VISIBLE) showHud()
+                        syncMediaSession()
+                    }
+                }
                 override fun onPlaybackParametersChanged(parameters: PlaybackParameters) { if(active()) syncMediaSession() }
                 override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo,newPosition: Player.PositionInfo,reason: Int) { if(active()) syncMediaSession() }
                 override fun onPlayerError(error: PlaybackException) { if(active()) playerFailure(error) }
@@ -2065,6 +2084,7 @@ class MainActivity: Activity() {
         dialog.show(); dialog.listView.setSelection(selected); dialog.listView.requestFocus()
     }
     private fun showQualityPicker(anchor: TextView,inPlayer: Boolean) {
+        qualityDialog?.dismiss()
         val options=PlaybackQuality.options
         val dialog=AlertDialog.Builder(this).setTitle("全局默认清晰度")
             .setSingleChoiceItems(options.map { "${it}P" }.toTypedArray(),options.indexOf(library.maxQuality)) { popup,index ->
@@ -2073,12 +2093,17 @@ class MainActivity: Activity() {
                 if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "清晰度 " else "默认清晰度  ·  ")+"${target}P"
                 if(inPlayer && changed) playEpisode(episodeIndex,currentPosition(),player?.playWhenReady ?: requestedAutoplay)
             }.setNegativeButton("取消",null).create()
-        dialog.setOnDismissListener { if(anchor.isAttachedToWindow) anchor.requestFocus() }
+        qualityDialog=dialog
+        dialog.setOnDismissListener {
+            if(qualityDialog===dialog) qualityDialog=null
+            if(anchor.isAttachedToWindow) anchor.requestFocus()
+        }
         dialog.show()
     }
     private fun showEpisodePanel(anchor: View) {
         val data=detail ?: return
         if(episodePanel!=null) return
+        touchController?.cancel()
         val ticket=generation
         val overlayWasVisible=hud.visibility==View.VISIBLE
         requestedAutoplay=player?.playWhenReady ?: requestedAutoplay
@@ -2117,7 +2142,7 @@ class MainActivity: Activity() {
         cancelRecovery(); cancelPrefetch(); mediaSession.deactivate(); tvTools.close()
         val wasForeground=foreground; foreground=false
         val oldPanel=episodePanel; episodePanel=null; oldPanel?.dismiss(); foreground=wasForeground
-        speedDialog?.dismiss(); speedDialog=null
+        dismissTransientDialogs()
         main.removeCallbacks(hideHud); main.removeCallbacks(seekRunnable); pendingSeek=null
         playerListener?.let { player?.removeListener(it) }; playerListener=null
         video?.close(); video=null; playerView?.player=null; playerView=null; player?.release(); player=null; playbackReady=false; transportPlay=null; sleepButton=null
@@ -2151,6 +2176,8 @@ class MainActivity: Activity() {
                 }
                 if(controller.handleTouch(event)) return true
             }
+        } else {
+            touchController?.cancel()
         }
         return super.dispatchTouchEvent(event)
     }
@@ -2204,7 +2231,7 @@ class MainActivity: Activity() {
         super.onConfigurationChanged(newConfig)
         if(!library.isLoaded) return
         when(screen) {
-            "player" -> { val position=currentPosition(); val autoplay=player?.playWhenReady==true && !pausedForLifecycle; playEpisode(episodeIndex,position,autoplay) }
+            "player" -> if(foreground) { val position=currentPosition(); val autoplay=player?.playWhenReady==true && !pausedForLifecycle; playEpisode(episodeIndex,position,autoplay) }
             "detail" -> if(detail!=null) showDetail(false)
             else -> showCatalog()
         }
@@ -2232,19 +2259,22 @@ class MainActivity: Activity() {
                 }
             }
             if(screen=="catalog") favoriteMonitor.check()
-            if(screen=="player") syncMediaSession()
+            if(screen=="player") {
+                syncMediaSession()
+                if(library.danmakuEnabled && player?.isPlaying==true) danmakuOverlay?.start()
+            }
         } else libraryLoadError?.let(::showLibraryError)
     }
     override fun onPause() {
         updater.pause()
         foreground=false; main.removeCallbacks(tick); cancelRecovery(); cancelPrefetch(); cancelPagePrefetch(); mediaSession.deactivate()
         sleepTimer.cancel(); favoriteMonitor.stop(); detailAutoplay=false; requestedAutoplay=false; pausedForLifecycle=true
-        player?.pause(); saveProgress(); library.flush(); super.onPause()
+        danmakuOverlay?.stop(); player?.pause(); saveProgress(); library.flush(); super.onPause()
     }
     override fun onStop() {
         // 只收弹窗，别关手机输入的会话：用户正拿着手机在浏览器里打字，
         // 会话一关，手机一点「发送到电视」就是「连接被拒绝」。
-        restoreStoppedPage=true; generation++; cancelWork(); tvTools.background()
+        restoreStoppedPage=true; generation++; cancelWork(); tvTools.background(); dismissTransientDialogs()
         if(screen=="player") { startPosition=currentPosition(); saveProgress(); releasePlayer() }
         artwork.cancelPage(clearMemory=true); library.flush(); super.onStop()
     }
@@ -2257,6 +2287,7 @@ class MainActivity: Activity() {
     override fun onDestroy() {
         generation++; cancelWork()
         if(networkRegistered) connectivity.unregisterNetworkCallback(networkCallback)
+        dismissTransientDialogs()
         favoriteMonitor.destroy(); tvTools.destroy(); updater.destroy(); profileUpdater.close(); saveProgress(); releasePlayer(); library.close()
         // 备着的那两集放掉：活动没了，它们也没人要了。
         pagePreparation.cancel(); nextPreparation.cancel()

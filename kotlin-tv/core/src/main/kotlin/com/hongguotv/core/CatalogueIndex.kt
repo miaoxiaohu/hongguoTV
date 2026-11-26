@@ -365,10 +365,11 @@ object CatalogueIndexDisk {
         val rows = o.getJSONArray("items")
         require(rows.length() in 1..4000)
         require(rows.length() == o.getInt("count"))
-        val entries = (0 until rows.length()).mapNotNull { index ->
+        val kinds = o.optJSONArray("kinds")
+        val pairs = (0 until rows.length()).mapNotNull { index ->
             runCatching {
                 val row = rows.getJSONObject(index)
-                Series(
+                val series = Series(
                     row.getString("i").also { require(it.matches(Regex("[0-9]{1,30}"))) },
                     row.getString("t").also { require(it.isNotBlank() && it.length <= 120) },
                     row.optString("c", "").take(400),
@@ -376,16 +377,14 @@ object CatalogueIndexDisk {
                     row.optString("b", "").take(40),
                     row.optString("g", "").take(200)
                 )
+                val route = kinds?.optString(index).orEmpty().takeIf { it.isNotEmpty() && it != "null" }
+                    ?.let { stored -> Route.fromStored(stored) }
+                series to route
             }.getOrNull()
         }
-        require(entries.isNotEmpty())
-        // An index written before this field existed has no per-entry route; every entry reads
-        // back as null and matches any filter, so an old index still browses.
-        val kinds = o.optJSONArray("kinds")
-        val routes = entries.indices.map { position ->
-            kinds?.optString(position).orEmpty().takeIf { it.isNotEmpty() && it != "null" }
-                ?.let { stored -> Route.fromStored(stored) }
-        }
+        require(pairs.isNotEmpty())
+        val entries = pairs.map { it.first }
+        val routes = pairs.map { it.second }
         // The route ids deliberately reuse the old per-type ones ("short", "comic"), so an index
         // written before AI dramas were folded in keeps its bookmark: the two routes it already
         // walked stay walked, and only "ai" is left to fetch. Without that, folding AI dramas in

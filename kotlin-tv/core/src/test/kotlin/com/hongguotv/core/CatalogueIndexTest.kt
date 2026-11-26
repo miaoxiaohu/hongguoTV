@@ -216,6 +216,17 @@ class CatalogueIndexTest {
         assertTrue(labelled.index.labelled); assertTrue(labelled.complete)
     }
 
+    @Test fun `dropping a malformed row keeps routes aligned with surviving shows`() {
+        val raw = """{"savedAt":1000,"count":3,"items":[
+            {"i":"1","t":"真人甲"},
+            {"i":"bad_id","t":"脏行"},
+            {"i":"3","t":"漫剧丙"}
+        ],"kinds":["short","short","comic"]}"""
+        val decoded = CatalogueIndexDisk.decode(raw, 2_000L)!!
+        assertEquals(listOf("1", "3"), decoded.entries.map { it.id })
+        assertEquals(listOf(Route.REAL_DRAMA, Route.COMIC_DRAMA), decoded.routes)
+    }
+
     @Test fun `a rewalk that labels a show fixes the copy an older index left unlabelled`() {
         // 补标签这一趟会把同一部剧再抓一次，同一个 id 于是出现两次：先是没标签的老行，后是记了标签
         // 的新行。老的去重留的是先到的那份，也就是没标签的那份 —— 标签补回来了、存下去了，分开搜

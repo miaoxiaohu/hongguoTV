@@ -36,16 +36,16 @@ object ApkCompatibility {
      */
     fun blocker(candidate: ApkFacts, installed: ApkFacts, update: AppUpdate): String? {
         if (candidate.packageName != installed.packageName)
-            return "包名不一致（\${candidate.packageName} ≠ \${installed.packageName}）"
+            return "包名不一致（${candidate.packageName} ≠ ${installed.packageName}）"
         if (candidate.versionCode != update.versionCode)
-            return "版本号与更新说明不一致（\${candidate.versionCode} ≠ \${update.versionCode}）"
+            return "版本号与更新说明不一致（${candidate.versionCode} ≠ ${update.versionCode}）"
         if (candidate.versionName != update.versionName)
-            return "版本名与更新说明不一致（\${candidate.versionName} ≠ \${update.versionName}）"
+            return "版本名与更新说明不一致（${candidate.versionName} ≠ ${update.versionName}）"
         if (candidate.versionCode <= installed.versionCode)
-            return "不是更新的版本（\${candidate.versionCode} ≤ 已装的 \${installed.versionCode}）"
+            return "不是更新的版本（${candidate.versionCode} ≤ 已装的 ${installed.versionCode}）"
         val candidateMinSdk = candidate.minSdk
         if (candidateMinSdk != null && candidateMinSdk > 0 && candidateMinSdk != update.minSdk)
-            return "最低系统版本与更新说明不一致（\$candidateMinSdk ≠ \${update.minSdk}）"
+            return "最低系统版本与更新说明不一致（$candidateMinSdk ≠ ${update.minSdk}）"
         // 只有两边都真的读到签名才比较；任一边读不到就放行，交给系统安装器判断。
         if (candidate.signers.isNotEmpty() && installed.signers.isNotEmpty() && candidate.signers != installed.signers)
             return "签名与已安装版本不一致"

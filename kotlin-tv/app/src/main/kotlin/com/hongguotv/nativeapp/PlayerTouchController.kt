@@ -182,18 +182,22 @@ class PlayerTouchController(
                 finishGesture(x,y)
                 gestureFinished=true
             }
-            MotionEvent.ACTION_CANCEL -> {
-                // 取消必须收尾，不能直接丢：core 里会残留双击标志，
-                // 把之后的普通单击误判成双击而凭空开始/暂停播放。
-                main.removeCallbacks(confirmSingle)
-                machine.reset()
-                gestureFinished=false
-                edgeBlocked=false
-                hidePreview(); hideVolume()
-            }
+            MotionEvent.ACTION_CANCEL -> cancel()
             else -> return false
         }
         return true
+    }
+
+    /** 外部打断手势（如播放出错或弹出选集面板）时立即收尾，防止预览浮层卡住。 */
+    fun cancel() {
+        // 取消必须收尾，不能直接丢：core 里会残留双击标志，
+        // 把之后的普通单击误判成双击而凭空开始/暂停播放。
+        main.removeCallbacks(confirmSingle)
+        machine.reset()
+        gestureFinished=false
+        hudBlocked=false
+        edgeBlocked=false
+        hidePreview(); hideVolume()
     }
 
     /**

@@ -58,7 +58,7 @@ class Library(context: Context) {
     @Volatile private var rankingCache = HotRank.Cache()
     private var catalogueBuilding = false
     private var loading = false
-    private var closed = false
+    @Volatile private var closed = false
     private val readyCallbacks = mutableListOf<() -> Unit>()
     private val errorCallbacks = mutableListOf<(Throwable) -> Unit>()
     val isLoaded get() = index != null
@@ -236,12 +236,13 @@ class Library(context: Context) {
                     main.post { if (!closed) { catalogue = CatalogueSnapshot(snapshot, snapshotKinds, step.cursor, step.done, System.currentTimeMillis()); onProgress(total) } }
                     // Checkpointing on every page would re-encode the whole library 102 times on a
                     // box that can barely parse one of them.
-                    if (total - checkpointed >= CHECKPOINT_EVERY) {
+                    if (!closed && total - checkpointed >= CHECKPOINT_EVERY) {
                         checkpointed = total
                         checkpoint(snapshot, snapshotKinds, step.cursor, step.done)
                     }
                 }
             )
+            if (closed) return@execute
             checkpoint(collected.entries, collected.routes, walk.cursor, walk.done)
             main.post { if (!closed) catalogueBuilding = false }
             Log.i(
@@ -254,10 +255,15 @@ class Library(context: Context) {
     }
     /** Hands an immutable snapshot to the write thread; encode() runs there, not here. */
     private fun checkpoint(collected: List<Series>, kinds: List<Route?>, cursor: Map<Route, Int>, done: Set<Route>) {
+        if (closed) return
         val snapshot = collected.toList()
         val snapshotKinds = kinds.toList()
         val now = System.currentTimeMillis()
-        catalogueWrites.submit(mapOf("index" to { CatalogueIndexDisk.encode(snapshot, snapshotKinds, cursor, done, now) }))
+        try {
+            catalogueWrites.submit(mapOf("index" to { CatalogueIndexDisk.encode(snapshot, snapshotKinds, cursor, done, now) }))
+        } catch (e: IllegalStateException) {
+            if (!closed) throw e
+        }
     }
     /** Throws the index away so the next build starts from an empty file rather than a merged one. */
     fun clearCatalogue() { catalogue = null; catalogueWrites.submit(mapOf("index" to { null })) }

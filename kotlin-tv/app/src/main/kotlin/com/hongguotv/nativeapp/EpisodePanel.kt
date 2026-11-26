@@ -26,6 +26,14 @@ class EpisodePanel(
     private val focusRouter=FocusRouter()
     private var group=current/20
     private var focused=current
+    private var layoutRoot: View?=null
+    private var layoutListener: ViewTreeObserver.OnGlobalLayoutListener?=null
+    private fun detachLayoutListener() {
+        val listener=layoutListener ?: return
+        val observer=layoutRoot?.viewTreeObserver
+        if(observer!=null && observer.isAlive) observer.removeOnGlobalLayoutListener(listener)
+        layoutListener=null; layoutRoot=null
+    }
     private fun dp(n: Int)=(n*activity.resources.displayMetrics.density).toInt()
     private fun label(value: String,size: Float=17f)=TextView(activity).apply { text=value; textSize=size; setTextColor(TvStyle.text); setPadding(dp(8),dp(6),dp(8),dp(6)) }
     private fun button(value: String,active: Boolean=false,onFocus: (() -> Unit)?=null,action: ()->Unit)=label(value,16f).apply {
@@ -37,7 +45,7 @@ class EpisodePanel(
     }
     fun show() {
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-        dialog.setOnDismissListener { closed() }
+        dialog.setOnDismissListener { detachLayoutListener(); closed() }
         render(); dialog.show()
         dialog.window?.apply {
             setBackgroundDrawableResource(android.R.color.transparent)
@@ -82,11 +90,12 @@ class EpisodePanel(
         // 面板里的四个方向由焦点图统一算：同一行左右环绕，上下按位置对齐。
         // 以前这里是手写的 nextFocus*Id，第一行按「上」按格子下标分派（0—2 去「上一组」、
         // 3—4 去「下一组」），纯属数下标数出来的。
+        detachLayoutListener()
         dialog.setContentView(content)
         // 面板每一组重画一次，落点跟着重算一次。
-        content.viewTreeObserver.addOnGlobalLayoutListener(object: ViewTreeObserver.OnGlobalLayoutListener {
-            override fun onGlobalLayout() { focusRouter.apply(content) }
-        })
+        val listener=ViewTreeObserver.OnGlobalLayoutListener { focusRouter.apply(content) }
+        layoutRoot=content; layoutListener=listener
+        content.viewTreeObserver.addOnGlobalLayoutListener(listener)
         if(cells.isNotEmpty()) cells[(focused-group*20).coerceIn(0,cells.lastIndex)].requestFocus()
     }
 }

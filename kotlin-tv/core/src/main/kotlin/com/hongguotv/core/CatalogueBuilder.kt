@@ -113,10 +113,12 @@ class CatalogueBuilder(
                 val fresh = result.items.filter { seen.add(it.id) }
                 collected += fresh
                 repeat(fresh.size) { collectedRoutes += route }
-                onPage(WalkStep(fresh, route, collectedRoutes.size, cursor.toMap(), finished.toSet()))
                 // No rows, or the site saying this was the last page, ends that route. Left
                 // unfinished on MAX_PAGES, which is a runaway hasMore rather than an end.
-                if (result.items.isEmpty() || !result.hasMore) { finished += route; break }
+                val routeDone = result.items.isEmpty() || !result.hasMore
+                if (routeDone) finished += route
+                onPage(WalkStep(fresh, route, collectedRoutes.size, cursor.toMap(), finished.toSet()))
+                if (routeDone) break
             }
             if (isCancelled()) break
         }
@@ -151,7 +153,7 @@ class CatalogueBuilder(
     }
 
     /** @return false when the thread was interrupted during the wait. */
-    private fun pause(): Boolean = try { Thread.sleep(retryPauseMillis); true } catch (_: InterruptedException) { false }
+    private fun pause(): Boolean = try { Thread.sleep(retryPauseMillis); true } catch (_: InterruptedException) { Thread.currentThread().interrupt(); false }
 
     companion object {
         /** 34 pages measured per catalogue; the cap is a guard against a runaway hasMore. */

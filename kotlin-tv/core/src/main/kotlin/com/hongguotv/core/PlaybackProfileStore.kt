@@ -10,6 +10,8 @@ import java.io.File
  * 不去猜、不去修补 —— 一份坏档案比没有档案更危险。
  */
 class PlaybackProfileStore(private val file: File) {
+    private val lock = Any()
+
     fun load(): PlaybackProfile? {
         if (!file.isFile) return null
         val text = try {
@@ -25,23 +27,27 @@ class PlaybackProfileStore(private val file: File) {
     }
 
     /** 写缓存。先写临时文件再替换，免得中途断电留下半份档案。 */
-    fun save(profile: PlaybackProfile) {
+    fun save(profile: PlaybackProfile) = synchronized(lock) {
         val target = file.absoluteFile
         target.parentFile?.mkdirs()
         val partial = File(target.parentFile, target.name + ".part")
-        partial.writeText(profile.toJson().toString(), Charsets.UTF_8)
         try {
-            java.nio.file.Files.move(
-                partial.toPath(), target.toPath(),
-                java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-            )
-        } catch (_: Exception) {
-            // 有些文件系统不支持原子替换，退回普通替换。
-            java.nio.file.Files.move(
-                partial.toPath(), target.toPath(),
-                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-            )
+            partial.writeText(profile.toJson().toString(), Charsets.UTF_8)
+            try {
+                java.nio.file.Files.move(
+                    partial.toPath(), target.toPath(),
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                )
+            } catch (_: Exception) {
+                // 有些文件系统不支持原子替换，退回普通替换。
+                java.nio.file.Files.move(
+                    partial.toPath(), target.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                )
+            }
+        } finally {
+            partial.delete()
         }
     }
 }

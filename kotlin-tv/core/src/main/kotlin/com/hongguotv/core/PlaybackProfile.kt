@@ -213,8 +213,21 @@ class PlaybackProfile(
         /** host 的合法形状。 */
         val HOST_PATTERN = Regex("[a-z0-9.-]{1,120}")
 
-        /** 设备档案里允许引用的身份字段。 */
-        private val DEVICE_REFS = setOf("cdid", "iid", "device_id", "klink_egdi", "id", "device_level")
+        /** 设备档案（model 门 query）里允许引用的身份字段。 */
+        private val IDENTITY_QUERY_REFS = setOf("cdid", "iid", "device_id", "klink_egdi")
+
+        /** 分集参数（tab 门 query）里允许引用的字段。 */
+        private val TAB_QUERY_REFS = IDENTITY_QUERY_REFS + setOf("id", "device_level")
+
+        /** medusa 各阶段可用引用的类型表，用于严格校验类型兼容与求值顺序。 */
+        private val MEDUSA_BASE_REF_TYPES = mapOf(
+            "ts" to "sint", "nowMs" to "sint", "processStarted" to "sint",
+            "envLaunch" to "sint", "envPid" to "sint",
+            "device_id" to "string", "version_name" to "string", "device_type" to "string",
+            "device_brand" to "string", "os_version" to "string", "channel" to "string",
+            "secToken" to "string", "license" to "string",
+            "f13" to "bytes", "query6" to "bytes", "magic" to "bytes", "flags" to "bytes",
+        )
 
         /** medusa 必须能从设备档案里拿到的字段（少一个就是 HTTP 200 + 0 字节）。 */
         private val REQUIRED_DEVICE_KEYS = setOf("device_id", "version_name", "device_type", "device_brand", "os_version", "channel")
@@ -453,25 +466,42 @@ class PlaybackProfile(
         require(v5.tabGate.path.startsWith("/")) { "分集门 path 必须以 / 开头" }
         require(v5.tabGate.userAgent.isNotBlank()) { "分集门 UA 不能为空" }
         require(v5.modelBody.contains("\${id}") && v5.modelBody.contains("\${device_level}")) { "单集门正文模板缺占位符" }
+        try {
+            JSONObject(modelBody("0"))
+        } catch (_: Exception) {
+            throw IllegalArgumentException("单集门正文模板不是合法 JSON")
+        }
 
         val deviceKeys = v5.deviceProfile.fields.map { it.key }.toSet()
         for (key in REQUIRED_DEVICE_KEYS) require(deviceKeys.contains(key)) { "设备档案缺字段：$key" }
         for (field in v5.deviceProfile.fields) {
-            if (field.ref != null) require(DEVICE_REFS.contains(field.ref)) { "设备档案引用了未知的身份字段：${field.ref}" }
+            if (field.ref != null) require(IDENTITY_QUERY_REFS.contains(field.ref)) { "设备档案引用了未知的身份字段：${field.ref}" }
         }
         for (field in v5.tabQuery.fields) {
-            if (field.ref != null) require(DEVICE_REFS.contains(field.ref)) { "分集参数引用了未知的取值：${field.ref}" }
+            if (field.ref != null) require(TAB_QUERY_REFS.contains(field.ref)) { "分集参数引用了未知的取值：${field.ref}" }
         }
 
-        for (list in listOf(v5.medusa.device, v5.medusa.env, v5.medusa.envSub13, v5.medusa.nested, v5.medusa.message)) {
+        val stages = listOf(
+            v5.medusa.device to MEDUSA_BASE_REF_TYPES,
+            v5.medusa.envSub13 to (MEDUSA_BASE_REF_TYPES + ("device" to "bytes")),
+            v5.medusa.env to (MEDUSA_BASE_REF_TYPES + mapOf("device" to "bytes", "envSub13" to "bytes")),
+            v5.medusa.nested to (MEDUSA_BASE_REF_TYPES + mapOf("device" to "bytes", "envSub13" to "bytes", "env" to "bytes")),
+            v5.medusa.message to (MEDUSA_BASE_REF_TYPES + mapOf(
+                "device" to "bytes", "envSub13" to "bytes", "env" to "bytes", "nested" to "bytes", "rand" to "sint",
+            )),
+        )
+        for ((list, allowed) in stages) {
             require(list.isNotEmpty()) { "medusa 里有空字段表" }
             for (field in list) {
-                if (field.ref == null) continue
-                require(field.ref in RUNTIME_REFS || field.ref in IDENTITY_REFS) { "medusa 引用了未知的取值：${field.ref}" }
+                val ref = field.ref ?: continue
+                val expectedType = allowed[ref]
+                require(expectedType != null) { "medusa 引用了未知或尚未生成的取值：$ref" }
+                require(field.type == expectedType) { "medusa 字段 $ref 类型不匹配：期望 $expectedType，实际 ${field.type}" }
             }
         }
         // medusa 明文里引用到的身份字段，必须真的在设备档案里。
-        val used = (v5.medusa.device + v5.medusa.env + v5.medusa.message).filter { it.ref in IDENTITY_REFS }.map { it.ref!! }.toSet()
+        val allMedusa = v5.medusa.device + v5.medusa.env + v5.medusa.envSub13 + v5.medusa.nested + v5.medusa.message
+        val used = allMedusa.filter { it.ref in IDENTITY_REFS }.map { it.ref!! }.toSet()
         for (ref in used) require(deviceKeys.contains(ref)) { "设备档案缺 medusa 需要的字段：$ref" }
     }
 
@@ -495,6 +525,7 @@ object PlaybackProfiles {
      *
      * 版本号只增不减：远端档案比当前旧就丢掉（防止缓存回退，也防止有人把旧档案重新推上去）。
      */
+    @Synchronized
     fun apply(profile: PlaybackProfile): Boolean {
         if (profile.revision <= current.revision) return false
         current = profile
@@ -502,6 +533,7 @@ object PlaybackProfiles {
     }
 
     /** 回到内置默认（只给测试用）。 */
+    @Synchronized
     fun reset() {
         current = PlaybackProfile.builtin()
     }

@@ -17,6 +17,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 /** Short-lived LAN transfer. Uploaded records are validated here, but only the TV may apply them. */
 class LibraryTransferServer(address: String,private val backup: String,private val onImport: (BackupData)->Unit,
     private val onExpired: ()->Unit={},ttlMillis: Long=300_000): Closeable {
+    init {
+        require(backup.toByteArray(Charsets.UTF_8).size<=LibraryBackup.MAX_BYTES)
+    }
     private val stopped=AtomicBoolean(false)
     private val expiry=Timer("hongguotv-transfer-expiry",true)
     private val local=InetAddress.getByName(address).also { require(it.isLoopbackAddress || it.isSiteLocalAddress) }
@@ -28,7 +31,6 @@ class LibraryTransferServer(address: String,private val backup: String,private v
     val url="http://$host/$token"
     private var downloaded=false
     init {
-        require(backup.toByteArray(Charsets.UTF_8).size<=LibraryBackup.MAX_BYTES)
         expiry.schedule(object: TimerTask() { override fun run()=expire() },ttlMillis.coerceIn(1,300_000))
         Thread({ serve() },"hongguotv-library-transfer").apply { isDaemon=true; start() }
     }
@@ -68,7 +70,8 @@ class LibraryTransferServer(address: String,private val backup: String,private v
         }
         if(stopped.get() || System.nanoTime()>=deadline) return respond(socket,410,"二维码已过期")
         if(headers["host"]!=host || request[1] !in listOf("/$token","/$token/download","/$token/import")) return respond(socket,404,"页面不存在")
-        if(headers["origin"]!=null && headers["origin"]!="http://$host") return respond(socket,403,"来源不匹配")
+        val origin=headers["origin"]
+        if(origin!=null && origin!="null" && origin!="http://$host") return respond(socket,403,"来源不匹配")
         if(headers["sec-fetch-site"]=="cross-site") return respond(socket,403,"来源不匹配")
         if(request[0]=="GET" && request[1]=="/$token") return respond(socket,200,page())
         if(request[0]=="GET" && request[1]=="/$token/download") {
@@ -92,9 +95,22 @@ class LibraryTransferServer(address: String,private val backup: String,private v
         finally { close(); onImport(data) }
     }
     private fun page()="""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>红果TV+ · 记录备份</title><style>body{font:18px sans-serif;background:#10131b;color:#f4f5f8;max-width:540px;margin:32px auto;padding:20px;line-height:1.6}a,button{display:block;background:#ff634c;color:white;border:0;border-radius:8px;padding:14px;text-align:center;text-decoration:none;font:inherit;margin:16px 0}input{max-width:100%;font:inherit}button{width:100%}</style><h1>备份与恢复</h1><p>保存本机收藏、观看位置、稍后看、隐藏推荐、搜索记录和播放设置。文件仅在手机与电视之间传输，不包含平台账号。</p><a href="/$token/download" download>下载电视备份</a><h2>从备份恢复</h2><input id="file" type="file" accept=".json,application/json"><button id="send">发送到电视确认</button><p id="status">最多 2 MB；需要在电视上确认后才会合并。</p><p>关闭电视窗口即失效，最长 5 分钟。</p><script nonce="$token">document.getElementById('send').onclick=function(){var file=document.getElementById('file').files[0],status=document.getElementById('status'),button=this;if(!file||file.size>2097152){status.textContent='请选择不超过 2 MB 的备份文件';return}button.disabled=true;var reader=new FileReader();reader.onerror=function(){status.textContent='文件读取失败';button.disabled=false};reader.onload=function(){fetch('/$token/import',{method:'POST',headers:{'Content-Type':'application/json'},body:reader.result}).then(function(r){return r.text().then(function(t){status.textContent=t;if(!r.ok)button.disabled=false})}).catch(function(){status.textContent='连接已失效，请在电视上重新打开二维码';button.disabled=false})};reader.readAsText(file)};</script></html>"""
+    private fun reasonPhrase(code: Int): String = when(code) {
+        200 -> "OK"
+        400 -> "Bad Request"
+        403 -> "Forbidden"
+        404 -> "Not Found"
+        405 -> "Method Not Allowed"
+        408 -> "Request Timeout"
+        410 -> "Gone"
+        413 -> "Payload Too Large"
+        431 -> "Request Header Fields Too Large"
+        else -> "Error"
+    }
     private fun respond(socket: Socket,code: Int,message: String,type: String=if(message.startsWith("<!doctype")) "text/html; charset=utf-8" else "text/plain; charset=utf-8",extra: String="") {
         val body=message.toByteArray(Charsets.UTF_8)
-        val header="HTTP/1.1 $code Response\r\nContent-Type: $type\r\nContent-Length: ${body.size}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-$token'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'\r\n$extra\r\n"
+        val date=java.time.format.DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss zzz",java.util.Locale.US).format(java.time.ZonedDateTime.now(java.time.ZoneId.of("GMT")))
+        val header="HTTP/1.1 $code ${reasonPhrase(code)}\r\nContent-Type: $type\r\nContent-Length: ${body.size}\r\nDate: $date\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: same-origin\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-$token'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'\r\n$extra\r\n"
         socket.getOutputStream().apply { write(header.toByteArray(Charsets.US_ASCII)); write(body); flush() }
     }
 }

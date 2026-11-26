@@ -4,6 +4,19 @@
 
 电视「检查更新」弹窗里那句短说明，取自每份 `RELEASE_<版本>.md` 中 `<!-- notes -->` 与 `<!-- /notes -->` 之间的块，改文件别动标记。
 
+## 1.0.1 · 全量稳定性与边界缺陷修复
+
+2026-11-27：对 `core` 和 `app` 模块做了一轮全面排查与修复：补齐 1.0.0 协议档案的严格校验与单次请求快照一致；
+修复全库索引期间退出崩溃、`TvTools` / `DanmakuSession` / `EpisodePanel` 资源泄漏、局域网备份服务在 Chromium / iOS 上导入失败、
+切清晰度命中旧缓存、断网/取消误触发换号兜底、APK 兼容提示字面量转义、索引脏行分类错位及多项页面生命周期问题。
+[完整说明](RELEASE_1.0.1.md)
+
+- **协议档案与取址**：`PlaybackProfile` 拆分 query 引用集、按阶段校验 `medusa` 类型与顺序、校验 `modelBody` JSON；
+  `PlaybackProfiles` 加同步、`Signer`/`V5Playback` 透传单次快照；`ContentRepository` 拆分榜单与身份锁、缓存键带清晰度、取消/断网不再误换号。
+- **传输与索引**：`LibraryTransferServer` 补标准状态行/`Date`/`same-origin` 并接受 `Origin: null`；`CatalogueIndexDisk` 过滤脏行保持 `routes` 对齐；`ApkCompatibility` 去掉 `\$` 转义。
+- **端上生命周期**：修复 `Library` 退出写盘崩溃、`TvTools.destroy()` 关会话、`DanmakuSession` 防过期回调与关客户端、`EpisodePanel` 移除布局监听、`MainActivity` 统一收弹窗/暂停停弹幕/后台配置变化不重建播放器。
+- 单测与探针：`:core:test`、`:app:testDebugUnitTest`、`:app:lintRelease` 全绿；real-drama 8/8、comic-drama 8/8 全通过（1080P）。
+
 ## 1.0.0 · 取址协议里的数据抽成可远程下发的档案
 
 2026-11-23：过去三个月站方改了三轮取址协议，每次都要发一版 APK。

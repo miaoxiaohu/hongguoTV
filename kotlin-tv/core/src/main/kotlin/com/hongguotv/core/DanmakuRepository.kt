@@ -26,12 +26,20 @@ import java.util.concurrent.TimeUnit
  * 一次给 30 秒窗口（[DANMAKU_WINDOW_MS]），要整集就按返回的起点一页页往下问。
  */
 class DanmakuRepository(
-    private val http: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10,TimeUnit.SECONDS).readTimeout(15,TimeUnit.SECONDS).callTimeout(25,TimeUnit.SECONDS)
-        .dns(PreferIpv4Dns()).build(),
-    private val clock: () -> Long = System::currentTimeMillis
-) {
+    private val http: OkHttpClient,
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val ownsHttp: Boolean = false,
+) : java.io.Closeable {
+    constructor(clock: () -> Long = System::currentTimeMillis) : this(
+        OkHttpClient.Builder()
+            .connectTimeout(10,TimeUnit.SECONDS).readTimeout(15,TimeUnit.SECONDS).callTimeout(25,TimeUnit.SECONDS)
+            .dns(PreferIpv4Dns()).build(),
+        clock,
+        ownsHttp = true,
+    )
+
     private val signer=Signer()
+    private val throttleLock=Any()
 
     /**
      * 两次请求之间的最小间隔。
@@ -61,11 +69,23 @@ class DanmakuRepository(
             .apply { signed.headers.forEach { (k,v) -> header(k,v) } }
             .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
-        http.newCall(request).execute().use { response ->
+        return RequestScope.execute(http.newCall(request)) { response ->
             val text=response.body?.string().orEmpty()
             if(!response.isSuccessful) throw IOException("弹幕接口返回 HTTP ${response.code}")
             if(text.isBlank()) throw IOException("弹幕接口返回空响应")
-            return parseDanmakuWindow(text,startMs)
+            parseDanmakuWindow(text,startMs)
+        }
+    }
+
+    fun cancel() {
+        http.dispatcher.cancelAll()
+    }
+
+    override fun close() {
+        cancel()
+        if (ownsHttp) {
+            http.connectionPool.evictAll()
+            http.dispatcher.executorService.shutdown()
         }
     }
 
@@ -94,7 +114,7 @@ class DanmakuRepository(
             .toString().toByteArray()
     }
 
-    private fun throttle() {
+    private fun throttle() = synchronized(throttleLock) {
         val now=clock()
         val wait=lastRequestAt+MIN_INTERVAL_MS-now
         if(wait>0) try { Thread.sleep(wait) } catch(e: InterruptedException) { Thread.currentThread().interrupt() }

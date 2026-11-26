@@ -96,7 +96,7 @@ class DanmakuSettingsDialog(
         override fun onActivityPaused(host: Activity)=Unit
         override fun onActivityStopped(host: Activity) { stopWith(host) }
         override fun onActivitySaveInstanceState(host: Activity,outState: Bundle)=Unit
-        override fun onActivityDestroyed(host: Activity) { stopWith(host) }
+        override fun onActivityDestroyed(host: Activity) { if(host===activity) dismiss() }
     }
 
     /**

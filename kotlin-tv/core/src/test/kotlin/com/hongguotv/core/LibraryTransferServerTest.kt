@@ -62,4 +62,20 @@ class LibraryTransferServerTest {
             assertTrue(expired.await(2,TimeUnit.SECONDS)); assertTrue(runCatching { request(expiring) }.isFailure)
         }
     }
+    @Test fun `responses carry standard status line Date header same-origin policy and accept null origin`() {
+        val latch=CountDownLatch(1); var received: BackupData?=null
+        LibraryTransferServer("127.0.0.1",backup,{ received=it; latch.countDown() }).use { server ->
+            val page=request(server)
+            assertTrue(page,page.startsWith("HTTP/1.1 200 OK"))
+            assertFalse(page.contains("HTTP/1.1 200 Response"))
+            assertTrue(page.contains("Referrer-Policy: same-origin"))
+            assertFalse(page.contains("Referrer-Policy: no-referrer"))
+            val date=page.lines().firstOrNull { it.startsWith("Date: ") }
+            assertNotNull("响应缺少 Date 头",date)
+            assertTrue(date!!,Regex("^Date: [A-Z][a-z]{2}, \\d{2} [A-Z][a-z]{2} \\d{4} \\d{2}:\\d{2}:\\d{2} GMT$").matches(date))
+            val reply=request(server,"/import",backup,"Origin: null\r\n")
+            assertTrue(reply,reply.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(latch.await(2,TimeUnit.SECONDS)); assertEquals(data,received)
+        }
+    }
 }

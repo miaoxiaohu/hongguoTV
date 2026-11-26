@@ -68,15 +68,16 @@ class DanmakuSession(
      */
     fun start(seriesId: String,vid: String,durationMs: Long=0L,startMs: Long=0L) {
         val from=startMs.coerceAtLeast(0L)
-        synchronized(lock) {
+        val mine=synchronized(lock) {
             this.seriesId=seriesId; this.vid=vid; this.durationMs=durationMs
             loadedUntilMs=from; loading=false; items=emptyList<Danmaku>(); failed=false
             positionMs=from; positionAt=SystemClock.elapsedRealtime()
-            epoch++
+            ++epoch
         }
+        repository.cancel()
         running.set(true)
         // 换集了：先把上一集的弹幕从画面上撤掉，别让它停在新集的开头。
-        main.post { onItems?.invoke(emptyList()) }
+        main.post { if(synchronized(lock) { mine==epoch }) onItems?.invoke(emptyList()) }
         fetch(from)
     }
 
@@ -144,10 +145,12 @@ class DanmakuSession(
                     all
                 }
                 // 拉到最后一批时 running 会被置否，但那一批仍要显示 —— 所以看的是编号，不是 running。
-                if(merged!=null) main.post { onItems?.invoke(merged) }
+                if(merged!=null) main.post { if(synchronized(lock) { mine==epoch }) onItems?.invoke(merged) }
             } catch(e: Exception) {
-                synchronized(lock) { if(mine==epoch) { loading=false; failed=true } }
-                main.post { onFailure?.invoke(e) }
+                val active=synchronized(lock) {
+                    if(mine==epoch) { loading=false; failed=true; true } else false
+                }
+                if(active) main.post { if(synchronized(lock) { mine==epoch }) onFailure?.invoke(e) }
             }
         }
     }
@@ -156,12 +159,14 @@ class DanmakuSession(
     fun stop() {
         running.set(false)
         synchronized(lock) { epoch++; loading=false; items=emptyList<Danmaku>(); loadedUntilMs=0L }
+        repository.cancel()
     }
 
-    /** App 退出时把线程池收掉。 */
+    /** App 退出时把线程池和 HTTP 客户端收掉。 */
     fun close() {
         stop()
         worker.shutdownNow()
+        Thread({ repository.close() },"hongguotv-danmaku-cleanup").start()
     }
 
     fun snapshot(): List<Danmaku> = synchronized(lock) { items }

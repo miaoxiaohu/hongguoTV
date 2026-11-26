@@ -69,6 +69,9 @@ class ApkCompatibilityTest {
 
     @Test fun minSdkNotMatchingTheManifestIsRejected() {
         val other = candidate.copy(minSdk = 28)
-        assertNotNull(ApkCompatibility.blocker(other, installed, update()))
+        val reason = ApkCompatibility.blocker(other, installed, update())
+        assertNotNull(reason)
+        assertTrue("报错文案应填入实际数值：$reason", reason!!.contains("28") && reason.contains("26"))
+        assertFalse("报错文案不应出现未展开的模板字面量：$reason", reason.contains("\${"))
     }
 }
