@@ -11,9 +11,21 @@
 
 全部版本的变更说明按版本倒序列在 [CHANGELOG.md](CHANGELOG.md)。
 
-站方播放取址的现状（2026-10-27 起由「签名 + 现造身份」改为「注册身份 + 无签名」）与整轮实测见 [站方取址接口实测](../docs/research/2026-10-28-hongguo-playback-endpoint.md) —— 同一篇里也记了「站方」在这个仓库里的确切含义，以及站方再改接口时该怎么排查。
+现行播放取址走站方 v5 协议，自 1.0.0 起将易变的协议数据（medusa 明文字段表、magic/sbox、门地址与设备档案）外置到仓库根的 [playback-profile.json](../playback-profile.json)，端上启动时自动拉取覆盖内置默认。早期实测脉络见 [站方取址接口实测](../docs/research/2026-10-28-hongguo-playback-endpoint.md)。
 
-0.9.81 把弹幕的读和排布重排了一遍：长句不再读不完、同轨不再叠字、弹幕铺满所有可用轨道；见下面的「0.9.81 修复」。正式包沿用同一套发布签名，可直接覆盖安装并保留收藏和观看记录。
+## 1.0.1 修复
+
+- **协议档案与播放取址**：补齐 `PlaybackProfile` 的严格校验（区分单集门/分集门引用、按阶段校验 `medusa` 类型与顺序、校验 `modelBody` 为合法 JSON）与单次请求快照一致，消除热更新时的跨版本撕裂；断网或取消播放时立即上抛，不再误触发换号与旧链兜底；拆分榜单与设备注册锁；地址缓存键带清晰度，切换清晰度不再命中旧缓存。
+- **局域网备份传输兼容**：`LibraryTransferServer` 补齐标准状态行、RFC 1123 `Date` 头与 `Referrer-Policy: same-origin` 并放行 `Origin: null`，修复 Chromium / iOS 手机浏览器导入失败。
+- **端上稳定性与防泄漏**：修复全库索引期间退出 Activity 的崩溃、`TvTools` 手机会话泄漏、`DanmakuSession` 客户端泄漏与切集旧回调串集、`EpisodePanel` 布局监听泄漏、弹窗未统一关闭、暂停时弹幕空转刷新及后台配置变化误建播放器等问题。
+
+逐条说明见 [1.0.1 发布说明](RELEASE_1.0.1.md)。正式包沿用同一套发布签名，可直接覆盖安装并保留收藏和观看记录。
+
+## 1.0.0 新增
+
+- **取址协议档案外置**：将站方历次变更的数据部分（medusa 字段表、magic/license/signKey/sbox、签名头集合、单集/分集门地址与设备档案）抽成 JSON 档案（仓库根 `playback-profile.json`），端上启动时读本地缓存并在后台拉取远端新版本；拉不到、校验不过或版本号不新时一律回退内置默认。
+
+逐条说明见 [1.0.0 发布说明](RELEASE_1.0.0.md)。
 
 ## 0.9.83 新增
 
@@ -270,9 +282,10 @@ HONGGUOTV_VERSION_CODE=9010 HONGGUOTV_VERSION_NAME=0.9.10 ./scripts/build-kotlin
 
 ## 工程结构
 
-- `core/`：纯 Kotlin 内容列表、搜索、详情、请求签名、播放地址解析、MP4 索引和分段处理；可在 JVM 测试。
-- `app/`：原生电视界面、遥控器焦点、本地收藏/进度、Media3 播放器及自定义 DataSource。
-- `core/src/test/`：固定签名对照、NIST AES-CTR 向量、跨样本/非对齐分段、AVC 索引恢复及畸形输入校验。
+- `core/`：纯 Kotlin 内容列表、搜索、详情、请求签名、协议档案（`PlaybackProfile*`）、播放地址解析、弹幕、MP4 索引和分段处理；可在 JVM 测试。
+- `app/`：原生电视界面、遥控器焦点、本地收藏/进度、协议档案热更新（`PlaybackProfileUpdater`）、Media3 播放器及自定义 DataSource。
+- `core/src/test/`：固定签名对照、协议档案校验与导出工具、NIST AES-CTR 向量、跨样本/非对齐分段、AVC 索引恢复及畸形输入校验。
+- `tools/order_profile.py`：格式化仓库根 `playback-profile.json` 的键顺序便于 diff。
 - `tools/signing-oracle.cjs`：仅开发期生成兼容性测试样本；运行、构建 APK 不需要它。
 
 播放器直接通过 HTTPS 分段拉取数据，经本机 Kotlin 处理后交给 Media3。没有 JS 引擎或常驻内容服务。仅在用户打开「手机输入」或「手机备份与恢复」窗口时，APK 临时监听局域网 HTTP；最长 5 分钟，窗口关闭或应用进入后台后停止。备份下载每次二维码一次，上传成功后关闭会话并等待电视确认。页面不处理平台账号凭据或媒体。媒体只在内存中处理，不下载整部剧到存储。元数据响应、封面大小、索引数量和播放缓冲均有上限。
@@ -295,8 +308,8 @@ node kotlin-tv/tools/signing-oracle.cjs
 0.7.0 的交付与验证证据见 [0.7.0 交付与验证](RELEASE_0.7.0.md)。
 <!-- FINAL_0_7_0_VERIFICATION_END -->
 
-当前 `main` 分支的 `:core:test` 为 **205 项 JVM 测试全部通过**（零失败、零跳过），
-复现命令 `./kotlin-tv/gradlew -p kotlin-tv :core:test`。
+当前 `main` 分支的 `:core:test`（440+ 项 JVM 单元测试）与 `:app:testDebugUnitTest`（60 项 Android 单元测试）全部通过，`:app:lintRelease` 0 errors，
+复现命令 `./kotlin-tv/gradlew -p kotlin-tv :core:test :app:testDebugUnitTest :app:lintRelease`。
 
 既往版本已进行 JVM 单元测试、Android lint、正式 APK 构建及 Android TV API 36 模拟器上的真实播放和遥控器检查；本版最终结果以上述发布记录为准。最低 API 26 配置和静态检查不等同于实体电视验收；**Android 8.0 实体电视的芯片解码、音频输出和长期稳定性尚待实机验证**。遇到设备解码失败可尝试 720P，仍失败需对应电视的日志。
 
